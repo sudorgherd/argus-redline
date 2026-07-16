@@ -1,1 +1,3 @@
 .pio
+*.bak
+*.pre-bidir.bak
