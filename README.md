@@ -25,8 +25,13 @@ Verified behavior includes:
 
 ## Project
 
-Developed by **RaveGoat Labs** as part of the **RG Herd** privacy-first communications and coordination ecosystem.
+Developed by [RaveGoat Labs](https://ravegoat.com/) as part of the [RG Herd](https://rgherd.com/) privacy-first communications and coordination ecosystem.
 
+Related public projects:
+
+- [ARGUS](https://github.com/sudorgherd/rgherd-argus) — self-hosted dispatcher and operator coordination platform
+- [RG Herd](https://rgherd.com/) — privacy-first communications and coordination infrastructure
+- [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0) — first published radio protocol release
 
 ## Hardware
 
