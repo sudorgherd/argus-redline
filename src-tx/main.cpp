@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include "SSD1306Wire.h"
 #include <RadioLib.h>
+#include "protocol.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
