@@ -1,3 +1,5 @@
 .pio
 *.bak
 *.pre-bidir.bak
+.vscode/
+*.code-workspace
