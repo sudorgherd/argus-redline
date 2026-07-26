@@ -139,3 +139,9 @@ Network keys, enrollment secrets, signing keys, access tokens, device certificat
 ARGUS REDLINE is active experimental firmware. It has not been independently audited and should not currently be relied upon for life-safety or other safety-critical communications.
 
 Radio regulations, permitted frequencies, transmission-power limits, and operating requirements remain the responsibility of the operator.
+
+## License
+
+ARGUS REDLINE is licensed under the **GNU General Public License, version 3 or any later version** (`GPL-3.0-or-later`).
+
+See [`LICENSE`](LICENSE) for the full license text.
