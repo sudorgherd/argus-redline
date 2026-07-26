@@ -9,11 +9,14 @@ SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 SPIClass radioSPI(FSPI);
 SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 
-constexpr char COMMAND[] = "100";
-constexpr char EXPECTED_ACK[] = "ACK 100";
+constexpr unsigned long INITIAL_DELAY_MS = 2000;
+constexpr unsigned long TRANSACTION_INTERVAL_MS = 3000;
+constexpr unsigned long ACK_TIMEOUT_MS = 2500;
+constexpr unsigned long RETRY_DELAY_MS = 500;
+
+constexpr uint8_t MAX_RETRIES = 2;
 
 bool radioReady = false;
-
 volatile bool operationDone = false;
 
 enum class HubRadioState : uint8_t {
@@ -27,7 +30,12 @@ HubRadioState hubState = HubRadioState::IDLE;
 unsigned long nextTransmitAt = 0;
 unsigned long ackDeadline = 0;
 
-int transmissionState = RADIOLIB_ERR_NONE;
+uint8_t currentSequence = 1;
+uint8_t retryCount = 0;
+
+Protocol::Packet currentCommand = {};
+uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
+size_t transmitLength = 0;
 
 void IRAM_ATTR setRadioFlag() {
     operationDone = true;
@@ -73,6 +81,269 @@ void showStatus(const String& primary, const String& secondary) {
     Serial.println();
 }
 
+void logPacket(const char* direction, const Protocol::Packet& packet) {
+    Serial.print(direction);
+    Serial.print(" type=");
+    Serial.print(static_cast<uint8_t>(packet.type));
+    Serial.print(" src=");
+    Serial.print(packet.source);
+    Serial.print(" dst=");
+    Serial.print(packet.destination);
+    Serial.print(" seq=");
+    Serial.print(packet.sequence);
+    Serial.print(" opcode=");
+    Serial.print(packet.opcode);
+    Serial.print(" payload=");
+    Serial.println(packet.payloadLength);
+}
+
+void scheduleNextTransaction() {
+    currentSequence++;
+    retryCount = 0;
+
+    hubState = HubRadioState::IDLE;
+    nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
+}
+
+void scheduleRetryOrNext(const String& reason) {
+    radio.standby();
+
+    if (retryCount < MAX_RETRIES) {
+        retryCount++;
+
+        showStatus(
+            reason,
+            String("retry ") + retryCount +
+            "/" + MAX_RETRIES
+        );
+
+        hubState = HubRadioState::IDLE;
+        nextTransmitAt = millis() + RETRY_DELAY_MS;
+        return;
+    }
+
+    showStatus(
+        "COMMAND FAILED",
+        String("SEQ ") + currentSequence
+    );
+
+    scheduleNextTransaction();
+}
+
+bool prepareCommand() {
+    currentCommand = {};
+
+    currentCommand.type = Protocol::PacketType::COMMAND;
+    currentCommand.source = Protocol::HUB_ID;
+    currentCommand.destination = Protocol::NODE_ID;
+    currentCommand.sequence = currentSequence;
+    currentCommand.opcode = Protocol::OPCODE_TEST;
+    currentCommand.payloadLength = 0;
+
+    return Protocol::encode(
+        currentCommand,
+        transmitBuffer,
+        sizeof(transmitBuffer),
+        transmitLength
+    );
+}
+
+bool startCommandTransmission() {
+    if (!prepareCommand()) {
+        showStatus("TX FAILED", "encode error");
+        scheduleNextTransaction();
+        return false;
+    }
+
+    operationDone = false;
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    const int state = radio.startTransmit(
+        transmitBuffer,
+        transmitLength
+    );
+
+    if (state != RADIOLIB_ERR_NONE) {
+        digitalWrite(LED_BUILTIN, LOW);
+
+        showStatus(
+            "TX START FAILED",
+            String("CODE ") + state
+        );
+
+        scheduleRetryOrNext("TX START FAILED");
+        return false;
+    }
+
+    logPacket(
+        retryCount == 0 ? "TX" : "TX RETRY",
+        currentCommand
+    );
+
+    showStatus(
+        retryCount == 0 ? "TX COMMAND" : "TX RETRY",
+        String("SEQ ") + currentSequence
+    );
+
+    hubState = HubRadioState::TRANSMITTING;
+    return true;
+}
+
+bool startAckReceive(bool resetDeadline) {
+    operationDone = false;
+
+    const int state = radio.startReceive();
+
+    if (state != RADIOLIB_ERR_NONE) {
+        showStatus(
+            "RX START FAILED",
+            String("CODE ") + state
+        );
+
+        scheduleRetryOrNext("RX START FAILED");
+        return false;
+    }
+
+    hubState = HubRadioState::WAITING_FOR_ACK;
+
+    if (resetDeadline) {
+        ackDeadline = millis() + ACK_TIMEOUT_MS;
+    }
+
+    return true;
+}
+
+void handleAckTimeout() {
+    showStatus(
+        "ACK TIMEOUT",
+        String("SEQ ") + currentSequence
+    );
+
+    scheduleRetryOrNext("ACK TIMEOUT");
+}
+
+void continueWaitingForAck() {
+    radio.standby();
+
+    if ((long)(millis() - ackDeadline) >= 0) {
+        handleAckTimeout();
+        return;
+    }
+
+    startAckReceive(false);
+}
+
+bool isMatchingAcknowledgment(
+    const Protocol::Packet& acknowledgment
+) {
+    return (
+        acknowledgment.type == Protocol::PacketType::ACK &&
+        acknowledgment.source == Protocol::NODE_ID &&
+        acknowledgment.destination == Protocol::HUB_ID &&
+        acknowledgment.sequence == currentSequence &&
+        acknowledgment.opcode == Protocol::OPCODE_TEST &&
+        acknowledgment.payloadLength == 1
+    );
+}
+
+void processAcknowledgment() {
+    const size_t packetLength = radio.getPacketLength();
+
+    if (
+        packetLength < Protocol::HEADER_SIZE ||
+        packetLength > Protocol::MAX_PACKET_SIZE
+    ) {
+        showStatus(
+            "ACK MALFORMED",
+            String("LEN ") + packetLength
+        );
+
+        continueWaitingForAck();
+        return;
+    }
+
+    uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
+
+    const int state = radio.readData(
+        receiveBuffer,
+        packetLength
+    );
+
+    if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        showStatus("BAD ACK", "CRC mismatch");
+        continueWaitingForAck();
+        return;
+    }
+
+    if (state != RADIOLIB_ERR_NONE) {
+        showStatus(
+            "ACK READ FAILED",
+            String("CODE ") + state
+        );
+
+        continueWaitingForAck();
+        return;
+    }
+
+    const float rssi = radio.getRSSI();
+    const float snr = radio.getSNR();
+
+    Protocol::Packet acknowledgment = {};
+
+    if (
+        !Protocol::decode(
+            receiveBuffer,
+            packetLength,
+            acknowledgment
+        )
+    ) {
+        showStatus("ACK MALFORMED", "decode failed");
+        continueWaitingForAck();
+        return;
+    }
+
+    logPacket("RX", acknowledgment);
+
+    Serial.print("RSSI: ");
+    Serial.print(rssi);
+    Serial.print(" dBm | SNR: ");
+    Serial.print(snr);
+    Serial.println(" dB");
+
+    if (!isMatchingAcknowledgment(acknowledgment)) {
+        showStatus(
+            "ACK IGNORED",
+            String("SEQ ") + acknowledgment.sequence
+        );
+
+        continueWaitingForAck();
+        return;
+    }
+
+    const Protocol::AckStatus status =
+        static_cast<Protocol::AckStatus>(
+            acknowledgment.payload[0]
+        );
+
+    if (status == Protocol::AckStatus::SUCCESS) {
+        showStatus(
+            "ACK MATCHED",
+            String("SEQ ") + currentSequence +
+            " RSSI " + String(rssi, 0) +
+            " SNR " + String(snr, 1)
+        );
+    } else {
+        showStatus(
+            "ACK ERROR",
+            String("STATUS ") +
+            static_cast<uint8_t>(status)
+        );
+    }
+
+    radio.standby();
+    scheduleNextTransaction();
+}
+
 void setup() {
     Serial.begin(115200);
 
@@ -93,7 +364,7 @@ void setup() {
 
     radioSPI.begin(9, 11, 10, 8);
 
-    int state = radio.begin(915.0);
+    const int state = radio.begin(915.0);
 
     Serial.print("Radio init state: ");
     Serial.println(state);
@@ -105,11 +376,12 @@ void setup() {
     }
 
     radio.setDio1Action(setRadioFlag);
+
     radioReady = true;
     showHomeScreen("TX | READY");
-    showStatus("HUB READY", "first TX in 2 sec");
-    Serial.println("Hub ready");
-    nextTransmitAt = millis() + 2000;
+    showStatus("HUB READY", "Protocol v0.1");
+
+    nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
 
 void loop() {
@@ -123,28 +395,7 @@ void loop() {
             return;
         }
 
-        operationDone = false;
-
-        digitalWrite(LED_BUILTIN, HIGH);
-        showStatus("TX 100", "sending command");
-
-        transmissionState = radio.startTransmit(
-            reinterpret_cast<const uint8_t*>(COMMAND),
-            sizeof(COMMAND) - 1
-        );
-
-        if (transmissionState != RADIOLIB_ERR_NONE) {
-            digitalWrite(LED_BUILTIN, LOW);
-
-            Serial.print("TX start failed, code ");
-            Serial.println(transmissionState);
-
-            hubState = HubRadioState::IDLE;
-            nextTransmitAt = millis() + 3000;
-            return;
-        }
-
-        hubState = HubRadioState::TRANSMITTING;
+        startCommandTransmission();
         return;
     }
 
@@ -153,13 +404,7 @@ void loop() {
             hubState == HubRadioState::WAITING_FOR_ACK &&
             (long)(millis() - ackDeadline) >= 0
         ) {
-            radio.standby();
-
-            Serial.println("ACK timeout");
-            showStatus("ACK TIMEOUT", "retry in 3 sec");
-
-            hubState = HubRadioState::IDLE;
-            nextTransmitAt = millis() + 3000;
+            handleAckTimeout();
         }
 
         return;
@@ -169,64 +414,16 @@ void loop() {
 
     if (hubState == HubRadioState::TRANSMITTING) {
         digitalWrite(LED_BUILTIN, LOW);
+        showStatus(
+            "TX COMPLETE",
+            String("SEQ ") + currentSequence
+        );
 
-        Serial.println("TX: 100");
-        showStatus("TX 100", "waiting for ACK");
-
-        int state = radio.startReceive();
-
-        if (state != RADIOLIB_ERR_NONE) {
-            Serial.print("RX start failed, code ");
-            Serial.println(state);
-
-            hubState = HubRadioState::IDLE;
-            nextTransmitAt = millis() + 3000;
-            return;
-        }
-
-        hubState = HubRadioState::WAITING_FOR_ACK;
-        ackDeadline = millis() + 2500;
+        startAckReceive(true);
         return;
     }
 
     if (hubState == HubRadioState::WAITING_FOR_ACK) {
-        String acknowledgment;
-
-        int state = radio.readData(acknowledgment);
-
-        if (state == RADIOLIB_ERR_NONE) {
-            float rssi = radio.getRSSI();
-            float snr = radio.getSNR();
-
-            Serial.print("RX: ");
-            Serial.println(acknowledgment);
-            Serial.print("RSSI: ");
-            Serial.print(rssi);
-            Serial.print(" dBm | SNR: ");
-            Serial.print(snr);
-            Serial.println(" dB");
-
-            if (acknowledgment == EXPECTED_ACK) {
-                showStatus(
-                    "ACK 100",
-                    String("RSSI ") + String(rssi, 0) +
-                    " SNR " + String(snr, 1)
-                );
-            } else {
-                showStatus("BAD RESPONSE", acknowledgment);
-            }
-        } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-            Serial.println("ACK CRC mismatch");
-            showStatus("BAD ACK", "CRC mismatch");
-        } else {
-            Serial.print("ACK read failed, code ");
-            Serial.println(state);
-            showStatus("RX FAILED", String("CODE ") + state);
-        }
-
-        radio.standby();
-
-        hubState = HubRadioState::IDLE;
-        nextTransmitAt = millis() + 3000;
+        processAcknowledgment();
     }
 }
