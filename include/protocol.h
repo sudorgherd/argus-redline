@@ -11,9 +11,6 @@ constexpr size_t HEADER_SIZE = 6;
 constexpr size_t MAX_PACKET_SIZE = 32;
 constexpr size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - HEADER_SIZE;
 
-constexpr uint8_t HUB_ID = 0x01;
-constexpr uint8_t NODE_ID = 0x10;
-
 constexpr uint8_t OPCODE_CORE_MIN = 0x00;
 constexpr uint8_t OPCODE_CORE_MAX = 0x1F;
 

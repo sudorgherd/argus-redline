@@ -3,6 +3,7 @@
 #include "SSD1306Wire.h"
 #include <RadioLib.h>
 #include "protocol.h"
+#include "device_config.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -137,7 +138,7 @@ bool startAcknowledgment(
     pendingAcknowledgment = {};
 
     pendingAcknowledgment.type = Protocol::PacketType::ACK;
-    pendingAcknowledgment.source = Protocol::NODE_ID;
+    pendingAcknowledgment.source = DeviceConfig::LOCAL_ID;
     pendingAcknowledgment.destination = command.source;
     pendingAcknowledgment.sequence = command.sequence;
     pendingAcknowledgment.opcode = command.opcode;
@@ -255,7 +256,7 @@ void handleReceivedPacket() {
     Serial.print(snr);
     Serial.println(" dB");
 
-    if (!Protocol::isAddressedTo(command, Protocol::NODE_ID)) {
+    if (!Protocol::isAddressedTo(command, DeviceConfig::LOCAL_ID)) {
         showStatus(
             "RX IGNORED",
             String("DST ") + command.destination
@@ -268,7 +269,7 @@ void handleReceivedPacket() {
 
     if (
         command.type != Protocol::PacketType::COMMAND ||
-        command.source != Protocol::HUB_ID
+        command.source != DeviceConfig::PEER_ID
     ) {
         showStatus("RX IGNORED", "invalid sender/type");
         radio.standby();
@@ -335,7 +336,7 @@ void setup() {
 
     radioReady = true;
     showHomeScreen("RX | READY");
-    showStatus("NODE READY", "Protocol v0.1.02");
+    showStatus("NODE READY", "Protocol v0.1.03");
 
     if (!startListening()) {
         radioReady = false;
