@@ -1,4 +1,8 @@
-# ARGUS REDLINE
+<p align="center">
+  <img src="docs/assets/ARGUS_Redline.png"
+       alt="ARGUS REDLINE"
+       width="100%">
+</p>
 
 **Open-source long-range radio firmware and off-grid coordination infrastructure.**
 
