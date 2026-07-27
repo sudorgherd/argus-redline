@@ -10,12 +10,31 @@ SPIClass radioSPI(FSPI);
 SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 
 bool radioReady = false;
+volatile bool operationDone = false;
+
+enum class NodeRadioState : uint8_t {
+    LISTENING,
+    TRANSMITTING_ACK
+};
+
+NodeRadioState nodeState = NodeRadioState::LISTENING;
+
+uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
+uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
+size_t transmitLength = 0;
+
+Protocol::Packet pendingAcknowledgment = {};
+bool pendingAcknowledgmentDuplicate = false;
 
 bool hasLastCommand = false;
 uint8_t lastSource = 0;
 uint8_t lastSequence = 0;
 uint8_t lastOpcode = 0;
 Protocol::AckStatus lastAckStatus = Protocol::AckStatus::SUCCESS;
+
+void IRAM_ATTR setRadioFlag() {
+    operationDone = true;
+}
 
 const unsigned char rgLogo26x16[] PROGMEM = {
 0xff,0x00,0xfc,0x01,0xff,0x03,0xff,0x01,0xff,0x87,0xff,0x01,0x07,0xc7,0x03,
@@ -93,59 +112,185 @@ void rememberCommand(
     lastAckStatus = status;
 }
 
-bool sendAcknowledgment(
+bool startListening() {
+    operationDone = false;
+    nodeState = NodeRadioState::LISTENING;
+
+    const int state = radio.startReceive();
+
+    if (state != RADIOLIB_ERR_NONE) {
+        showStatus(
+            "RX START FAILED",
+            String("CODE ") + state
+        );
+        return false;
+    }
+
+    return true;
+}
+
+bool startAcknowledgment(
     const Protocol::Packet& command,
     Protocol::AckStatus status,
     bool duplicate
 ) {
-    Protocol::Packet acknowledgment = {};
+    pendingAcknowledgment = {};
 
-    acknowledgment.type = Protocol::PacketType::ACK;
-    acknowledgment.source = Protocol::NODE_ID;
-    acknowledgment.destination = command.source;
-    acknowledgment.sequence = command.sequence;
-    acknowledgment.opcode = command.opcode;
-    acknowledgment.payloadLength = 1;
-    acknowledgment.payload[0] = static_cast<uint8_t>(status);
+    pendingAcknowledgment.type = Protocol::PacketType::ACK;
+    pendingAcknowledgment.source = Protocol::NODE_ID;
+    pendingAcknowledgment.destination = command.source;
+    pendingAcknowledgment.sequence = command.sequence;
+    pendingAcknowledgment.opcode = command.opcode;
+    pendingAcknowledgment.payloadLength = 1;
+    pendingAcknowledgment.payload[0] = static_cast<uint8_t>(status);
 
-    uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
-    size_t transmitLength = 0;
+    transmitLength = 0;
 
     if (
         !Protocol::encode(
-            acknowledgment,
+            pendingAcknowledgment,
             transmitBuffer,
             sizeof(transmitBuffer),
             transmitLength
         )
     ) {
         showStatus("ACK FAILED", "encode error");
+        startListening();
         return false;
     }
 
+    pendingAcknowledgmentDuplicate = duplicate;
+
+    radio.standby();
     delay(100);
+
+    operationDone = false;
+    nodeState = NodeRadioState::TRANSMITTING_ACK;
     digitalWrite(LED_BUILTIN, HIGH);
 
-    const int state = radio.transmit(
+    const int state = radio.startTransmit(
         transmitBuffer,
         transmitLength
     );
 
-    digitalWrite(LED_BUILTIN, LOW);
-
     if (state != RADIOLIB_ERR_NONE) {
-        showStatus("ACK FAILED", String("CODE ") + state);
+        digitalWrite(LED_BUILTIN, LOW);
+
+        showStatus(
+            "ACK FAILED",
+            String("CODE ") + state
+        );
+
+        startListening();
         return false;
     }
 
-    logPacket("TX", acknowledgment);
+    return true;
+}
+
+void finishAcknowledgment() {
+    digitalWrite(LED_BUILTIN, LOW);
+    radio.standby();
+
+    logPacket("TX", pendingAcknowledgment);
 
     showStatus(
-        duplicate ? "DUPLICATE" : "COMMAND OK",
-        String("ACK SEQ ") + acknowledgment.sequence
+        pendingAcknowledgmentDuplicate ? "DUPLICATE" : "COMMAND OK",
+        String("ACK SEQ ") + pendingAcknowledgment.sequence
     );
 
-    return true;
+    startListening();
+}
+
+void handleReceivedPacket() {
+    const size_t packetLength = radio.getPacketLength();
+
+    if (
+        packetLength < Protocol::HEADER_SIZE ||
+        packetLength > Protocol::MAX_PACKET_SIZE
+    ) {
+        showStatus(
+            "RX MALFORMED",
+            String("LEN ") + packetLength
+        );
+
+        radio.standby();
+        startListening();
+        return;
+    }
+
+    const int readState = radio.readData(
+        receiveBuffer,
+        packetLength
+    );
+
+    if (readState != RADIOLIB_ERR_NONE) {
+        showStatus(
+            "RX FAILED",
+            String("CODE ") + readState
+        );
+
+        radio.standby();
+        startListening();
+        return;
+    }
+
+    Protocol::Packet command = {};
+
+    if (!Protocol::decode(receiveBuffer, packetLength, command)) {
+        showStatus("RX MALFORMED", "decode failed");
+        radio.standby();
+        startListening();
+        return;
+    }
+
+    logPacket("RX", command);
+
+    const float rssi = radio.getRSSI();
+    const float snr = radio.getSNR();
+
+    Serial.print("RSSI: ");
+    Serial.print(rssi);
+    Serial.print(" dBm | SNR: ");
+    Serial.print(snr);
+    Serial.println(" dB");
+
+    if (!Protocol::isAddressedTo(command, Protocol::NODE_ID)) {
+        showStatus(
+            "RX IGNORED",
+            String("DST ") + command.destination
+        );
+
+        radio.standby();
+        startListening();
+        return;
+    }
+
+    if (
+        command.type != Protocol::PacketType::COMMAND ||
+        command.source != Protocol::HUB_ID
+    ) {
+        showStatus("RX IGNORED", "invalid sender/type");
+        radio.standby();
+        startListening();
+        return;
+    }
+
+    if (isDuplicateCommand(command)) {
+        startAcknowledgment(command, lastAckStatus, true);
+        return;
+    }
+
+    Protocol::AckStatus status;
+
+    if (command.opcode == Protocol::OPCODE_TEST) {
+        status = Protocol::AckStatus::SUCCESS;
+    } else {
+        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
+    }
+
+    rememberCommand(command, status);
+    startAcknowledgment(command, status, false);
 }
 
 void setup() {
@@ -179,9 +324,16 @@ void setup() {
         return;
     }
 
+    radio.setDio1Action(setRadioFlag);
+
     radioReady = true;
     showHomeScreen("RX | READY");
-    showStatus("NODE READY", "Protocol v0.1");
+    showStatus("NODE READY", "Protocol v0.1.01");
+
+    if (!startListening()) {
+        radioReady = false;
+        showHomeScreen("RX START ERR");
+    }
 }
 
 void loop() {
@@ -190,86 +342,16 @@ void loop() {
         return;
     }
 
-    uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
-
-    const int state = radio.receive(
-        receiveBuffer,
-        sizeof(receiveBuffer),
-        10000
-    );
-
-    if (state == RADIOLIB_ERR_RX_TIMEOUT) {
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(75);
-        digitalWrite(LED_BUILTIN, LOW);
+    if (!operationDone) {
         return;
     }
 
-    if (state != RADIOLIB_ERR_NONE) {
-        showStatus("RX FAILED", String("CODE ") + state);
+    operationDone = false;
+
+    if (nodeState == NodeRadioState::TRANSMITTING_ACK) {
+        finishAcknowledgment();
         return;
     }
 
-    const size_t packetLength = radio.getPacketLength();
-
-    if (
-        packetLength < Protocol::HEADER_SIZE ||
-        packetLength > Protocol::MAX_PACKET_SIZE
-    ) {
-        showStatus(
-            "RX MALFORMED",
-            String("LEN ") + packetLength
-        );
-        return;
-    }
-
-    Protocol::Packet command = {};
-
-    if (!Protocol::decode(receiveBuffer, packetLength, command)) {
-        showStatus("RX MALFORMED", "decode failed");
-        return;
-    }
-
-    logPacket("RX", command);
-
-    const float rssi = radio.getRSSI();
-    const float snr = radio.getSNR();
-
-    Serial.print("RSSI: ");
-    Serial.print(rssi);
-    Serial.print(" dBm | SNR: ");
-    Serial.print(snr);
-    Serial.println(" dB");
-
-    if (!Protocol::isAddressedTo(command, Protocol::NODE_ID)) {
-        showStatus(
-            "RX IGNORED",
-            String("DST ") + command.destination
-        );
-        return;
-    }
-
-    if (
-        command.type != Protocol::PacketType::COMMAND ||
-        command.source != Protocol::HUB_ID
-    ) {
-        showStatus("RX IGNORED", "invalid sender/type");
-        return;
-    }
-
-    if (isDuplicateCommand(command)) {
-        sendAcknowledgment(command, lastAckStatus, true);
-        return;
-    }
-
-    Protocol::AckStatus status;
-
-    if (command.opcode == Protocol::OPCODE_TEST) {
-        status = Protocol::AckStatus::SUCCESS;
-    } else {
-        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
-    }
-
-    rememberCommand(command, status);
-    sendAcknowledgment(command, status, false);
+    handleReceivedPacket();
 }
