@@ -241,7 +241,7 @@ bool isMatchingAcknowledgment(
         acknowledgment.source == Protocol::NODE_ID &&
         acknowledgment.destination == Protocol::HUB_ID &&
         acknowledgment.sequence == currentSequence &&
-        acknowledgment.opcode == Protocol::OPCODE_TEST &&
+        acknowledgment.opcode == currentCommand.opcode &&
         acknowledgment.payloadLength == 1
     );
 }
@@ -320,10 +320,21 @@ void processAcknowledgment() {
         return;
     }
 
-    const Protocol::AckStatus status =
-        static_cast<Protocol::AckStatus>(
-            acknowledgment.payload[0]
+    const uint8_t rawStatus = acknowledgment.payload[0];
+
+    if (!Protocol::isValidAckStatus(rawStatus)) {
+        showStatus(
+            "ACK MALFORMED",
+            String("STATUS ") + rawStatus
         );
+
+        radio.standby();
+        scheduleNextTransaction();
+        return;
+    }
+
+    const Protocol::AckStatus status =
+        static_cast<Protocol::AckStatus>(rawStatus);
 
     if (status == Protocol::AckStatus::SUCCESS) {
         showStatus(
@@ -379,7 +390,7 @@ void setup() {
 
     radioReady = true;
     showHomeScreen("TX | READY");
-    showStatus("HUB READY", "Protocol v0.1");
+    showStatus("HUB READY", "Protocol v0.1.02");
 
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
