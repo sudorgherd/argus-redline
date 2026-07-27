@@ -3,6 +3,7 @@
 #include "SSD1306Wire.h"
 #include <RadioLib.h>
 #include "protocol.h"
+#include "device_config.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -134,8 +135,8 @@ bool prepareCommand() {
     currentCommand = {};
 
     currentCommand.type = Protocol::PacketType::COMMAND;
-    currentCommand.source = Protocol::HUB_ID;
-    currentCommand.destination = Protocol::NODE_ID;
+    currentCommand.source = DeviceConfig::LOCAL_ID;
+    currentCommand.destination = DeviceConfig::PEER_ID;
     currentCommand.sequence = currentSequence;
     currentCommand.opcode = Protocol::OPCODE_TEST;
     currentCommand.payloadLength = 0;
@@ -238,8 +239,8 @@ bool isMatchingAcknowledgment(
 ) {
     return (
         acknowledgment.type == Protocol::PacketType::ACK &&
-        acknowledgment.source == Protocol::NODE_ID &&
-        acknowledgment.destination == Protocol::HUB_ID &&
+        acknowledgment.source == DeviceConfig::PEER_ID &&
+        acknowledgment.destination == DeviceConfig::LOCAL_ID &&
         acknowledgment.sequence == currentSequence &&
         acknowledgment.opcode == currentCommand.opcode &&
         acknowledgment.payloadLength == 1
@@ -390,7 +391,7 @@ void setup() {
 
     radioReady = true;
     showHomeScreen("TX | READY");
-    showStatus("HUB READY", "Protocol v0.1.02");
+    showStatus("HUB READY", "Protocol v0.1.03");
 
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
