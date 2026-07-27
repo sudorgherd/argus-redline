@@ -283,10 +283,17 @@ void handleReceivedPacket() {
 
     Protocol::AckStatus status;
 
-    if (command.opcode == Protocol::OPCODE_TEST) {
-        status = Protocol::AckStatus::SUCCESS;
-    } else {
+    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
         status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
+    } else if (
+        !Protocol::isValidCommandPayload(
+            command.opcode,
+            command.payloadLength
+        )
+    ) {
+        status = Protocol::AckStatus::MALFORMED_PACKET;
+    } else {
+        status = Protocol::AckStatus::SUCCESS;
     }
 
     rememberCommand(command, status);
@@ -328,7 +335,7 @@ void setup() {
 
     radioReady = true;
     showHomeScreen("RX | READY");
-    showStatus("NODE READY", "Protocol v0.1.01");
+    showStatus("NODE READY", "Protocol v0.1.02");
 
     if (!startListening()) {
         radioReady = false;

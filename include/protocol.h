@@ -14,7 +14,21 @@ constexpr size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - HEADER_SIZE;
 constexpr uint8_t HUB_ID = 0x01;
 constexpr uint8_t NODE_ID = 0x10;
 
-constexpr uint8_t OPCODE_TEST = 100;
+constexpr uint8_t OPCODE_CORE_MIN = 0x00;
+constexpr uint8_t OPCODE_CORE_MAX = 0x1F;
+
+constexpr uint8_t OPCODE_APPLICATION_MIN = 0x20;
+constexpr uint8_t OPCODE_APPLICATION_MAX = 0x7F;
+
+constexpr uint8_t OPCODE_RESERVED_MIN = 0x80;
+constexpr uint8_t OPCODE_RESERVED_MAX = 0xFF;
+
+enum class Opcode : uint8_t {
+    TEST = 0x64
+};
+
+constexpr uint8_t OPCODE_TEST =
+    static_cast<uint8_t>(Opcode::TEST);
 
 enum class PacketType : uint8_t {
     COMMAND = 0x01,
@@ -27,6 +41,45 @@ enum class AckStatus : uint8_t {
     UNSUPPORTED_OPCODE = 0x01,
     MALFORMED_PACKET = 0x02
 };
+
+inline bool isSupportedCommandOpcode(uint8_t opcode) {
+    return opcode == OPCODE_TEST;
+}
+
+inline size_t expectedCommandPayloadLength(uint8_t opcode) {
+    switch (opcode) {
+        case OPCODE_TEST:
+            return 0;
+
+        default:
+            return MAX_PAYLOAD_SIZE + 1;
+    }
+}
+
+inline bool isValidCommandPayload(
+    uint8_t opcode,
+    uint8_t payloadLength
+) {
+    const size_t expectedLength =
+        expectedCommandPayloadLength(opcode);
+
+    return (
+        expectedLength <= MAX_PAYLOAD_SIZE &&
+        payloadLength == expectedLength
+    );
+}
+
+inline bool isValidAckStatus(uint8_t value) {
+    return (
+        value == static_cast<uint8_t>(AckStatus::SUCCESS) ||
+        value == static_cast<uint8_t>(
+            AckStatus::UNSUPPORTED_OPCODE
+        ) ||
+        value == static_cast<uint8_t>(
+            AckStatus::MALFORMED_PACKET
+        )
+    );
+}
 
 struct Packet {
     PacketType type;
