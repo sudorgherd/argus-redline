@@ -4,20 +4,21 @@
        width="100%">
 </p>
 
-**Open-source long-range radio firmware and off-grid coordination infrastructure.**
+**Open-source off-grid IoT, system security, and structured communications over resilient low-bandwidth radio.**
 
-ARGUS REDLINE is an experimental communications project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
+ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
 > **Current milestone:** Protocol v0.1 — verified reliable binary command exchange over LoRa.
 
 ## What is ARGUS REDLINE?
 
-ARGUS REDLINE is intended to become a secure, configurable, off-grid radio coordination platform connecting one computer-facing Hub with multiple independently provisioned field Nodes.
+ARGUS REDLINE is intended to become a secure, configurable, off-grid platform connecting operators, sensors, mobile devices, and controlled trigger mechanisms through a computer-facing Hub and independently provisioned field Nodes.
 
-The v1 target includes reliable commands and Node-originated events, persistent identity and settings, local device screens, a documented host interface, authenticated encryption, replay protection, and device revocation. Mesh routing, repeaters, GNSS, final enclosures, and full ARGUS integration are later development layers rather than v1 requirements.
+REDLINE uses small structured packets to invoke, configure, or coordinate substantially more complex behavior already available on each device. The packet is the instruction layer; the Node's firmware, stored state, attached hardware, and authorization determine what the instruction can safely do.
 
-See **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** for the full system definition, targeted v1 capabilities, present implementation status, and deliberate non-goals.
+The v1 target includes multiple directly reachable Nodes, reliable commands and Node-originated events, persistent identity and settings, approved sensor and output capabilities, local device screens, a documented host interface, authenticated encryption, replay protection, and device revocation. Mesh routing, repeaters, GNSS, final enclosures, and full ARGUS integration are later development layers rather than v1 requirements.
 
+See **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** for the full system definition, technical objectives, targeted v1 capabilities, present implementation status, and deliberate non-goals.
 
 ## Current status
 
@@ -135,7 +136,9 @@ Areas under consideration include:
 - Multiple addressed Nodes
 - Authenticated and encrypted packets
 - Persistent transaction identity
-- Handheld, vehicle, and stationary device profiles
+- Handheld, vehicle, sensor, actuator, and stationary device profiles
+- Approved logical capabilities for sensors, inputs, outputs, and trigger mechanisms
+- Parameterized operations, policies, stored procedures, and compact workflow definitions
 - Emergency signaling and operator check-ins
 - Store-and-forward messaging
 - Repeaters and mobile relay Nodes
@@ -151,6 +154,8 @@ These are development directions, not completed features.
 The protocol and firmware are intended to remain open. Operational credentials are not.
 
 Network keys, enrollment secrets, signing keys, access tokens, device certificates, deployment records, and private configuration files must never be committed.
+
+REDLINE is not intended to provide arbitrary remote code execution or unrestricted GPIO access. Remote behavior must be limited to authenticated operations, installed procedures, and approved device capabilities.
 
 ## Experimental status
 
