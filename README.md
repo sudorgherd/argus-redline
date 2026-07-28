@@ -10,6 +10,15 @@ ARGUS REDLINE is an experimental communications project developed by **RaveGoat 
 
 > **Current milestone:** Protocol v0.1 — verified reliable binary command exchange over LoRa.
 
+## What is ARGUS REDLINE?
+
+ARGUS REDLINE is intended to become a secure, configurable, off-grid radio coordination platform connecting one computer-facing Hub with multiple independently provisioned field Nodes.
+
+The v1 target includes reliable commands and Node-originated events, persistent identity and settings, local device screens, a documented host interface, authenticated encryption, replay protection, and device revocation. Mesh routing, repeaters, GNSS, final enclosures, and full ARGUS integration are later development layers rather than v1 requirements.
+
+See **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** for the full system definition, targeted v1 capabilities, present implementation status, and deliberate non-goals.
+
+
 ## Current status
 
 Protocol v0.1 has been built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices.
