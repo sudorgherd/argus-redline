@@ -122,6 +122,115 @@ enum class HubAckOutcome : uint8_t {
     MATCHING_ACK
 };
 
+enum class HubTransactionAction : uint8_t {
+    NO_ACTION,
+    TRANSMIT_INITIAL,
+    RETRANSMIT,
+    TRANSACTION_SUCCEEDED,
+    TRANSACTION_REMOTE_ERROR,
+    TRANSACTION_FAILED
+};
+
+class HubTransactionState {
+public:
+    static constexpr uint8_t DEFAULT_INITIAL_SEQUENCE = 1;
+    static constexpr uint8_t DEFAULT_MAX_RETRIES = 2;
+    static constexpr uint32_t DEFAULT_ACK_TIMEOUT_MS = 2500;
+
+    HubTransactionState(
+        uint8_t initialSequence = DEFAULT_INITIAL_SEQUENCE,
+        uint8_t maximumRetries = DEFAULT_MAX_RETRIES,
+        uint32_t acknowledgmentTimeoutMs = DEFAULT_ACK_TIMEOUT_MS
+    ) :
+        sequence_(initialSequence),
+        maximumRetries_(maximumRetries),
+        acknowledgmentTimeoutMs_(acknowledgmentTimeoutMs) {}
+
+    uint8_t currentSequence() const {
+        return sequence_;
+    }
+
+    uint8_t retryCount() const {
+        return retryCount_;
+    }
+
+    uint8_t maximumRetries() const {
+        return maximumRetries_;
+    }
+
+    bool isAwaitingAcknowledgment() const {
+        return awaitingAcknowledgment_;
+    }
+
+    uint32_t acknowledgmentDeadline() const {
+        return acknowledgmentDeadline_;
+    }
+
+    HubTransactionAction requestedTransmission() const {
+        return retryCount_ == 0
+            ? HubTransactionAction::TRANSMIT_INITIAL
+            : HubTransactionAction::RETRANSMIT;
+    }
+
+    void beginAcknowledgmentWait(uint32_t currentTimeMs) {
+        awaitingAcknowledgment_ = true;
+        acknowledgmentDeadline_ =
+            currentTimeMs + acknowledgmentTimeoutMs_;
+    }
+
+    HubTransactionAction acknowledgmentWaitAction(
+        uint32_t currentTimeMs
+    ) const {
+        if (
+            !awaitingAcknowledgment_ ||
+            static_cast<int32_t>(
+                currentTimeMs - acknowledgmentDeadline_
+            ) < 0
+        ) {
+            return HubTransactionAction::NO_ACTION;
+        }
+
+        return retryCount_ < maximumRetries_
+            ? HubTransactionAction::RETRANSMIT
+            : HubTransactionAction::TRANSACTION_FAILED;
+    }
+
+    HubTransactionAction attemptFailed() {
+        awaitingAcknowledgment_ = false;
+
+        if (retryCount_ < maximumRetries_) {
+            retryCount_++;
+            return HubTransactionAction::RETRANSMIT;
+        }
+
+        return HubTransactionAction::TRANSACTION_FAILED;
+    }
+
+    // Precondition: status was validated with Protocol::isValidAckStatus().
+    HubTransactionAction acknowledgmentCompletionAction(
+        Protocol::AckStatus status
+    ) const {
+        return status == Protocol::AckStatus::SUCCESS
+            ? HubTransactionAction::TRANSACTION_SUCCEEDED
+            : HubTransactionAction::TRANSACTION_REMOTE_ERROR;
+    }
+
+    // Apply exactly once after a terminal action, never while waiting/retrying.
+    void completeTransaction() {
+        sequence_++;
+        retryCount_ = 0;
+        awaitingAcknowledgment_ = false;
+    }
+
+private:
+    uint8_t sequence_ = DEFAULT_INITIAL_SEQUENCE;
+    uint8_t retryCount_ = 0;
+    uint8_t maximumRetries_ = DEFAULT_MAX_RETRIES;
+    bool awaitingAcknowledgment_ = false;
+    uint32_t acknowledgmentDeadline_ = 0;
+    uint32_t acknowledgmentTimeoutMs_ = DEFAULT_ACK_TIMEOUT_MS;
+};
+
 struct HubAckEvaluation {
     HubAckOutcome outcome;
     // Used only for MATCHING_ACK.

@@ -723,6 +723,233 @@ void testHubEvaluatorDoesNotMutateOutstandingCommand() {
     );
 }
 
+void testHubInitialTransactionRequestsFirstTransmission() {
+    TransactionEngine::HubTransactionState state;
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::TRANSMIT_INITIAL
+        ),
+        static_cast<uint8_t>(state.requestedTransmission())
+    );
+    TEST_ASSERT_EQUAL_UINT8(1, state.currentSequence());
+    TEST_ASSERT_EQUAL_UINT8(0, state.retryCount());
+}
+
+void testHubBeginningAcknowledgmentWaitStoresDeadline() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_TRUE(state.isAwaitingAcknowledgment());
+    TEST_ASSERT_EQUAL_UINT32(3500, state.acknowledgmentDeadline());
+}
+
+void testHubBeforeDeadlineContinuesWaiting() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::NO_ACTION
+        ),
+        static_cast<uint8_t>(state.acknowledgmentWaitAction(3499))
+    );
+    TEST_ASSERT_TRUE(state.isAwaitingAcknowledgment());
+}
+
+void testHubAtDeadlineRequestsRetransmission() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::RETRANSMIT
+        ),
+        static_cast<uint8_t>(state.acknowledgmentWaitAction(3500))
+    );
+    TEST_ASSERT_TRUE(state.isAwaitingAcknowledgment());
+    state.attemptFailed();
+    TEST_ASSERT_FALSE(state.isAwaitingAcknowledgment());
+}
+
+void testHubAfterTimeoutRequestsRetransmission() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::RETRANSMIT
+        ),
+        static_cast<uint8_t>(state.acknowledgmentWaitAction(3501))
+    );
+}
+
+void testHubRetryCountIncrementsExactlyAsBefore() {
+    TransactionEngine::HubTransactionState state;
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::RETRANSMIT
+        ),
+        static_cast<uint8_t>(state.attemptFailed())
+    );
+    TEST_ASSERT_EQUAL_UINT8(1, state.retryCount());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::RETRANSMIT
+        ),
+        static_cast<uint8_t>(state.attemptFailed())
+    );
+    TEST_ASSERT_EQUAL_UINT8(2, state.retryCount());
+}
+
+void testHubRetryExhaustionProducesFailure() {
+    TransactionEngine::HubTransactionState state;
+    state.attemptFailed();
+    state.attemptFailed();
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::TRANSACTION_FAILED
+        ),
+        static_cast<uint8_t>(state.attemptFailed())
+    );
+}
+
+void testHubSuccessfulAcknowledgmentCompletesTransaction() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::
+                TRANSACTION_SUCCEEDED
+        ),
+        static_cast<uint8_t>(state.acknowledgmentCompletionAction(
+            Protocol::AckStatus::SUCCESS
+        ))
+    );
+    state.completeTransaction();
+    TEST_ASSERT_FALSE(state.isAwaitingAcknowledgment());
+}
+
+void testHubNonSuccessAcknowledgmentCompletesWithRemoteError() {
+    TransactionEngine::HubTransactionState state;
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::
+                TRANSACTION_REMOTE_ERROR
+        ),
+        static_cast<uint8_t>(state.acknowledgmentCompletionAction(
+            Protocol::AckStatus::UNSUPPORTED_OPCODE
+        ))
+    );
+    state.completeTransaction();
+}
+
+void testHubSequenceAdvancesOnceAfterSuccess() {
+    TransactionEngine::HubTransactionState state;
+    state.acknowledgmentCompletionAction(Protocol::AckStatus::SUCCESS);
+    state.completeTransaction();
+
+    TEST_ASSERT_EQUAL_UINT8(2, state.currentSequence());
+}
+
+void testHubSequenceAdvancesOnceAfterRemoteError() {
+    TransactionEngine::HubTransactionState state;
+    state.acknowledgmentCompletionAction(
+        Protocol::AckStatus::MALFORMED_PACKET
+    );
+    state.completeTransaction();
+
+    TEST_ASSERT_EQUAL_UINT8(2, state.currentSequence());
+}
+
+void testHubSequenceAdvancesOnceAfterRetryExhaustion() {
+    TransactionEngine::HubTransactionState state;
+    state.attemptFailed();
+    state.attemptFailed();
+    state.attemptFailed();
+    state.completeTransaction();
+
+    TEST_ASSERT_EQUAL_UINT8(2, state.currentSequence());
+}
+
+void testHubSequenceDoesNotAdvanceWhileRetrying() {
+    TransactionEngine::HubTransactionState state;
+    state.attemptFailed();
+    TEST_ASSERT_EQUAL_UINT8(1, state.currentSequence());
+    state.attemptFailed();
+    TEST_ASSERT_EQUAL_UINT8(1, state.currentSequence());
+}
+
+void testHubRetryStateResetsForNextTransaction() {
+    TransactionEngine::HubTransactionState state;
+    state.attemptFailed();
+    state.acknowledgmentCompletionAction(Protocol::AckStatus::SUCCESS);
+    state.completeTransaction();
+
+    TEST_ASSERT_EQUAL_UINT8(0, state.retryCount());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::TRANSMIT_INITIAL
+        ),
+        static_cast<uint8_t>(state.requestedTransmission())
+    );
+}
+
+void testHubSequenceWrapsExactlyAsBefore() {
+    TransactionEngine::HubTransactionState state(0xFF);
+    state.acknowledgmentCompletionAction(Protocol::AckStatus::SUCCESS);
+    state.completeTransaction();
+
+    TEST_ASSERT_EQUAL_UINT8(0, state.currentSequence());
+}
+
+void testHubAcknowledgmentDeadlineWrapsCorrectly() {
+    TransactionEngine::HubTransactionState state;
+    state.beginAcknowledgmentWait(0xFFFFFFF0);
+
+    TEST_ASSERT_EQUAL_HEX32(0x000009B4, state.acknowledgmentDeadline());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::NO_ACTION
+        ),
+        static_cast<uint8_t>(state.acknowledgmentWaitAction(0x000009B3))
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubTransactionAction::RETRANSMIT
+        ),
+        static_cast<uint8_t>(state.acknowledgmentWaitAction(0x000009B4))
+    );
+}
+
+void testHubOutstandingCommandSequenceRemainsAligned() {
+    TransactionEngine::HubTransactionState state;
+    Protocol::Packet outstandingCommand = makeCommand();
+    outstandingCommand.sequence = state.currentSequence();
+    state.beginAcknowledgmentWait(1000);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        state.currentSequence(),
+        outstandingCommand.sequence
+    );
+    state.acknowledgmentWaitAction(3500);
+    state.attemptFailed();
+    TEST_ASSERT_EQUAL_UINT8(
+        state.currentSequence(),
+        outstandingCommand.sequence
+    );
+
+    outstandingCommand.sequence = state.currentSequence();
+    TEST_ASSERT_EQUAL_UINT8(
+        state.currentSequence(),
+        outstandingCommand.sequence
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -761,5 +988,22 @@ int main(int, char**) {
     RUN_TEST(testHubExtractsNonSuccessStatus);
     RUN_TEST(testHubAcknowledgmentEvaluationOrderMatchesFirmware);
     RUN_TEST(testHubEvaluatorDoesNotMutateOutstandingCommand);
+    RUN_TEST(testHubInitialTransactionRequestsFirstTransmission);
+    RUN_TEST(testHubBeginningAcknowledgmentWaitStoresDeadline);
+    RUN_TEST(testHubBeforeDeadlineContinuesWaiting);
+    RUN_TEST(testHubAtDeadlineRequestsRetransmission);
+    RUN_TEST(testHubAfterTimeoutRequestsRetransmission);
+    RUN_TEST(testHubRetryCountIncrementsExactlyAsBefore);
+    RUN_TEST(testHubRetryExhaustionProducesFailure);
+    RUN_TEST(testHubSuccessfulAcknowledgmentCompletesTransaction);
+    RUN_TEST(testHubNonSuccessAcknowledgmentCompletesWithRemoteError);
+    RUN_TEST(testHubSequenceAdvancesOnceAfterSuccess);
+    RUN_TEST(testHubSequenceAdvancesOnceAfterRemoteError);
+    RUN_TEST(testHubSequenceAdvancesOnceAfterRetryExhaustion);
+    RUN_TEST(testHubSequenceDoesNotAdvanceWhileRetrying);
+    RUN_TEST(testHubRetryStateResetsForNextTransaction);
+    RUN_TEST(testHubSequenceWrapsExactlyAsBefore);
+    RUN_TEST(testHubAcknowledgmentDeadlineWrapsCorrectly);
+    RUN_TEST(testHubOutstandingCommandSequenceRemainsAligned);
     return UNITY_END();
 }
