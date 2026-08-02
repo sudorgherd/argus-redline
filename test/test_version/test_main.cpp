@@ -5,8 +5,8 @@
 
 namespace {
 
-void testDevelopmentFirmwareIdentifier() {
-    TEST_ASSERT_EQUAL_STRING("0.2.0-dev", RedlineVersion::FIRMWARE);
+void testReleaseFirmwareIdentifier() {
+    TEST_ASSERT_EQUAL_STRING("v0.2.0", RedlineVersion::FIRMWARE);
 }
 
 void testWireProtocolVersion() {
@@ -28,7 +28,7 @@ void testHardwareProfileIdentifier() {
 
 int main(int, char**) {
     UNITY_BEGIN();
-    RUN_TEST(testDevelopmentFirmwareIdentifier);
+    RUN_TEST(testReleaseFirmwareIdentifier);
     RUN_TEST(testWireProtocolVersion);
     RUN_TEST(testHardwareProfileIdentifier);
     return UNITY_END();
