@@ -114,6 +114,11 @@ bool startListening() {
     return true;
 }
 
+void resumeListening() {
+    radio.standby();
+    startListening();
+}
+
 bool startAcknowledgment(
     const Protocol::Packet& command,
     Protocol::AckStatus status,
@@ -192,8 +197,7 @@ void handleReceivedPacket() {
             String("LEN ") + packetLength
         );
 
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -208,8 +212,7 @@ void handleReceivedPacket() {
             String("CODE ") + readState
         );
 
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -217,8 +220,7 @@ void handleReceivedPacket() {
 
     if (!Protocol::decode(receiveBuffer, packetLength, command)) {
         showStatus("RX MALFORMED", "decode failed");
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -249,8 +251,7 @@ void handleReceivedPacket() {
                 "RX IGNORED",
                 String("DST ") + command.destination
             );
-            radio.standby();
-            startListening();
+            resumeListening();
             return;
 
         case TransactionEngine::NodeCommandOutcome::
@@ -258,8 +259,7 @@ void handleReceivedPacket() {
         case TransactionEngine::NodeCommandOutcome::
             IGNORE_WRONG_PACKET_TYPE:
             showStatus("RX IGNORED", "invalid sender/type");
-            radio.standby();
-            startListening();
+            resumeListening();
             return;
 
         case TransactionEngine::NodeCommandOutcome::DUPLICATE:

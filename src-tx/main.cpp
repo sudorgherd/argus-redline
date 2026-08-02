@@ -105,6 +105,11 @@ void scheduleNextTransaction() {
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
 }
 
+void completeAndScheduleNextTransaction() {
+    transactionState.completeTransaction();
+    scheduleNextTransaction();
+}
+
 void scheduleRetryOrNext(const String& reason) {
     radio.standby();
     const TransactionEngine::HubTransactionAction action =
@@ -127,8 +132,7 @@ void scheduleRetryOrNext(const String& reason) {
         String("SEQ ") + currentCommand.sequence
     );
 
-    transactionState.completeTransaction();
-    scheduleNextTransaction();
+    completeAndScheduleNextTransaction();
 }
 
 bool prepareCommand() {
@@ -152,8 +156,7 @@ bool prepareCommand() {
 bool startCommandTransmission() {
     if (!prepareCommand()) {
         showStatus("TX FAILED", "encode error");
-        transactionState.completeTransaction();
-        scheduleNextTransaction();
+        completeAndScheduleNextTransaction();
         return false;
     }
 
@@ -343,8 +346,7 @@ void processAcknowledgment() {
         );
 
         radio.standby();
-        transactionState.completeTransaction();
-        scheduleNextTransaction();
+        completeAndScheduleNextTransaction();
         return;
     }
 
@@ -372,8 +374,7 @@ void processAcknowledgment() {
     }
 
     radio.standby();
-    transactionState.completeTransaction();
-    scheduleNextTransaction();
+    completeAndScheduleNextTransaction();
 }
 
 void setup() {
