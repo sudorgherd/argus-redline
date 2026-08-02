@@ -4,6 +4,9 @@
 #include <RadioLib.h>
 #include "protocol.h"
 #include "device_config.h"
+#include "redline_version.h"
+#include "runtime_state.h"
+#include "transaction_engine.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -12,27 +15,19 @@ SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 
 constexpr unsigned long INITIAL_DELAY_MS = 2000;
 constexpr unsigned long TRANSACTION_INTERVAL_MS = 3000;
-constexpr unsigned long ACK_TIMEOUT_MS = 2500;
 constexpr unsigned long RETRY_DELAY_MS = 500;
 
-constexpr uint8_t MAX_RETRIES = 2;
-
-bool radioReady = false;
 volatile bool operationDone = false;
 
-enum class HubRadioState : uint8_t {
-    IDLE,
-    TRANSMITTING,
-    WAITING_FOR_ACK
-};
-
-HubRadioState hubState = HubRadioState::IDLE;
+RuntimeState::State runtimeState(
+    RuntimeState::DeviceRole::HUB,
+    DeviceConfig::LOCAL_ID,
+    DeviceConfig::PEER_ID
+);
 
 unsigned long nextTransmitAt = 0;
-unsigned long ackDeadline = 0;
 
-uint8_t currentSequence = 1;
-uint8_t retryCount = 0;
+TransactionEngine::HubTransactionState transactionState;
 
 Protocol::Packet currentCommand = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -82,6 +77,13 @@ void showStatus(const String& primary, const String& secondary) {
     Serial.println();
 }
 
+void logVersionMetadata() {
+    Serial.print("Wire Protocol: ");
+    Serial.println(RedlineVersion::WIRE_PROTOCOL);
+    Serial.print("Hardware profile: ");
+    Serial.println(RedlineVersion::HARDWARE_PROFILE);
+}
+
 void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.print(direction);
     Serial.print(" type=");
@@ -99,45 +101,47 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
 }
 
 void scheduleNextTransaction() {
-    currentSequence++;
-    retryCount = 0;
-
-    hubState = HubRadioState::IDLE;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
+}
+
+void completeAndScheduleNextTransaction() {
+    transactionState.completeTransaction();
+    scheduleNextTransaction();
 }
 
 void scheduleRetryOrNext(const String& reason) {
     radio.standby();
+    const TransactionEngine::HubTransactionAction action =
+        transactionState.attemptFailed();
 
-    if (retryCount < MAX_RETRIES) {
-        retryCount++;
-
+    if (action == TransactionEngine::HubTransactionAction::RETRANSMIT) {
         showStatus(
             reason,
-            String("retry ") + retryCount +
-            "/" + MAX_RETRIES
+            String("retry ") + transactionState.retryCount() +
+            "/" + transactionState.maximumRetries()
         );
 
-        hubState = HubRadioState::IDLE;
+        runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
         nextTransmitAt = millis() + RETRY_DELAY_MS;
         return;
     }
 
     showStatus(
         "COMMAND FAILED",
-        String("SEQ ") + currentSequence
+        String("SEQ ") + currentCommand.sequence
     );
 
-    scheduleNextTransaction();
+    completeAndScheduleNextTransaction();
 }
 
 bool prepareCommand() {
     currentCommand = {};
 
     currentCommand.type = Protocol::PacketType::COMMAND;
-    currentCommand.source = DeviceConfig::LOCAL_ID;
-    currentCommand.destination = DeviceConfig::PEER_ID;
-    currentCommand.sequence = currentSequence;
+    currentCommand.source = runtimeState.localId();
+    currentCommand.destination = runtimeState.peerId();
+    currentCommand.sequence = transactionState.currentSequence();
     currentCommand.opcode = Protocol::OPCODE_TEST;
     currentCommand.payloadLength = 0;
 
@@ -152,7 +156,7 @@ bool prepareCommand() {
 bool startCommandTransmission() {
     if (!prepareCommand()) {
         showStatus("TX FAILED", "encode error");
-        scheduleNextTransaction();
+        completeAndScheduleNextTransaction();
         return false;
     }
 
@@ -177,16 +181,22 @@ bool startCommandTransmission() {
     }
 
     logPacket(
-        retryCount == 0 ? "TX" : "TX RETRY",
+        transactionState.requestedTransmission() ==
+                TransactionEngine::HubTransactionAction::TRANSMIT_INITIAL
+            ? "TX"
+            : "TX RETRY",
         currentCommand
     );
 
     showStatus(
-        retryCount == 0 ? "TX COMMAND" : "TX RETRY",
-        String("SEQ ") + currentSequence
+        transactionState.requestedTransmission() ==
+                TransactionEngine::HubTransactionAction::TRANSMIT_INITIAL
+            ? "TX COMMAND"
+            : "TX RETRY",
+        String("SEQ ") + transactionState.currentSequence()
     );
 
-    hubState = HubRadioState::TRANSMITTING;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::TRANSMITTING);
     return true;
 }
 
@@ -205,10 +215,12 @@ bool startAckReceive(bool resetDeadline) {
         return false;
     }
 
-    hubState = HubRadioState::WAITING_FOR_ACK;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::WAITING_FOR_ACK);
 
     if (resetDeadline) {
-        ackDeadline = millis() + ACK_TIMEOUT_MS;
+        transactionState.beginAcknowledgmentWait(
+            static_cast<uint32_t>(millis())
+        );
     }
 
     return true;
@@ -217,7 +229,7 @@ bool startAckReceive(bool resetDeadline) {
 void handleAckTimeout() {
     showStatus(
         "ACK TIMEOUT",
-        String("SEQ ") + currentSequence
+        String("SEQ ") + currentCommand.sequence
     );
 
     scheduleRetryOrNext("ACK TIMEOUT");
@@ -226,25 +238,17 @@ void handleAckTimeout() {
 void continueWaitingForAck() {
     radio.standby();
 
-    if ((long)(millis() - ackDeadline) >= 0) {
+    const TransactionEngine::HubTransactionAction action =
+        transactionState.acknowledgmentWaitAction(
+            static_cast<uint32_t>(millis())
+        );
+
+    if (action != TransactionEngine::HubTransactionAction::NO_ACTION) {
         handleAckTimeout();
         return;
     }
 
     startAckReceive(false);
-}
-
-bool isMatchingAcknowledgment(
-    const Protocol::Packet& acknowledgment
-) {
-    return (
-        acknowledgment.type == Protocol::PacketType::ACK &&
-        acknowledgment.source == DeviceConfig::PEER_ID &&
-        acknowledgment.destination == DeviceConfig::LOCAL_ID &&
-        acknowledgment.sequence == currentSequence &&
-        acknowledgment.opcode == currentCommand.opcode &&
-        acknowledgment.payloadLength == 1
-    );
 }
 
 void processAcknowledgment() {
@@ -288,6 +292,7 @@ void processAcknowledgment() {
 
     const float rssi = radio.getRSSI();
     const float snr = radio.getSNR();
+    runtimeState.updateRadioMetrics(rssi, snr);
 
     Protocol::Packet acknowledgment = {};
 
@@ -306,12 +311,23 @@ void processAcknowledgment() {
     logPacket("RX", acknowledgment);
 
     Serial.print("RSSI: ");
-    Serial.print(rssi);
+    Serial.print(runtimeState.latestRssi());
     Serial.print(" dBm | SNR: ");
-    Serial.print(snr);
+    Serial.print(runtimeState.latestSnr());
     Serial.println(" dB");
 
-    if (!isMatchingAcknowledgment(acknowledgment)) {
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            currentCommand,
+            runtimeState.localId(),
+            runtimeState.peerId()
+        );
+
+    if (
+        evaluation.outcome !=
+        TransactionEngine::HubAckOutcome::MATCHING_ACK
+    ) {
         showStatus(
             "ACK IGNORED",
             String("SEQ ") + acknowledgment.sequence
@@ -321,7 +337,7 @@ void processAcknowledgment() {
         return;
     }
 
-    const uint8_t rawStatus = acknowledgment.payload[0];
+    const uint8_t rawStatus = evaluation.rawStatus;
 
     if (!Protocol::isValidAckStatus(rawStatus)) {
         showStatus(
@@ -330,19 +346,24 @@ void processAcknowledgment() {
         );
 
         radio.standby();
-        scheduleNextTransaction();
+        completeAndScheduleNextTransaction();
         return;
     }
 
     const Protocol::AckStatus status =
         static_cast<Protocol::AckStatus>(rawStatus);
+    const TransactionEngine::HubTransactionAction completion =
+        transactionState.acknowledgmentCompletionAction(status);
 
-    if (status == Protocol::AckStatus::SUCCESS) {
+    if (
+        completion ==
+        TransactionEngine::HubTransactionAction::TRANSACTION_SUCCEEDED
+    ) {
         showStatus(
             "ACK MATCHED",
-            String("SEQ ") + currentSequence +
-            " RSSI " + String(rssi, 0) +
-            " SNR " + String(snr, 1)
+            String("SEQ ") + currentCommand.sequence +
+            " RSSI " + String(runtimeState.latestRssi(), 0) +
+            " SNR " + String(runtimeState.latestSnr(), 1)
         );
     } else {
         showStatus(
@@ -353,7 +374,7 @@ void processAcknowledgment() {
     }
 
     radio.standby();
-    scheduleNextTransaction();
+    completeAndScheduleNextTransaction();
 }
 
 void setup() {
@@ -389,20 +410,26 @@ void setup() {
 
     radio.setDio1Action(setRadioFlag);
 
-    radioReady = true;
+    runtimeState.setReady(true);
     showHomeScreen("TX | READY");
-    showStatus("HUB READY", "Protocol v0.1.03");
+    showStatus(
+        runtimeState.role() == RuntimeState::DeviceRole::HUB
+            ? "HUB READY"
+            : "NODE READY",
+        String("Firmware: ") + RedlineVersion::FIRMWARE
+    );
+    logVersionMetadata();
 
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
 
 void loop() {
-    if (!radioReady) {
+    if (!runtimeState.isReady()) {
         delay(1000);
         return;
     }
 
-    if (hubState == HubRadioState::IDLE) {
+    if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
         if ((long)(millis() - nextTransmitAt) < 0) {
             return;
         }
@@ -413,10 +440,21 @@ void loop() {
 
     if (!operationDone) {
         if (
-            hubState == HubRadioState::WAITING_FOR_ACK &&
-            (long)(millis() - ackDeadline) >= 0
+            runtimeState.phase() ==
+                RuntimeState::RuntimePhase::WAITING_FOR_ACK &&
+            transactionState.isAwaitingAcknowledgment()
         ) {
-            handleAckTimeout();
+            const TransactionEngine::HubTransactionAction action =
+                transactionState.acknowledgmentWaitAction(
+                    static_cast<uint32_t>(millis())
+                );
+
+            if (
+                action !=
+                TransactionEngine::HubTransactionAction::NO_ACTION
+            ) {
+                handleAckTimeout();
+            }
         }
 
         return;
@@ -424,18 +462,24 @@ void loop() {
 
     operationDone = false;
 
-    if (hubState == HubRadioState::TRANSMITTING) {
+    if (
+        runtimeState.phase() ==
+        RuntimeState::RuntimePhase::TRANSMITTING
+    ) {
         digitalWrite(LED_BUILTIN, LOW);
         showStatus(
             "TX COMPLETE",
-            String("SEQ ") + currentSequence
+            String("SEQ ") + transactionState.currentSequence()
         );
 
         startAckReceive(true);
         return;
     }
 
-    if (hubState == HubRadioState::WAITING_FOR_ACK) {
+    if (
+        runtimeState.phase() ==
+        RuntimeState::RuntimePhase::WAITING_FOR_ACK
+    ) {
         processAcknowledgment();
     }
 }

@@ -4,21 +4,22 @@
 #include <RadioLib.h>
 #include "protocol.h"
 #include "device_config.h"
+#include "redline_version.h"
+#include "runtime_state.h"
+#include "transaction_engine.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
 SPIClass radioSPI(FSPI);
 SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 
-bool radioReady = false;
 volatile bool operationDone = false;
 
-enum class NodeRadioState : uint8_t {
-    LISTENING,
-    TRANSMITTING_ACK
-};
-
-NodeRadioState nodeState = NodeRadioState::LISTENING;
+RuntimeState::State runtimeState(
+    RuntimeState::DeviceRole::NODE,
+    DeviceConfig::LOCAL_ID,
+    DeviceConfig::PEER_ID
+);
 
 uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -27,11 +28,7 @@ size_t transmitLength = 0;
 Protocol::Packet pendingAcknowledgment = {};
 bool pendingAcknowledgmentDuplicate = false;
 
-bool hasLastCommand = false;
-uint8_t lastSource = 0;
-uint8_t lastSequence = 0;
-uint8_t lastOpcode = 0;
-Protocol::AckStatus lastAckStatus = Protocol::AckStatus::SUCCESS;
+TransactionEngine::NodeDuplicateTracker duplicateTracker;
 
 void IRAM_ATTR setRadioFlag() {
     operationDone = true;
@@ -77,6 +74,13 @@ void showStatus(const String& primary, const String& secondary) {
     Serial.println();
 }
 
+void logVersionMetadata() {
+    Serial.print("Wire Protocol: ");
+    Serial.println(RedlineVersion::WIRE_PROTOCOL);
+    Serial.print("Hardware profile: ");
+    Serial.println(RedlineVersion::HARDWARE_PROFILE);
+}
+
 void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.print(direction);
     Serial.print(" type=");
@@ -93,29 +97,9 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.println(packet.payloadLength);
 }
 
-bool isDuplicateCommand(const Protocol::Packet& packet) {
-    return (
-        hasLastCommand &&
-        packet.source == lastSource &&
-        packet.sequence == lastSequence &&
-        packet.opcode == lastOpcode
-    );
-}
-
-void rememberCommand(
-    const Protocol::Packet& packet,
-    Protocol::AckStatus status
-) {
-    hasLastCommand = true;
-    lastSource = packet.source;
-    lastSequence = packet.sequence;
-    lastOpcode = packet.opcode;
-    lastAckStatus = status;
-}
-
 bool startListening() {
     operationDone = false;
-    nodeState = NodeRadioState::LISTENING;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::LISTENING);
 
     const int state = radio.startReceive();
 
@@ -130,20 +114,18 @@ bool startListening() {
     return true;
 }
 
+void resumeListening() {
+    radio.standby();
+    startListening();
+}
+
 bool startAcknowledgment(
     const Protocol::Packet& command,
     Protocol::AckStatus status,
     bool duplicate
 ) {
-    pendingAcknowledgment = {};
-
-    pendingAcknowledgment.type = Protocol::PacketType::ACK;
-    pendingAcknowledgment.source = DeviceConfig::LOCAL_ID;
-    pendingAcknowledgment.destination = command.source;
-    pendingAcknowledgment.sequence = command.sequence;
-    pendingAcknowledgment.opcode = command.opcode;
-    pendingAcknowledgment.payloadLength = 1;
-    pendingAcknowledgment.payload[0] = static_cast<uint8_t>(status);
+    pendingAcknowledgment =
+        TransactionEngine::makeAcknowledgment(command, status);
 
     transmitLength = 0;
 
@@ -166,7 +148,7 @@ bool startAcknowledgment(
     delay(100);
 
     operationDone = false;
-    nodeState = NodeRadioState::TRANSMITTING_ACK;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
     digitalWrite(LED_BUILTIN, HIGH);
 
     const int state = radio.startTransmit(
@@ -215,8 +197,7 @@ void handleReceivedPacket() {
             String("LEN ") + packetLength
         );
 
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -231,8 +212,7 @@ void handleReceivedPacket() {
             String("CODE ") + readState
         );
 
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -240,8 +220,7 @@ void handleReceivedPacket() {
 
     if (!Protocol::decode(receiveBuffer, packetLength, command)) {
         showStatus("RX MALFORMED", "decode failed");
-        radio.standby();
-        startListening();
+        resumeListening();
         return;
     }
 
@@ -249,56 +228,52 @@ void handleReceivedPacket() {
 
     const float rssi = radio.getRSSI();
     const float snr = radio.getSNR();
+    runtimeState.updateRadioMetrics(rssi, snr);
 
     Serial.print("RSSI: ");
-    Serial.print(rssi);
+    Serial.print(runtimeState.latestRssi());
     Serial.print(" dBm | SNR: ");
-    Serial.print(snr);
+    Serial.print(runtimeState.latestSnr());
     Serial.println(" dB");
 
-    if (!Protocol::isAddressedTo(command, DeviceConfig::LOCAL_ID)) {
-        showStatus(
-            "RX IGNORED",
-            String("DST ") + command.destination
+    const TransactionEngine::NodeCommandEvaluation evaluation =
+        TransactionEngine::evaluateNodeCommand(
+            command,
+            runtimeState.localId(),
+            runtimeState.peerId(),
+            duplicateTracker
         );
 
-        radio.standby();
-        startListening();
-        return;
+    switch (evaluation.outcome) {
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_DESTINATION:
+            showStatus(
+                "RX IGNORED",
+                String("DST ") + command.destination
+            );
+            resumeListening();
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_SENDER:
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_PACKET_TYPE:
+            showStatus("RX IGNORED", "invalid sender/type");
+            resumeListening();
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::DUPLICATE:
+            startAcknowledgment(command, evaluation.status, true);
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::ACK_SUCCESS:
+        case TransactionEngine::NodeCommandOutcome::
+            ACK_UNSUPPORTED_OPCODE:
+        case TransactionEngine::NodeCommandOutcome::
+            ACK_MALFORMED_PACKET:
+            startAcknowledgment(command, evaluation.status, false);
+            return;
     }
-
-    if (
-        command.type != Protocol::PacketType::COMMAND ||
-        command.source != DeviceConfig::PEER_ID
-    ) {
-        showStatus("RX IGNORED", "invalid sender/type");
-        radio.standby();
-        startListening();
-        return;
-    }
-
-    if (isDuplicateCommand(command)) {
-        startAcknowledgment(command, lastAckStatus, true);
-        return;
-    }
-
-    Protocol::AckStatus status;
-
-    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
-        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
-    } else if (
-        !Protocol::isValidCommandPayload(
-            command.opcode,
-            command.payloadLength
-        )
-    ) {
-        status = Protocol::AckStatus::MALFORMED_PACKET;
-    } else {
-        status = Protocol::AckStatus::SUCCESS;
-    }
-
-    rememberCommand(command, status);
-    startAcknowledgment(command, status, false);
 }
 
 void setup() {
@@ -334,18 +309,24 @@ void setup() {
 
     radio.setDio1Action(setRadioFlag);
 
-    radioReady = true;
+    runtimeState.setReady(true);
     showHomeScreen("RX | READY");
-    showStatus("NODE READY", "Protocol v0.1.03");
+    showStatus(
+        runtimeState.role() == RuntimeState::DeviceRole::NODE
+            ? "NODE READY"
+            : "HUB READY",
+        String("Firmware: ") + RedlineVersion::FIRMWARE
+    );
+    logVersionMetadata();
 
     if (!startListening()) {
-        radioReady = false;
+        runtimeState.setReady(false);
         showHomeScreen("RX START ERR");
     }
 }
 
 void loop() {
-    if (!radioReady) {
+    if (!runtimeState.isReady()) {
         delay(1000);
         return;
     }
@@ -356,7 +337,10 @@ void loop() {
 
     operationDone = false;
 
-    if (nodeState == NodeRadioState::TRANSMITTING_ACK) {
+    if (
+        runtimeState.phase() ==
+        RuntimeState::RuntimePhase::TRANSMITTING_ACK
+    ) {
         finishAcknowledgment();
         return;
     }

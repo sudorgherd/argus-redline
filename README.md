@@ -8,7 +8,7 @@
 
 ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
-> **Documented firmware identifier:** v0.1.03 — reliable binary command exchange using the Protocol v0.1 wire format.
+> **Firmware identifier:** v0.2.0 — firmware architecture and native-test foundation, preserving the Protocol v0.1 wire format.
 
 ## What is ARGUS REDLINE?
 
@@ -22,9 +22,11 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
 
+The **[v0.2.0 Release Notes](docs/V0.2.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known evidence limitations.
+
 ## Implemented now
 
-Protocol v0.1 behavior has been built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices. The firmware source currently identifies itself as v0.1.03.
+Protocol v0.1 behavior was built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices using the `0.2.0-dev` build. After that regression passed, the firmware source identifier was finalized as v0.2.0; the finalization changes only the reported firmware-version value.
 
 Verified behavior includes:
 
@@ -71,7 +73,7 @@ Current logical device roles:
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies wire-format compatibility. The firmware source identifies itself as v0.1.03, which is also the latest repository tag documented here.
+Protocol v0.1 identifies wire-format compatibility. Firmware v0.2.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field |
 |---:|---|
@@ -129,7 +131,7 @@ The first published radio protocol release remains:
 
 - [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.1.03, which is also the latest repository tag documented here; it remains wire-compatible with Protocol v0.1.
+The firmware identifier in the source is v0.2.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
 
 The history includes the original string-based exchange, binary protocol implementation, reliability testing, and Protocol v0.1 merge.
 
