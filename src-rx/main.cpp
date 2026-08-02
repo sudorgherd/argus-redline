@@ -234,53 +234,46 @@ void handleReceivedPacket() {
     Serial.print(snr);
     Serial.println(" dB");
 
-    if (!Protocol::isAddressedTo(command, DeviceConfig::LOCAL_ID)) {
-        showStatus(
-            "RX IGNORED",
-            String("DST ") + command.destination
-        );
-
-        radio.standby();
-        startListening();
-        return;
-    }
-
-    if (
-        command.type != Protocol::PacketType::COMMAND ||
-        command.source != DeviceConfig::PEER_ID
-    ) {
-        showStatus("RX IGNORED", "invalid sender/type");
-        radio.standby();
-        startListening();
-        return;
-    }
-
-    if (duplicateTracker.isDuplicate(command)) {
-        startAcknowledgment(
+    const TransactionEngine::NodeCommandEvaluation evaluation =
+        TransactionEngine::evaluateNodeCommand(
             command,
-            duplicateTracker.rememberedStatus(),
-            true
+            DeviceConfig::LOCAL_ID,
+            DeviceConfig::PEER_ID,
+            duplicateTracker
         );
-        return;
+
+    switch (evaluation.outcome) {
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_DESTINATION:
+            showStatus(
+                "RX IGNORED",
+                String("DST ") + command.destination
+            );
+            radio.standby();
+            startListening();
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_SENDER:
+        case TransactionEngine::NodeCommandOutcome::
+            IGNORE_WRONG_PACKET_TYPE:
+            showStatus("RX IGNORED", "invalid sender/type");
+            radio.standby();
+            startListening();
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::DUPLICATE:
+            startAcknowledgment(command, evaluation.status, true);
+            return;
+
+        case TransactionEngine::NodeCommandOutcome::ACK_SUCCESS:
+        case TransactionEngine::NodeCommandOutcome::
+            ACK_UNSUPPORTED_OPCODE:
+        case TransactionEngine::NodeCommandOutcome::
+            ACK_MALFORMED_PACKET:
+            startAcknowledgment(command, evaluation.status, false);
+            return;
     }
-
-    Protocol::AckStatus status;
-
-    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
-        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
-    } else if (
-        !Protocol::isValidCommandPayload(
-            command.opcode,
-            command.payloadLength
-        )
-    ) {
-        status = Protocol::AckStatus::MALFORMED_PACKET;
-    } else {
-        status = Protocol::AckStatus::SUCCESS;
-    }
-
-    duplicateTracker.remember(command, status);
-    startAcknowledgment(command, status, false);
 }
 
 void setup() {

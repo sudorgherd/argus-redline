@@ -39,6 +39,79 @@ private:
     Protocol::AckStatus status_ = Protocol::AckStatus::SUCCESS;
 };
 
+enum class NodeCommandOutcome : uint8_t {
+    IGNORE_WRONG_DESTINATION,
+    IGNORE_WRONG_SENDER,
+    IGNORE_WRONG_PACKET_TYPE,
+    DUPLICATE,
+    ACK_SUCCESS,
+    ACK_UNSUPPORTED_OPCODE,
+    ACK_MALFORMED_PACKET
+};
+
+struct NodeCommandEvaluation {
+    NodeCommandOutcome outcome;
+    // Used only for DUPLICATE and ACK_* outcomes.
+    Protocol::AckStatus status;
+};
+
+inline NodeCommandEvaluation evaluateNodeCommand(
+    const Protocol::Packet& command,
+    uint8_t localDeviceId,
+    uint8_t peerDeviceId,
+    NodeDuplicateTracker& duplicateTracker
+) {
+    if (!Protocol::isAddressedTo(command, localDeviceId)) {
+        return {
+            NodeCommandOutcome::IGNORE_WRONG_DESTINATION,
+            Protocol::AckStatus::SUCCESS
+        };
+    }
+
+    if (command.type != Protocol::PacketType::COMMAND) {
+        return {
+            NodeCommandOutcome::IGNORE_WRONG_PACKET_TYPE,
+            Protocol::AckStatus::SUCCESS
+        };
+    }
+
+    if (command.source != peerDeviceId) {
+        return {
+            NodeCommandOutcome::IGNORE_WRONG_SENDER,
+            Protocol::AckStatus::SUCCESS
+        };
+    }
+
+    if (duplicateTracker.isDuplicate(command)) {
+        return {
+            NodeCommandOutcome::DUPLICATE,
+            duplicateTracker.rememberedStatus()
+        };
+    }
+
+    Protocol::AckStatus status;
+    NodeCommandOutcome outcome;
+
+    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
+        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
+        outcome = NodeCommandOutcome::ACK_UNSUPPORTED_OPCODE;
+    } else if (
+        !Protocol::isValidCommandPayload(
+            command.opcode,
+            command.payloadLength
+        )
+    ) {
+        status = Protocol::AckStatus::MALFORMED_PACKET;
+        outcome = NodeCommandOutcome::ACK_MALFORMED_PACKET;
+    } else {
+        status = Protocol::AckStatus::SUCCESS;
+        outcome = NodeCommandOutcome::ACK_SUCCESS;
+    }
+
+    duplicateTracker.remember(command, status);
+    return {outcome, status};
+}
+
 // Precondition: command was validated as addressed to the local Node.
 inline Protocol::Packet makeAcknowledgment(
     const Protocol::Packet& command,
