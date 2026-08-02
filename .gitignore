@@ -3,3 +3,4 @@
 *.pre-bidir.bak
 .vscode/
 *.code-workspace
+AGENTS.override.md
