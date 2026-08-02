@@ -112,6 +112,56 @@ inline NodeCommandEvaluation evaluateNodeCommand(
     return {outcome, status};
 }
 
+enum class HubAckOutcome : uint8_t {
+    IGNORE_WRONG_DESTINATION,
+    IGNORE_WRONG_SENDER,
+    IGNORE_WRONG_PACKET_TYPE,
+    IGNORE_WRONG_SEQUENCE,
+    IGNORE_WRONG_OPCODE,
+    IGNORE_MALFORMED_PAYLOAD,
+    MATCHING_ACK
+};
+
+struct HubAckEvaluation {
+    HubAckOutcome outcome;
+    // Used only for MATCHING_ACK.
+    uint8_t rawStatus;
+};
+
+// Precondition: outstandingCommand is the command for the active ACK wait.
+inline HubAckEvaluation evaluateHubAcknowledgment(
+    const Protocol::Packet& acknowledgment,
+    const Protocol::Packet& outstandingCommand,
+    uint8_t localHubId,
+    uint8_t peerNodeId
+) {
+    if (acknowledgment.type != Protocol::PacketType::ACK) {
+        return {HubAckOutcome::IGNORE_WRONG_PACKET_TYPE, 0};
+    }
+
+    if (acknowledgment.source != peerNodeId) {
+        return {HubAckOutcome::IGNORE_WRONG_SENDER, 0};
+    }
+
+    if (!Protocol::isAddressedTo(acknowledgment, localHubId)) {
+        return {HubAckOutcome::IGNORE_WRONG_DESTINATION, 0};
+    }
+
+    if (acknowledgment.sequence != outstandingCommand.sequence) {
+        return {HubAckOutcome::IGNORE_WRONG_SEQUENCE, 0};
+    }
+
+    if (acknowledgment.opcode != outstandingCommand.opcode) {
+        return {HubAckOutcome::IGNORE_WRONG_OPCODE, 0};
+    }
+
+    if (acknowledgment.payloadLength != 1) {
+        return {HubAckOutcome::IGNORE_MALFORMED_PAYLOAD, 0};
+    }
+
+    return {HubAckOutcome::MATCHING_ACK, acknowledgment.payload[0]};
+}
+
 // Precondition: command was validated as addressed to the local Node.
 inline Protocol::Packet makeAcknowledgment(
     const Protocol::Packet& command,

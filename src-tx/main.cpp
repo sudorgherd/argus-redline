@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "device_config.h"
 #include "redline_version.h"
+#include "transaction_engine.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -242,19 +243,6 @@ void continueWaitingForAck() {
     startAckReceive(false);
 }
 
-bool isMatchingAcknowledgment(
-    const Protocol::Packet& acknowledgment
-) {
-    return (
-        acknowledgment.type == Protocol::PacketType::ACK &&
-        acknowledgment.source == DeviceConfig::PEER_ID &&
-        acknowledgment.destination == DeviceConfig::LOCAL_ID &&
-        acknowledgment.sequence == currentSequence &&
-        acknowledgment.opcode == currentCommand.opcode &&
-        acknowledgment.payloadLength == 1
-    );
-}
-
 void processAcknowledgment() {
     const size_t packetLength = radio.getPacketLength();
 
@@ -319,7 +307,18 @@ void processAcknowledgment() {
     Serial.print(snr);
     Serial.println(" dB");
 
-    if (!isMatchingAcknowledgment(acknowledgment)) {
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            currentCommand,
+            DeviceConfig::LOCAL_ID,
+            DeviceConfig::PEER_ID
+        );
+
+    if (
+        evaluation.outcome !=
+        TransactionEngine::HubAckOutcome::MATCHING_ACK
+    ) {
         showStatus(
             "ACK IGNORED",
             String("SEQ ") + acknowledgment.sequence
@@ -329,7 +328,7 @@ void processAcknowledgment() {
         return;
     }
 
-    const uint8_t rawStatus = acknowledgment.payload[0];
+    const uint8_t rawStatus = evaluation.rawStatus;
 
     if (!Protocol::isValidAckStatus(rawStatus)) {
         showStatus(

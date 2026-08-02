@@ -20,6 +20,12 @@ Protocol::Packet makeCommand() {
     return command;
 }
 
+Protocol::Packet makeAcknowledgment(
+    Protocol::AckStatus status = Protocol::AckStatus::SUCCESS
+) {
+    return TransactionEngine::makeAcknowledgment(makeCommand(), status);
+}
+
 void testDuplicateStateBeginsEmpty() {
     TransactionEngine::NodeDuplicateTracker tracker;
     TEST_ASSERT_FALSE(tracker.isDuplicate(makeCommand()));
@@ -440,6 +446,283 @@ void testEvaluationOrderMatchesCurrentFirmware() {
     );
 }
 
+void testHubIgnoresWrongDestination() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.destination++;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::
+                IGNORE_WRONG_DESTINATION
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubIgnoresWrongSender() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.source++;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_SENDER
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubIgnoresNonAcknowledgmentPacket() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.type = Protocol::PacketType::COMMAND;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_PACKET_TYPE
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubIgnoresWrongSequence() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.sequence++;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_SEQUENCE
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubIgnoresWrongOpcode() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.opcode++;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_OPCODE
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubRejectsZeroLengthAcknowledgmentPayload() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.payloadLength = 0;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::
+                IGNORE_MALFORMED_PAYLOAD
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubRejectsLongAcknowledgmentPayload() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.payloadLength = 2;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::
+                IGNORE_MALFORMED_PAYLOAD
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubMatchingAcknowledgmentReturnsEncodedStatus() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.payload[0] = 0x7F;
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::MATCHING_ACK
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+    TEST_ASSERT_EQUAL_HEX8(0x7F, evaluation.rawStatus);
+}
+
+void testHubExtractsSuccessStatus() {
+    const Protocol::Packet command = makeCommand();
+    const Protocol::Packet acknowledgment = makeAcknowledgment(
+        Protocol::AckStatus::SUCCESS
+    );
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(Protocol::AckStatus::SUCCESS),
+        evaluation.rawStatus
+    );
+}
+
+void testHubExtractsNonSuccessStatus() {
+    const Protocol::Packet command = makeCommand();
+    const Protocol::Packet acknowledgment = makeAcknowledgment(
+        Protocol::AckStatus::MALFORMED_PACKET
+    );
+
+    const TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(Protocol::AckStatus::MALFORMED_PACKET),
+        evaluation.rawStatus
+    );
+}
+
+void testHubAcknowledgmentEvaluationOrderMatchesFirmware() {
+    const Protocol::Packet command = makeCommand();
+    Protocol::Packet acknowledgment = makeAcknowledgment();
+    acknowledgment.type = Protocol::PacketType::COMMAND;
+    acknowledgment.source++;
+    acknowledgment.destination++;
+
+    TransactionEngine::HubAckEvaluation evaluation =
+        TransactionEngine::evaluateHubAcknowledgment(
+            acknowledgment,
+            command,
+            HUB_ID,
+            NODE_ID
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_PACKET_TYPE
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+
+    acknowledgment.type = Protocol::PacketType::ACK;
+    evaluation = TransactionEngine::evaluateHubAcknowledgment(
+        acknowledgment,
+        command,
+        HUB_ID,
+        NODE_ID
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::IGNORE_WRONG_SENDER
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+
+    acknowledgment.source = NODE_ID;
+    evaluation = TransactionEngine::evaluateHubAcknowledgment(
+        acknowledgment,
+        command,
+        HUB_ID,
+        NODE_ID
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::HubAckOutcome::
+                IGNORE_WRONG_DESTINATION
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
+    );
+}
+
+void testHubEvaluatorDoesNotMutateOutstandingCommand() {
+    Protocol::Packet command = makeCommand();
+    const Protocol::Packet original = command;
+    TransactionEngine::evaluateHubAcknowledgment(
+        makeAcknowledgment(),
+        command,
+        HUB_ID,
+        NODE_ID
+    );
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(original.type),
+        static_cast<uint8_t>(command.type)
+    );
+    TEST_ASSERT_EQUAL_UINT8(original.source, command.source);
+    TEST_ASSERT_EQUAL_UINT8(original.destination, command.destination);
+    TEST_ASSERT_EQUAL_UINT8(original.sequence, command.sequence);
+    TEST_ASSERT_EQUAL_UINT8(original.opcode, command.opcode);
+    TEST_ASSERT_EQUAL_UINT8(
+        original.payloadLength,
+        command.payloadLength
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -466,5 +749,17 @@ int main(int, char**) {
     RUN_TEST(testDuplicatePacketDoesNotReplaceRememberedState);
     RUN_TEST(testNewCommandIsRememberedWithSelectedStatus);
     RUN_TEST(testEvaluationOrderMatchesCurrentFirmware);
+    RUN_TEST(testHubIgnoresWrongDestination);
+    RUN_TEST(testHubIgnoresWrongSender);
+    RUN_TEST(testHubIgnoresNonAcknowledgmentPacket);
+    RUN_TEST(testHubIgnoresWrongSequence);
+    RUN_TEST(testHubIgnoresWrongOpcode);
+    RUN_TEST(testHubRejectsZeroLengthAcknowledgmentPayload);
+    RUN_TEST(testHubRejectsLongAcknowledgmentPayload);
+    RUN_TEST(testHubMatchingAcknowledgmentReturnsEncodedStatus);
+    RUN_TEST(testHubExtractsSuccessStatus);
+    RUN_TEST(testHubExtractsNonSuccessStatus);
+    RUN_TEST(testHubAcknowledgmentEvaluationOrderMatchesFirmware);
+    RUN_TEST(testHubEvaluatorDoesNotMutateOutstandingCommand);
     return UNITY_END();
 }
