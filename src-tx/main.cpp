@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "device_config.h"
 #include "redline_version.h"
+#include "runtime_state.h"
 #include "transaction_engine.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
@@ -16,16 +17,13 @@ constexpr unsigned long INITIAL_DELAY_MS = 2000;
 constexpr unsigned long TRANSACTION_INTERVAL_MS = 3000;
 constexpr unsigned long RETRY_DELAY_MS = 500;
 
-bool radioReady = false;
 volatile bool operationDone = false;
 
-enum class HubRadioState : uint8_t {
-    IDLE,
-    TRANSMITTING,
-    WAITING_FOR_ACK
-};
-
-HubRadioState hubState = HubRadioState::IDLE;
+RuntimeState::State runtimeState(
+    RuntimeState::DeviceRole::HUB,
+    DeviceConfig::LOCAL_ID,
+    DeviceConfig::PEER_ID
+);
 
 unsigned long nextTransmitAt = 0;
 
@@ -103,7 +101,7 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
 }
 
 void scheduleNextTransaction() {
-    hubState = HubRadioState::IDLE;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
 }
 
@@ -119,7 +117,7 @@ void scheduleRetryOrNext(const String& reason) {
             "/" + transactionState.maximumRetries()
         );
 
-        hubState = HubRadioState::IDLE;
+        runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
         nextTransmitAt = millis() + RETRY_DELAY_MS;
         return;
     }
@@ -137,8 +135,8 @@ bool prepareCommand() {
     currentCommand = {};
 
     currentCommand.type = Protocol::PacketType::COMMAND;
-    currentCommand.source = DeviceConfig::LOCAL_ID;
-    currentCommand.destination = DeviceConfig::PEER_ID;
+    currentCommand.source = runtimeState.localId();
+    currentCommand.destination = runtimeState.peerId();
     currentCommand.sequence = transactionState.currentSequence();
     currentCommand.opcode = Protocol::OPCODE_TEST;
     currentCommand.payloadLength = 0;
@@ -195,7 +193,7 @@ bool startCommandTransmission() {
         String("SEQ ") + transactionState.currentSequence()
     );
 
-    hubState = HubRadioState::TRANSMITTING;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::TRANSMITTING);
     return true;
 }
 
@@ -214,7 +212,7 @@ bool startAckReceive(bool resetDeadline) {
         return false;
     }
 
-    hubState = HubRadioState::WAITING_FOR_ACK;
+    runtimeState.setPhase(RuntimeState::RuntimePhase::WAITING_FOR_ACK);
 
     if (resetDeadline) {
         transactionState.beginAcknowledgmentWait(
@@ -291,6 +289,7 @@ void processAcknowledgment() {
 
     const float rssi = radio.getRSSI();
     const float snr = radio.getSNR();
+    runtimeState.updateRadioMetrics(rssi, snr);
 
     Protocol::Packet acknowledgment = {};
 
@@ -309,17 +308,17 @@ void processAcknowledgment() {
     logPacket("RX", acknowledgment);
 
     Serial.print("RSSI: ");
-    Serial.print(rssi);
+    Serial.print(runtimeState.latestRssi());
     Serial.print(" dBm | SNR: ");
-    Serial.print(snr);
+    Serial.print(runtimeState.latestSnr());
     Serial.println(" dB");
 
     const TransactionEngine::HubAckEvaluation evaluation =
         TransactionEngine::evaluateHubAcknowledgment(
             acknowledgment,
             currentCommand,
-            DeviceConfig::LOCAL_ID,
-            DeviceConfig::PEER_ID
+            runtimeState.localId(),
+            runtimeState.peerId()
         );
 
     if (
@@ -361,8 +360,8 @@ void processAcknowledgment() {
         showStatus(
             "ACK MATCHED",
             String("SEQ ") + currentCommand.sequence +
-            " RSSI " + String(rssi, 0) +
-            " SNR " + String(snr, 1)
+            " RSSI " + String(runtimeState.latestRssi(), 0) +
+            " SNR " + String(runtimeState.latestSnr(), 1)
         );
     } else {
         showStatus(
@@ -410,10 +409,12 @@ void setup() {
 
     radio.setDio1Action(setRadioFlag);
 
-    radioReady = true;
+    runtimeState.setReady(true);
     showHomeScreen("TX | READY");
     showStatus(
-        "HUB READY",
+        runtimeState.role() == RuntimeState::DeviceRole::HUB
+            ? "HUB READY"
+            : "NODE READY",
         String("Firmware: ") + RedlineVersion::FIRMWARE
     );
     logVersionMetadata();
@@ -422,12 +423,12 @@ void setup() {
 }
 
 void loop() {
-    if (!radioReady) {
+    if (!runtimeState.isReady()) {
         delay(1000);
         return;
     }
 
-    if (hubState == HubRadioState::IDLE) {
+    if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
         if ((long)(millis() - nextTransmitAt) < 0) {
             return;
         }
@@ -438,7 +439,8 @@ void loop() {
 
     if (!operationDone) {
         if (
-            hubState == HubRadioState::WAITING_FOR_ACK &&
+            runtimeState.phase() ==
+                RuntimeState::RuntimePhase::WAITING_FOR_ACK &&
             transactionState.isAwaitingAcknowledgment()
         ) {
             const TransactionEngine::HubTransactionAction action =
@@ -459,7 +461,10 @@ void loop() {
 
     operationDone = false;
 
-    if (hubState == HubRadioState::TRANSMITTING) {
+    if (
+        runtimeState.phase() ==
+        RuntimeState::RuntimePhase::TRANSMITTING
+    ) {
         digitalWrite(LED_BUILTIN, LOW);
         showStatus(
             "TX COMPLETE",
@@ -470,7 +475,10 @@ void loop() {
         return;
     }
 
-    if (hubState == HubRadioState::WAITING_FOR_ACK) {
+    if (
+        runtimeState.phase() ==
+        RuntimeState::RuntimePhase::WAITING_FOR_ACK
+    ) {
         processAcknowledgment();
     }
 }
