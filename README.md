@@ -18,7 +18,9 @@ REDLINE uses small structured packets to invoke, configure, or coordinate substa
 
 The v1 target includes multiple directly reachable Nodes, reliable commands and Node-originated events, persistent identity and settings, approved sensor and output capabilities, local device screens, a documented host interface, authenticated encryption, replay protection, and device revocation. Mesh routing, repeaters, GNSS, final enclosures, and full ARGUS integration are later development layers rather than v1 requirements.
 
-See **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** for the full system definition, technical objectives, targeted v1 capabilities, present implementation status, and deliberate non-goals.
+**[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** defines the system purpose and broad capability direction.
+
+The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
 
 ## Implemented now
 

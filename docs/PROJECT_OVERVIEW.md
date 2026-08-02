@@ -415,22 +415,17 @@ The project follows a simple rule:
 
 > Build a reliable, reusable device platform first. Add specialized operational behavior only when a concrete need justifies it.
 
-The planned development progression is:
+The conceptual development progression is:
 
 ```text
 stable radio foundation
-→ usable device shell
-→ persistent configuration
-→ useful commands and responses
-→ reliable Node-originated events
-→ approved sensors and outputs
-→ provisioning and identity
-→ multiple direct Nodes
-→ authentication and encryption
-→ field qualification
+→ reusable device platform
+→ secure direct-network platform
 → v1.0.0
-→ relays, store-and-forward, and mesh-capable operation
+→ optional distributed expansion
 ```
+
+This sequence expresses broad product direction only. The [Versioned Development Roadmap](ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md) defines the authoritative version ordering, milestone scope, and release gates.
 
 ---
 
