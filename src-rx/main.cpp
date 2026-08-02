@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "device_config.h"
 #include "redline_version.h"
+#include "transaction_engine.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -28,11 +29,7 @@ size_t transmitLength = 0;
 Protocol::Packet pendingAcknowledgment = {};
 bool pendingAcknowledgmentDuplicate = false;
 
-bool hasLastCommand = false;
-uint8_t lastSource = 0;
-uint8_t lastSequence = 0;
-uint8_t lastOpcode = 0;
-Protocol::AckStatus lastAckStatus = Protocol::AckStatus::SUCCESS;
+TransactionEngine::NodeDuplicateTracker duplicateTracker;
 
 void IRAM_ATTR setRadioFlag() {
     operationDone = true;
@@ -101,26 +98,6 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.println(packet.payloadLength);
 }
 
-bool isDuplicateCommand(const Protocol::Packet& packet) {
-    return (
-        hasLastCommand &&
-        packet.source == lastSource &&
-        packet.sequence == lastSequence &&
-        packet.opcode == lastOpcode
-    );
-}
-
-void rememberCommand(
-    const Protocol::Packet& packet,
-    Protocol::AckStatus status
-) {
-    hasLastCommand = true;
-    lastSource = packet.source;
-    lastSequence = packet.sequence;
-    lastOpcode = packet.opcode;
-    lastAckStatus = status;
-}
-
 bool startListening() {
     operationDone = false;
     nodeState = NodeRadioState::LISTENING;
@@ -143,15 +120,8 @@ bool startAcknowledgment(
     Protocol::AckStatus status,
     bool duplicate
 ) {
-    pendingAcknowledgment = {};
-
-    pendingAcknowledgment.type = Protocol::PacketType::ACK;
-    pendingAcknowledgment.source = DeviceConfig::LOCAL_ID;
-    pendingAcknowledgment.destination = command.source;
-    pendingAcknowledgment.sequence = command.sequence;
-    pendingAcknowledgment.opcode = command.opcode;
-    pendingAcknowledgment.payloadLength = 1;
-    pendingAcknowledgment.payload[0] = static_cast<uint8_t>(status);
+    pendingAcknowledgment =
+        TransactionEngine::makeAcknowledgment(command, status);
 
     transmitLength = 0;
 
@@ -285,8 +255,12 @@ void handleReceivedPacket() {
         return;
     }
 
-    if (isDuplicateCommand(command)) {
-        startAcknowledgment(command, lastAckStatus, true);
+    if (duplicateTracker.isDuplicate(command)) {
+        startAcknowledgment(
+            command,
+            duplicateTracker.rememberedStatus(),
+            true
+        );
         return;
     }
 
@@ -305,7 +279,7 @@ void handleReceivedPacket() {
         status = Protocol::AckStatus::SUCCESS;
     }
 
-    rememberCommand(command, status);
+    duplicateTracker.remember(command, status);
     startAcknowledgment(command, status, false);
 }
 
