@@ -8,7 +8,7 @@
 
 ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
-> **Current milestone:** Protocol v0.1 — verified reliable binary command exchange over LoRa.
+> **Documented firmware identifier:** v0.1.03 — reliable binary command exchange using the Protocol v0.1 wire format.
 
 ## What is ARGUS REDLINE?
 
@@ -20,9 +20,9 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 See **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** for the full system definition, technical objectives, targeted v1 capabilities, present implementation status, and deliberate non-goals.
 
-## Current status
+## Implemented now
 
-Protocol v0.1 has been built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices.
+Protocol v0.1 behavior has been built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices. The firmware source currently identifies itself as v0.1.03.
 
 Verified behavior includes:
 
@@ -31,8 +31,8 @@ Verified behavior includes:
 - Versioned binary packet format
 - Sequence-matched acknowledgments
 - Bounded retransmission attempts
-- Duplicate-command suppression
-- Cached acknowledgment replay
+- Single-entry, in-memory duplicate detection based on the most recently received source, sequence, and opcode; this state is volatile across restart
+- Duplicate ACK regeneration from cached transaction metadata and status
 - Recovery after temporary node loss
 - Packet-length and packet-type validation
 - RSSI and SNR diagnostics
@@ -65,9 +65,11 @@ Current logical device roles:
 | Hub | `0x01` |
 | Node | `0x10` |
 
-## Protocol v0.1
+## Protocol v0.1 wire format
 
 Packets use a six-byte header followed by an optional payload.
+
+Protocol v0.1 identifies wire-format compatibility. The firmware source identifies itself as v0.1.03, which is also the latest repository tag documented here.
 
 | Byte | Field |
 |---:|---|
@@ -81,11 +83,13 @@ Packets use a six-byte header followed by an optional payload.
 
 Maximum packet size is currently 32 bytes.
 
-Supported packet types:
+The codec recognizes these packet types:
 
 - `COMMAND`
 - `ACK`
 - `ERROR`
+
+Current firmware actively uses only `COMMAND` and `ACK`. `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
 
 Protocol definitions and encoding logic are located in [`include/protocol.h`](include/protocol.h).
 
@@ -117,37 +121,40 @@ Upload ports may need to be changed in `platformio.ini`.
 
 This repository intentionally preserves its branches, tags, and commit history.
 
-Current public branches:
+`main` is the primary branch. Temporary development and documentation branches may exist, so this document does not maintain a branch inventory.
 
-- `main`
-- `protocol-v0.1`
-- `public-launch`
+The first published radio protocol release remains:
 
-Current release tag:
+- [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-- `v0.1.0`
+The firmware identifier in the source is v0.1.03, which is also the latest repository tag documented here; it remains wire-compatible with Protocol v0.1.
 
 The history includes the original string-based exchange, binary protocol implementation, reliability testing, and Protocol v0.1 merge.
 
 ## Development direction
 
-Areas under consideration include:
+### V1 target
 
-- Multiple addressed Nodes
-- Authenticated and encrypted packets
-- Persistent transaction identity
-- Handheld, vehicle, sensor, actuator, and stationary device profiles
-- Approved logical capabilities for sensors, inputs, outputs, and trigger mechanisms
+- Reliable radio transport with structured responses and events, duplicate suppression, and per-device transaction statistics
+- Multiple directly reachable Nodes with persistent identities, controlled provisioning, and per-Node state
+- A usable device interface with local screens, button input, persistent settings, and clear status feedback
+- Initial commands and events including `PING`, `GET_DEVICE_INFO`, `GET_STATUS`, `SET_INDICATOR`, and `REPORT_EVENT`
+- A documented computer-facing Hub interface with registry, transaction, capability, and configuration visibility
+- Authenticated encryption, persistent counters, replay rejection, credential rotation, device revocation, and recovery after missed updates
+
+These bullets describe complete v1 targets. Some radio-transport foundations are implemented now, but the listed v1 capabilities are not complete.
+
+### Exploratory and later concepts
+
+- Device profiles for handheld, vehicle, sensor, actuator, and stationary roles
 - Parameterized operations, policies, stored procedures, and compact workflow definitions
 - Emergency signaling and operator check-ins
 - Store-and-forward messaging
 - Repeaters and mobile relay Nodes
 - GNSS and sensor telemetry
-- Computer-connected Hub services
-- ARGUS operator-interface integration
-- Device revocation and key rotation
+- Full ARGUS operator-interface integration
 
-These are development directions, not completed features.
+These ideas may be explored where concrete requirements justify them. Their inclusion here is not a commitment to implement them in v1 or afterward, and they are not currently operational features.
 
 ## Security
 

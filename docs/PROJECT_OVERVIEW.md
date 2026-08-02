@@ -188,7 +188,7 @@ Controlled trigger mechanisms may eventually include indicators, alarms, signali
 
 ---
 
-## Targeted v1 Capabilities
+## V1 Target
 
 ARGUS REDLINE v1 is intended to provide a stable, secure, multi-device LoRa coordination platform.
 
@@ -358,25 +358,27 @@ Target capabilities:
 
 ---
 
-## What Exists Today
+## Implemented Now
 
 The current firmware foundation already provides:
 
 - Two independently buildable Heltec firmware targets
 - Bidirectional LoRa communication at 915 MHz
 - Asynchronous Hub and Node radio state machines
-- Protocol v0.1 binary packet encoding
+- Protocol v0.1 wire-format support; the firmware source identifies itself as v0.1.03
 - Explicit device addressing
 - Sequence-matched acknowledgments
 - Bounded retransmission
-- Duplicate-command suppression
-- Cached acknowledgment replay
+- Single-entry, in-memory duplicate detection based on the most recently received source, sequence, and opcode; this state is volatile across restart
+- Duplicate ACK regeneration from cached transaction metadata and status
 - Opcode and payload validation
 - Configurable compile-time device identities
 - RSSI and SNR diagnostics
 - Physical two-board validation
 
-The current application behavior remains intentionally narrow: a test command and acknowledgment exchange.
+The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
+
+The current application behavior remains intentionally narrow: a test command and acknowledgment exchange between one Hub and one Node.
 
 Current packets are structured and validated but are **not yet cryptographically authenticated or encrypted**.
 
@@ -384,9 +386,9 @@ Sensors, trigger mechanisms, transferred procedures, multiple active Nodes, repe
 
 ---
 
-## What v1 Does Not Need
+## Outside the Initial v1 Scope
 
-The following ideas are legitimate future directions, but they are not required for the first stable release:
+The following ideas are not required for the first stable release. They may be explored later where concrete requirements justify them, but this list is not a commitment to implement them after v1:
 
 - Mesh routing
 - Repeaters
@@ -413,7 +415,7 @@ The project follows a simple rule:
 
 > Build a reliable, reusable device platform first. Add specialized operational behavior only when a concrete need justifies it.
 
-The planned progression is:
+The planned development progression is:
 
 ```text
 stable radio foundation
