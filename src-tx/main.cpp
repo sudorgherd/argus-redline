@@ -4,6 +4,7 @@
 #include <RadioLib.h>
 #include "protocol.h"
 #include "device_config.h"
+#include "redline_version.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -80,6 +81,13 @@ void showStatus(const String& primary, const String& secondary) {
     }
 
     Serial.println();
+}
+
+void logVersionMetadata() {
+    Serial.print("Wire Protocol: ");
+    Serial.println(RedlineVersion::WIRE_PROTOCOL);
+    Serial.print("Hardware profile: ");
+    Serial.println(RedlineVersion::HARDWARE_PROFILE);
 }
 
 void logPacket(const char* direction, const Protocol::Packet& packet) {
@@ -391,7 +399,11 @@ void setup() {
 
     radioReady = true;
     showHomeScreen("TX | READY");
-    showStatus("HUB READY", "Protocol v0.1.03");
+    showStatus(
+        "HUB READY",
+        String("Firmware: ") + RedlineVersion::FIRMWARE
+    );
+    logVersionMetadata();
 
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
