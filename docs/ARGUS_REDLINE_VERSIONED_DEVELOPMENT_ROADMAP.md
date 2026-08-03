@@ -1,8 +1,8 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current released firmware:** `v0.1.03`
-**Next planned firmware release:** `v0.2.0`
+**Current completed release:** `v0.2.0`
+**Immediate next release:** `v0.3.0` — Device Runtime, Screens, and Input
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -93,7 +93,9 @@ Procedure package       not defined before v1
 
 # Pre-v1 Development
 
-## `v0.2.0` — Firmware Architecture and Test Foundation
+## `v0.2.0` — Firmware Architecture and Test Foundation — Complete
+
+**Status:** Completed and released.
 
 ### Objective
 
@@ -956,20 +958,20 @@ Stable routing, security, and procedure-package interfaces
 The next planned release is:
 
 ```text
-v0.2.0
-Firmware Architecture and Test Foundation
+v0.3.0
+Device Runtime, Screens, and Input
 ```
 
 Immediate work:
 
 ```text
-[ ] Define component boundaries
-[ ] Extract shared protocol and transaction code
-[ ] Add firmware, wire, configuration, and hardware version metadata
-[ ] Establish native test environment
-[ ] Add Protocol 1 encode/decode tests
-[ ] Add ACK, retry, duplicate, and sequence tests
+[ ] Extend authoritative runtime presentation and diagnostic state
+[ ] Add shared Hub and Node screen behavior
+[ ] Add debounced semantic button input
+[ ] Add nonblocking dirty and rate-limited display updates
+[ ] Add display timeout and wake behavior
+[ ] Add native tests for input, navigation, state, and presentation policy
 [ ] Build and flash both physical boards
-[ ] Verify the existing TEST transaction
-[ ] Publish v0.2.0 only after regression passes
+[ ] Verify existing Protocol 1 TEST/ACK behavior remains unchanged
+[ ] Publish v0.3.0 only after physical regression passes
 ```
