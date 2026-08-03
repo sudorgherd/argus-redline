@@ -461,6 +461,450 @@ void testControllersRemainIndependent() {
     TEST_ASSERT_TRUE(second.displayAwake());
 }
 
+DeviceUi::PresentationInput makePresentationInput(
+    RuntimeState::DeviceRole role = RuntimeState::DeviceRole::HUB
+) {
+    DeviceUi::PresentationInput input;
+    input.role = role;
+    input.localId = role == RuntimeState::DeviceRole::HUB ? 0x01 : 0x10;
+    input.peerId = role == RuntimeState::DeviceRole::HUB ? 0x10 : 0x01;
+    input.ready = true;
+    input.health = RuntimeState::Health::READY;
+    input.phase = role == RuntimeState::DeviceRole::HUB
+        ? RuntimeState::RuntimePhase::IDLE
+        : RuntimeState::RuntimePhase::LISTENING;
+    input.firmwareVersion = "v0.2.0";
+    input.wireProtocolVersion = 1;
+    input.hardwareProfile = "HELTEC_V4";
+    return input;
+}
+
+void assertRow(
+    const DeviceUi::PresentationSnapshot& snapshot,
+    uint8_t index,
+    const char* label,
+    const char* value
+) {
+    TEST_ASSERT_LESS_THAN_UINT8(snapshot.rowCount, index);
+    TEST_ASSERT_EQUAL_STRING(label, snapshot.rows[index].label);
+    TEST_ASSERT_EQUAL_STRING(value, snapshot.rows[index].value);
+}
+
+void testEveryScreenBuildsWithMatchingIdAndBoundedRows() {
+    const DeviceUi::Screen screens[] = {
+        DeviceUi::Screen::HOME,
+        DeviceUi::Screen::RADIO,
+        DeviceUi::Screen::DEVICE,
+        DeviceUi::Screen::LAST_PACKET,
+        DeviceUi::Screen::DIAGNOSTICS,
+        DeviceUi::Screen::ABOUT
+    };
+    const DeviceUi::PresentationInput input = makePresentationInput();
+    for (DeviceUi::Screen screen : screens) {
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(screen, input);
+        assertScreen(screen, snapshot.screen);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT8(
+            DeviceUi::MAX_PRESENTATION_ROWS,
+            snapshot.rowCount
+        );
+        TEST_ASSERT_NOT_EQUAL('\0', snapshot.title[0]);
+    }
+}
+
+void testBuilderFullyReplacesReusedSnapshotAndDoesNotMutateInput() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    const uint8_t originalLocalId = input.localId;
+    DeviceUi::PresentationSnapshot snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::DIAGNOSTICS,
+        input
+    );
+    TEST_ASSERT_EQUAL_UINT8(5, snapshot.rowCount);
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
+    TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.rows[1].label[0]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.rows[1].value[0]);
+    TEST_ASSERT_EQUAL_UINT8(originalLocalId, input.localId);
+}
+
+void testFixedStringsAreBoundedAndNullTerminated() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.hardwareProfile = "123456789012345678901234567890";
+    input.firmwareVersion = "abcdefghijklmnopqrstuvwxyz";
+    const DeviceUi::PresentationSnapshot device =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+    const DeviceUi::PresentationSnapshot about =
+        DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    TEST_ASSERT_EQUAL_CHAR(
+        '\0',
+        device.rows[4].value[DeviceUi::PRESENTATION_VALUE_CAPACITY - 1]
+    );
+    TEST_ASSERT_EQUAL_CHAR(
+        '\0',
+        about.rows[0].value[DeviceUi::PRESENTATION_VALUE_CAPACITY - 1]
+    );
+}
+
+void testHomeRoleAndAllHealthLabelsAreDeterministic() {
+    DeviceUi::PresentationInput hub = makePresentationInput();
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::HOME, hub),
+        0,
+        "TX",
+        "READY"
+    );
+    DeviceUi::PresentationInput node =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    const RuntimeState::Health healthValues[] = {
+        RuntimeState::Health::STARTING,
+        RuntimeState::Health::READY,
+        RuntimeState::Health::DEGRADED,
+        RuntimeState::Health::ERROR
+    };
+    const char* labels[] = {"START", "READY", "DEGRADED", "ERROR"};
+    for (uint8_t index = 0; index < 4; ++index) {
+        node.health = healthValues[index];
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(DeviceUi::Screen::HOME, node);
+        assertRow(snapshot, 0, "RX", labels[index]);
+        TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
+    }
+}
+
+void testUnknownRoleAndHealthUseFallbacks() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.role = static_cast<RuntimeState::DeviceRole>(0xFF);
+    input.health = static_cast<RuntimeState::Health>(0xFF);
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input),
+        0,
+        "UNKNOWN",
+        "UNKNOWN"
+    );
+}
+
+void testRadioRetainsMetricsIncludingRealZero() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.radioMetricsAvailable = true;
+    input.rssi = 0.0F;
+    input.snr = -1.25F;
+    input.peerState = DeviceUi::PeerState::REACHABLE;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, input);
+    assertRow(snapshot, 2, "RSSI", "0.0");
+    assertRow(snapshot, 3, "SNR", "-1.2");
+    assertRow(snapshot, 4, "PEER", "REACHABLE");
+}
+
+void testRadioUnavailableMetricsAreExplicit() {
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(
+            DeviceUi::Screen::RADIO,
+            makePresentationInput()
+        );
+    assertRow(snapshot, 2, "RSSI", "--");
+    assertRow(snapshot, 3, "SNR", "--");
+}
+
+void testAllRuntimePhasesAndUnknownFallbackMapDeterministically() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    const RuntimeState::RuntimePhase phases[] = {
+        RuntimeState::RuntimePhase::IDLE,
+        RuntimeState::RuntimePhase::TRANSMITTING,
+        RuntimeState::RuntimePhase::WAITING_FOR_ACK,
+        RuntimeState::RuntimePhase::LISTENING,
+        RuntimeState::RuntimePhase::TRANSMITTING_ACK,
+        static_cast<RuntimeState::RuntimePhase>(0xFF)
+    };
+    const char* labels[] = {
+        "IDLE", "TX", "WAIT ACK", "LISTEN", "TX ACK", "UNKNOWN"
+    };
+    for (uint8_t index = 0; index < 6; ++index) {
+        input.phase = phases[index];
+        assertRow(
+            DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, input),
+            1,
+            "PHASE",
+            labels[index]
+        );
+    }
+}
+
+void testPeerStateMappingIsRoleConstrained() {
+    DeviceUi::PresentationInput hub = makePresentationInput();
+    hub.peerState = DeviceUi::PeerState::DEGRADED;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, hub),
+        4,
+        "PEER",
+        "DEGRADED"
+    );
+    DeviceUi::PresentationInput node =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    node.peerState = DeviceUi::PeerState::SEEN;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, node),
+        4,
+        "PEER",
+        "SEEN"
+    );
+    node.peerState = DeviceUi::PeerState::DEGRADED;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, node),
+        4,
+        "PEER",
+        "UNKNOWN"
+    );
+}
+
+void testDeviceShowsIdentityReadinessHealthAndProfile() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    const DeviceUi::PresentationSnapshot ready =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+    assertRow(ready, 0, "ROLE", "TX");
+    assertRow(ready, 1, "LOCAL", "0x01");
+    assertRow(ready, 2, "PEER", "0x10");
+    assertRow(ready, 3, "STATUS", "READY");
+    assertRow(ready, 4, "HW", "HELTEC_V4");
+    input.ready = false;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input),
+        3,
+        "STATUS",
+        "NOT READY"
+    );
+}
+
+void testUnavailableLastPacketShowsNoPacketOnly() {
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(
+            DeviceUi::Screen::LAST_PACKET,
+            makePresentationInput()
+        );
+    TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
+    assertRow(snapshot, 0, "RX", "NO PACKET");
+}
+
+void testHubAckLastPacketRetainsAllFieldsAndStatus() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.lastInboundPacket = {
+        true,
+        static_cast<uint8_t>(Protocol::PacketType::ACK),
+        0x10,
+        0x01,
+        31,
+        Protocol::OPCODE_TEST,
+        1,
+        true,
+        static_cast<uint8_t>(Protocol::AckStatus::SUCCESS),
+        1234
+    };
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input);
+    assertRow(snapshot, 0, "RX", "ACK");
+    assertRow(snapshot, 1, "SRC>DST", "10>01");
+    assertRow(snapshot, 2, "SEQ/OP", "31/100");
+    assertRow(snapshot, 3, "LEN", "1");
+    assertRow(snapshot, 4, "ACK", "SUCCESS");
+}
+
+void testNodeCommandLastPacketUsesUnavailableAckStatus() {
+    DeviceUi::PresentationInput input =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    input.lastInboundPacket = {
+        true,
+        static_cast<uint8_t>(Protocol::PacketType::COMMAND),
+        0x01,
+        0x10,
+        0,
+        Protocol::OPCODE_TEST,
+        0,
+        false,
+        99,
+        0
+    };
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input);
+    assertRow(snapshot, 0, "RX", "COMMAND");
+    assertRow(snapshot, 1, "SRC>DST", "01>10");
+    assertRow(snapshot, 2, "SEQ/OP", "0/100");
+    assertRow(snapshot, 3, "LEN", "0");
+    assertRow(snapshot, 4, "ACK", "--");
+}
+
+void testPacketAndAckUnknownRawValuesUseNumericFallbacks() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.lastInboundPacket.available = true;
+    input.lastInboundPacket.rawType = 0xFE;
+    input.lastInboundPacket.ackStatusAvailable = true;
+    input.lastInboundPacket.rawAckStatus = 0xFD;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input);
+    assertRow(snapshot, 0, "RX", "TYPE 254");
+    assertRow(snapshot, 4, "ACK", "STATUS 253");
+}
+
+void testEveryRecognizedPacketAndAckStatusMapsDeterministically() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.lastInboundPacket.available = true;
+    input.lastInboundPacket.ackStatusAvailable = true;
+    const uint8_t types[] = {1, 2, 3};
+    const char* typeLabels[] = {"COMMAND", "ACK", "ERROR"};
+    for (uint8_t index = 0; index < 3; ++index) {
+        input.lastInboundPacket.rawType = types[index];
+        assertRow(
+            DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input),
+            0,
+            "RX",
+            typeLabels[index]
+        );
+    }
+    const uint8_t statuses[] = {0, 1, 2};
+    const char* statusLabels[] = {"SUCCESS", "UNSUPPORTED", "MALFORMED"};
+    for (uint8_t index = 0; index < 3; ++index) {
+        input.lastInboundPacket.rawAckStatus = statuses[index];
+        assertRow(
+            DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input),
+            4,
+            "ACK",
+            statusLabels[index]
+        );
+    }
+}
+
+void testLaterPacketPresentationCannotRetainAckStatus() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.lastInboundPacket.available = true;
+    input.lastInboundPacket.ackStatusAvailable = true;
+    input.lastInboundPacket.rawAckStatus = 0;
+    DeviceUi::PresentationSnapshot snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::LAST_PACKET,
+        input
+    );
+    assertRow(snapshot, 4, "ACK", "SUCCESS");
+    input.lastInboundPacket.ackStatusAvailable = false;
+    snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::LAST_PACKET,
+        input
+    );
+    assertRow(snapshot, 4, "ACK", "--");
+}
+
+void testHubDiagnosticsUsesBoundedRoleSpecificRows() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.counters.transmissionsCompleted = 10;
+    input.counters.successfulTransactions = 8;
+    input.counters.retransmissions = 2;
+    input.counters.acknowledgmentTimeouts = 3;
+    input.counters.malformedPackets = 4;
+    input.counters.ignoredPackets = 5;
+    input.lastError = RuntimeState::ErrorClass::ACK_TIMEOUT;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "TX", "10");
+    assertRow(snapshot, 1, "SUCCESS", "8");
+    assertRow(snapshot, 2, "RETRY/TO", "2/3");
+    assertRow(snapshot, 3, "BAD/IGN", "9");
+    assertRow(snapshot, 4, "ERROR", "ACK TIMEOUT");
+}
+
+void testNodeDiagnosticsUsesBoundedRoleSpecificRows() {
+    DeviceUi::PresentationInput input =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    input.counters.decodedPacketsReceived = 11;
+    input.counters.acceptedCommands = 9;
+    input.counters.transmissionsCompleted = 10;
+    input.counters.duplicates = 1;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "RX", "11");
+    assertRow(snapshot, 1, "CMD/ACK", "9/10");
+    assertRow(snapshot, 2, "DUP", "1");
+    assertRow(snapshot, 3, "BAD/IGN", "0");
+    assertRow(snapshot, 4, "ERROR", "NONE");
+}
+
+void testDiagnosticsCombinedCountSaturatesAndMaximumFormats() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.counters.transmissionsCompleted = UINT32_MAX;
+    input.counters.malformedPackets = UINT32_MAX;
+    input.counters.ignoredPackets = 1;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "TX", "4294967295");
+    assertRow(snapshot, 3, "BAD/IGN", "4294967295");
+}
+
+void testEveryErrorClassAndUnknownFallbackMapsDeterministically() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    const RuntimeState::ErrorClass errors[] = {
+        RuntimeState::ErrorClass::NONE,
+        RuntimeState::ErrorClass::RADIO_INITIALIZATION,
+        RuntimeState::ErrorClass::RADIO_START_RECEIVE,
+        RuntimeState::ErrorClass::RADIO_START_TRANSMIT,
+        RuntimeState::ErrorClass::RADIO_READ,
+        RuntimeState::ErrorClass::PACKET_LENGTH,
+        RuntimeState::ErrorClass::PACKET_DECODE,
+        RuntimeState::ErrorClass::PACKET_IGNORED,
+        RuntimeState::ErrorClass::ACK_TIMEOUT,
+        RuntimeState::ErrorClass::REMOTE_ACK,
+        RuntimeState::ErrorClass::ACK_STATUS,
+        static_cast<RuntimeState::ErrorClass>(0xFF)
+    };
+    const char* labels[] = {
+        "NONE", "RADIO INIT", "START RECEIVE", "START TRANSMIT",
+        "RADIO READ", "PACKET LENGTH", "PACKET DECODE",
+        "PACKET IGNORED", "ACK TIMEOUT", "REMOTE ACK", "ACK STATUS",
+        "UNKNOWN"
+    };
+    for (uint8_t index = 0; index < 12; ++index) {
+        input.lastError = errors[index];
+        assertRow(
+            DeviceUi::buildPresentation(
+                DeviceUi::Screen::DIAGNOSTICS,
+                input
+            ),
+            4,
+            "ERROR",
+            labels[index]
+        );
+    }
+}
+
+void testAboutUsesSuppliedMetadataExactlyWithoutFutureVersion() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.firmwareVersion = "custom-build";
+    input.wireProtocolVersion = 1;
+    input.hardwareProfile = "HELTEC_V4";
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    TEST_ASSERT_EQUAL_STRING("ARGUS REDLINE", snapshot.title);
+    assertRow(snapshot, 0, "FW", "custom-build");
+    assertRow(snapshot, 1, "WIRE", "1");
+    assertRow(snapshot, 2, "HW", "HELTEC_V4");
+    assertRow(snapshot, 3, "ROLE", "TX");
+}
+
+void testHubAndNodePresentationInputsRemainIndependent() {
+    DeviceUi::PresentationInput hub = makePresentationInput();
+    DeviceUi::PresentationInput node =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    hub.counters.transmissionsCompleted = 7;
+    node.counters.transmissionsCompleted = 3;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, hub),
+        0,
+        "TX",
+        "7"
+    );
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, node),
+        1,
+        "CMD/ACK",
+        "0/3"
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -504,5 +948,27 @@ int main(int, char**) {
     RUN_TEST(testWakeRespectsRenderCapWithSeparateDisplayOnAction);
     RUN_TEST(testWakeBehaviorWorksAcrossRollover);
     RUN_TEST(testControllersRemainIndependent);
+    RUN_TEST(testEveryScreenBuildsWithMatchingIdAndBoundedRows);
+    RUN_TEST(testBuilderFullyReplacesReusedSnapshotAndDoesNotMutateInput);
+    RUN_TEST(testFixedStringsAreBoundedAndNullTerminated);
+    RUN_TEST(testHomeRoleAndAllHealthLabelsAreDeterministic);
+    RUN_TEST(testUnknownRoleAndHealthUseFallbacks);
+    RUN_TEST(testRadioRetainsMetricsIncludingRealZero);
+    RUN_TEST(testRadioUnavailableMetricsAreExplicit);
+    RUN_TEST(testAllRuntimePhasesAndUnknownFallbackMapDeterministically);
+    RUN_TEST(testPeerStateMappingIsRoleConstrained);
+    RUN_TEST(testDeviceShowsIdentityReadinessHealthAndProfile);
+    RUN_TEST(testUnavailableLastPacketShowsNoPacketOnly);
+    RUN_TEST(testHubAckLastPacketRetainsAllFieldsAndStatus);
+    RUN_TEST(testNodeCommandLastPacketUsesUnavailableAckStatus);
+    RUN_TEST(testPacketAndAckUnknownRawValuesUseNumericFallbacks);
+    RUN_TEST(testEveryRecognizedPacketAndAckStatusMapsDeterministically);
+    RUN_TEST(testLaterPacketPresentationCannotRetainAckStatus);
+    RUN_TEST(testHubDiagnosticsUsesBoundedRoleSpecificRows);
+    RUN_TEST(testNodeDiagnosticsUsesBoundedRoleSpecificRows);
+    RUN_TEST(testDiagnosticsCombinedCountSaturatesAndMaximumFormats);
+    RUN_TEST(testEveryErrorClassAndUnknownFallbackMapsDeterministically);
+    RUN_TEST(testAboutUsesSuppliedMetadataExactlyWithoutFutureVersion);
+    RUN_TEST(testHubAndNodePresentationInputsRemainIndependent);
     return UNITY_END();
 }
