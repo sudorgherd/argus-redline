@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "device_input.h"
-#include "protocol.h"
+#include "redline_protocol.h"
 #include "runtime_state.h"
 
 namespace DeviceUi {

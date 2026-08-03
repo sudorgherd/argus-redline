@@ -1,0 +1,11 @@
+{
+  "name": "device_ui",
+  "version": "0.3.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": {
+    "device_input": "*",
+    "runtime_state": "*",
+    "redline_protocol": "*"
+  }
+}

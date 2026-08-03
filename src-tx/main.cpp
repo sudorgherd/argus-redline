@@ -7,6 +7,9 @@
 #include "redline_version.h"
 #include "runtime_state.h"
 #include "transaction_engine.h"
+#include "device_input.h"
+#include "device_ui.h"
+#include "heltec_display.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -16,6 +19,9 @@ SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 constexpr unsigned long INITIAL_DELAY_MS = 2000;
 constexpr unsigned long TRANSACTION_INTERVAL_MS = 3000;
 constexpr unsigned long RETRY_DELAY_MS = 500;
+constexpr uint8_t APPLICATION_BUTTON_PIN = 0;
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
+constexpr uint32_t BUTTON_LONG_PRESS_MS = 800;
 
 volatile bool operationDone = false;
 
@@ -24,6 +30,13 @@ RuntimeState::State runtimeState(
     DeviceConfig::LOCAL_ID,
     DeviceConfig::PEER_ID
 );
+DeviceInput::Button applicationButton(
+    BUTTON_DEBOUNCE_MS,
+    BUTTON_LONG_PRESS_MS
+);
+DeviceUi::Controller uiController(0);
+HeltecDisplay::Renderer displayRenderer(display);
+DeviceUi::PeerState peerState = DeviceUi::PeerState::UNKNOWN;
 
 unsigned long nextTransmitAt = 0;
 
@@ -37,33 +50,99 @@ void IRAM_ATTR setRadioFlag() {
     operationDone = true;
 }
 
-const unsigned char rgLogo26x16[] PROGMEM = {
-0xff,0x00,0xfc,0x01,0xff,0x03,0xff,0x01,0xff,0x87,0xff,0x01,0x07,0xc7,0x03,
-0x00,0x07,0xef,0x01,0x00,0x07,0xe7,0x00,0x00,0x07,0xe7,0x00,0x00,0x87,0xe7,
-0xf0,0x03,0xff,0xe3,0xf0,0x03,0xff,0xe1,0xf0,0x03,0xc7,0xe1,0x80,0x03,0x87,
-0xe3,0x81,0x03,0x87,0xc7,0x83,0x03,0x07,0xc7,0xff,0x03,0x07,0x8f,0xff,0x03,
-0x07,0x0e,0xfe,0x00
-};
+void markPresentationChanged() {
+    uiController.markDirty();
+}
 
-void showHomeScreen(const String& status) {
-    display.clear();
+void setRuntimePhase(RuntimeState::RuntimePhase phase) {
+    if (runtimeState.phase() != phase) {
+        runtimeState.setPhase(phase);
+        markPresentationChanged();
+    }
+}
 
-    display.setColor(WHITE);
-    display.fillRect(48, 0, 32, 32);
+void setHealth(RuntimeState::Health health) {
+    if (runtimeState.health() != health) {
+        runtimeState.setHealth(health);
+        markPresentationChanged();
+    }
+}
 
-    display.setColor(BLACK);
-    display.drawXbm(51, 8, 26, 16, rgLogo26x16);
+void recordError(RuntimeState::ErrorClass error) {
+    runtimeState.recordError(error);
+    markPresentationChanged();
+}
 
-    display.setColor(WHITE);
-    display.setTextAlignment(TEXT_ALIGN_CENTER);
+void setPeerState(DeviceUi::PeerState state) {
+    if (peerState != state) {
+        peerState = state;
+        markPresentationChanged();
+    }
+}
 
-    display.setFont(ArialMT_Plain_16);
-    display.drawString(64, 34, "RaveGoat Labs");
+DeviceUi::PresentationInput buildPresentationInput() {
+    DeviceUi::PresentationInput input;
+    input.role = runtimeState.role();
+    input.localId = runtimeState.localId();
+    input.peerId = runtimeState.peerId();
+    input.ready = runtimeState.isReady();
+    input.health = runtimeState.health();
+    input.phase = runtimeState.phase();
+    input.firmwareVersion = RedlineVersion::FIRMWARE;
+    input.wireProtocolVersion = RedlineVersion::WIRE_PROTOCOL;
+    input.hardwareProfile = RedlineVersion::HARDWARE_PROFILE;
+    input.radioMetricsAvailable = runtimeState.hasRadioMetrics();
+    input.rssi = runtimeState.latestRssi();
+    input.snr = runtimeState.latestSnr();
+    input.peerState = peerState;
+    input.lastInboundPacket = runtimeState.lastInboundPacket();
+    input.counters = runtimeState.counters();
+    input.lastError = runtimeState.lastError();
+    return input;
+}
 
-    display.setFont(ArialMT_Plain_10);
-    display.drawString(64, 53, status);
+void renderCurrentPresentation(uint32_t nowMs) {
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(
+            uiController.screen(),
+            buildPresentationInput()
+        );
+    displayRenderer.render(snapshot);
+    uiController.recordRendered(nowMs);
+}
 
-    display.display();
+void serviceButton(uint32_t nowMs) {
+    const bool pressed = digitalRead(APPLICATION_BUTTON_PIN) == LOW;
+    const DeviceInput::ButtonEvents events =
+        applicationButton.update(pressed, nowMs);
+    uiController.handle(events.first, nowMs);
+    uiController.handle(events.second, nowMs);
+}
+
+void serviceUi(uint32_t nowMs) {
+    const DeviceUi::UiAction action = uiController.update(nowMs);
+
+    switch (action) {
+        case DeviceUi::UiAction::RENDER:
+            renderCurrentPresentation(nowMs);
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_ON:
+            displayRenderer.displayOn();
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_ON_AND_RENDER:
+            displayRenderer.displayOn();
+            renderCurrentPresentation(nowMs);
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_OFF:
+            displayRenderer.displayOff();
+            break;
+
+        case DeviceUi::UiAction::NONE:
+            break;
+    }
 }
 
 void showStatus(const String& primary, const String& secondary) {
@@ -101,7 +180,7 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
 }
 
 void scheduleNextTransaction() {
-    runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
+    setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
 }
 
@@ -116,13 +195,15 @@ void scheduleRetryOrNext(const String& reason) {
         transactionState.attemptFailed();
 
     if (action == TransactionEngine::HubTransactionAction::RETRANSMIT) {
+        runtimeState.incrementRetransmissions();
+        markPresentationChanged();
         showStatus(
             reason,
             String("retry ") + transactionState.retryCount() +
             "/" + transactionState.maximumRetries()
         );
 
-        runtimeState.setPhase(RuntimeState::RuntimePhase::IDLE);
+        setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
         nextTransmitAt = millis() + RETRY_DELAY_MS;
         return;
     }
@@ -132,6 +213,8 @@ void scheduleRetryOrNext(const String& reason) {
         String("SEQ ") + currentCommand.sequence
     );
 
+    setHealth(RuntimeState::Health::DEGRADED);
+    setPeerState(DeviceUi::PeerState::DEGRADED);
     completeAndScheduleNextTransaction();
 }
 
@@ -170,6 +253,8 @@ bool startCommandTransmission() {
 
     if (state != RADIOLIB_ERR_NONE) {
         digitalWrite(LED_BUILTIN, LOW);
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
 
         showStatus(
             "TX START FAILED",
@@ -196,7 +281,7 @@ bool startCommandTransmission() {
         String("SEQ ") + transactionState.currentSequence()
     );
 
-    runtimeState.setPhase(RuntimeState::RuntimePhase::TRANSMITTING);
+    setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING);
     return true;
 }
 
@@ -206,6 +291,8 @@ bool startAckReceive(bool resetDeadline) {
     const int state = radio.startReceive();
 
     if (state != RADIOLIB_ERR_NONE) {
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_START_RECEIVE);
         showStatus(
             "RX START FAILED",
             String("CODE ") + state
@@ -215,7 +302,7 @@ bool startAckReceive(bool resetDeadline) {
         return false;
     }
 
-    runtimeState.setPhase(RuntimeState::RuntimePhase::WAITING_FOR_ACK);
+    setRuntimePhase(RuntimeState::RuntimePhase::WAITING_FOR_ACK);
 
     if (resetDeadline) {
         transactionState.beginAcknowledgmentWait(
@@ -227,6 +314,8 @@ bool startAckReceive(bool resetDeadline) {
 }
 
 void handleAckTimeout() {
+    runtimeState.incrementAcknowledgmentTimeouts();
+    recordError(RuntimeState::ErrorClass::ACK_TIMEOUT);
     showStatus(
         "ACK TIMEOUT",
         String("SEQ ") + currentCommand.sequence
@@ -258,6 +347,8 @@ void processAcknowledgment() {
         packetLength < Protocol::HEADER_SIZE ||
         packetLength > Protocol::MAX_PACKET_SIZE
     ) {
+        runtimeState.incrementMalformedPackets();
+        recordError(RuntimeState::ErrorClass::PACKET_LENGTH);
         showStatus(
             "ACK MALFORMED",
             String("LEN ") + packetLength
@@ -275,12 +366,16 @@ void processAcknowledgment() {
     );
 
     if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_READ);
         showStatus("BAD ACK", "CRC mismatch");
         continueWaitingForAck();
         return;
     }
 
     if (state != RADIOLIB_ERR_NONE) {
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_READ);
         showStatus(
             "ACK READ FAILED",
             String("CODE ") + state
@@ -293,6 +388,8 @@ void processAcknowledgment() {
     const float rssi = radio.getRSSI();
     const float snr = radio.getSNR();
     runtimeState.updateRadioMetrics(rssi, snr);
+    runtimeState.recordActivity(static_cast<uint32_t>(millis()));
+    markPresentationChanged();
 
     Protocol::Packet acknowledgment = {};
 
@@ -303,10 +400,29 @@ void processAcknowledgment() {
             acknowledgment
         )
     ) {
+        runtimeState.incrementMalformedPackets();
+        recordError(RuntimeState::ErrorClass::PACKET_DECODE);
         showStatus("ACK MALFORMED", "decode failed");
         continueWaitingForAck();
         return;
     }
+
+    runtimeState.incrementDecodedPacketsReceived();
+    runtimeState.recordInboundPacket(
+        static_cast<uint8_t>(acknowledgment.type),
+        acknowledgment.source,
+        acknowledgment.destination,
+        acknowledgment.sequence,
+        acknowledgment.opcode,
+        acknowledgment.payloadLength,
+        acknowledgment.type == Protocol::PacketType::ACK &&
+            acknowledgment.payloadLength == 1,
+        acknowledgment.payloadLength == 1
+            ? acknowledgment.payload[0]
+            : 0,
+        static_cast<uint32_t>(millis())
+    );
+    markPresentationChanged();
 
     logPacket("RX", acknowledgment);
 
@@ -328,6 +444,16 @@ void processAcknowledgment() {
         evaluation.outcome !=
         TransactionEngine::HubAckOutcome::MATCHING_ACK
     ) {
+        if (
+            evaluation.outcome ==
+            TransactionEngine::HubAckOutcome::IGNORE_MALFORMED_PAYLOAD
+        ) {
+            runtimeState.incrementMalformedPackets();
+            recordError(RuntimeState::ErrorClass::ACK_STATUS);
+        } else {
+            runtimeState.incrementIgnoredPackets();
+            recordError(RuntimeState::ErrorClass::PACKET_IGNORED);
+        }
         showStatus(
             "ACK IGNORED",
             String("SEQ ") + acknowledgment.sequence
@@ -340,6 +466,8 @@ void processAcknowledgment() {
     const uint8_t rawStatus = evaluation.rawStatus;
 
     if (!Protocol::isValidAckStatus(rawStatus)) {
+        runtimeState.incrementMalformedPackets();
+        recordError(RuntimeState::ErrorClass::ACK_STATUS);
         showStatus(
             "ACK MALFORMED",
             String("STATUS ") + rawStatus
@@ -359,6 +487,10 @@ void processAcknowledgment() {
         completion ==
         TransactionEngine::HubTransactionAction::TRANSACTION_SUCCEEDED
     ) {
+        runtimeState.incrementSuccessfulTransactions();
+        setHealth(RuntimeState::Health::READY);
+        recordError(RuntimeState::ErrorClass::NONE);
+        setPeerState(DeviceUi::PeerState::REACHABLE);
         showStatus(
             "ACK MATCHED",
             String("SEQ ") + currentCommand.sequence +
@@ -366,6 +498,9 @@ void processAcknowledgment() {
             " SNR " + String(runtimeState.latestSnr(), 1)
         );
     } else {
+        setHealth(RuntimeState::Health::DEGRADED);
+        recordError(RuntimeState::ErrorClass::REMOTE_ACK);
+        setPeerState(DeviceUi::PeerState::DEGRADED);
         showStatus(
             "ACK ERROR",
             String("STATUS ") +
@@ -383,6 +518,8 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(Vext, OUTPUT);
     pinMode(RST_OLED, OUTPUT);
+    // GPIO0 is also a boot strap; holding it during reset may enter download mode.
+    pinMode(APPLICATION_BUTTON_PIN, INPUT_PULLUP);
 
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(Vext, LOW);
@@ -403,7 +540,10 @@ void setup() {
     Serial.println(state);
 
     if (state != RADIOLIB_ERR_NONE) {
-        showHomeScreen(String("RADIO ERR ") + state);
+        runtimeState.setReady(false);
+        setHealth(RuntimeState::Health::ERROR);
+        recordError(RuntimeState::ErrorClass::RADIO_INITIALIZATION);
+        serviceUi(static_cast<uint32_t>(millis()));
         showStatus("RADIO ERROR", String("CODE ") + state);
         return;
     }
@@ -411,7 +551,9 @@ void setup() {
     radio.setDio1Action(setRadioFlag);
 
     runtimeState.setReady(true);
-    showHomeScreen("TX | READY");
+    setHealth(RuntimeState::Health::READY);
+    markPresentationChanged();
+    serviceUi(static_cast<uint32_t>(millis()));
     showStatus(
         runtimeState.role() == RuntimeState::DeviceRole::HUB
             ? "HUB READY"
@@ -423,12 +565,7 @@ void setup() {
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
 }
 
-void loop() {
-    if (!runtimeState.isReady()) {
-        delay(1000);
-        return;
-    }
-
+void serviceHubTransport(uint32_t nowMs) {
     if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
         if ((long)(millis() - nextTransmitAt) < 0) {
             return;
@@ -467,6 +604,9 @@ void loop() {
         RuntimeState::RuntimePhase::TRANSMITTING
     ) {
         digitalWrite(LED_BUILTIN, LOW);
+        runtimeState.incrementTransmissionsCompleted();
+        runtimeState.recordActivity(nowMs);
+        markPresentationChanged();
         showStatus(
             "TX COMPLETE",
             String("SEQ ") + transactionState.currentSequence()
@@ -481,5 +621,20 @@ void loop() {
         RuntimeState::RuntimePhase::WAITING_FOR_ACK
     ) {
         processAcknowledgment();
+    }
+}
+
+void loop() {
+    const uint32_t nowMs = static_cast<uint32_t>(millis());
+    serviceButton(nowMs);
+
+    if (runtimeState.isReady()) {
+        serviceHubTransport(nowMs);
+    }
+
+    serviceUi(nowMs);
+
+    if (!runtimeState.isReady()) {
+        yield();
     }
 }
