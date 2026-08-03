@@ -17,6 +17,53 @@ enum class RuntimePhase : uint8_t {
     TRANSMITTING_ACK
 };
 
+enum class Health : uint8_t {
+    STARTING,
+    READY,
+    DEGRADED,
+    ERROR
+};
+
+enum class ErrorClass : uint8_t {
+    NONE,
+    RADIO_INITIALIZATION,
+    RADIO_START_RECEIVE,
+    RADIO_START_TRANSMIT,
+    RADIO_READ,
+    PACKET_LENGTH,
+    PACKET_DECODE,
+    PACKET_IGNORED,
+    ACK_TIMEOUT,
+    REMOTE_ACK,
+    ACK_STATUS
+};
+
+struct LastInboundPacket {
+    bool available = false;
+    uint8_t rawType = 0;
+    uint8_t source = 0;
+    uint8_t destination = 0;
+    uint8_t sequence = 0;
+    uint8_t opcode = 0;
+    uint8_t payloadLength = 0;
+    bool ackStatusAvailable = false;
+    uint8_t rawAckStatus = 0;
+    uint32_t observedAtMs = 0;
+};
+
+struct DiagnosticCounters {
+    uint32_t transmissionsCompleted = 0;
+    uint32_t decodedPacketsReceived = 0;
+    uint32_t successfulTransactions = 0;
+    uint32_t acceptedCommands = 0;
+    uint32_t retransmissions = 0;
+    uint32_t acknowledgmentTimeouts = 0;
+    uint32_t duplicates = 0;
+    uint32_t malformedPackets = 0;
+    uint32_t ignoredPackets = 0;
+    uint32_t radioErrors = 0;
+};
+
 class State {
 public:
     // localId and peerId are immutable snapshots supplied by DeviceConfig.
@@ -58,6 +105,26 @@ public:
         phase_ = phase;
     }
 
+    Health health() const {
+        return health_;
+    }
+
+    void setHealth(Health health) {
+        health_ = health;
+    }
+
+    ErrorClass lastError() const {
+        return lastError_;
+    }
+
+    void recordError(ErrorClass error) {
+        lastError_ = error;
+    }
+
+    bool hasRadioMetrics() const {
+        return radioMetricsAvailable_;
+    }
+
     float latestRssi() const {
         return latestRssi_;
     }
@@ -69,16 +136,116 @@ public:
     void updateRadioMetrics(float rssi, float snr) {
         latestRssi_ = rssi;
         latestSnr_ = snr;
+        radioMetricsAvailable_ = true;
+    }
+
+    const LastInboundPacket& lastInboundPacket() const {
+        return lastInboundPacket_;
+    }
+
+    void recordInboundPacket(
+        uint8_t rawType,
+        uint8_t source,
+        uint8_t destination,
+        uint8_t sequence,
+        uint8_t opcode,
+        uint8_t payloadLength,
+        bool ackStatusAvailable,
+        uint8_t rawAckStatus,
+        uint32_t observedAtMs
+    ) {
+        LastInboundPacket packet;
+        packet.available = true;
+        packet.rawType = rawType;
+        packet.source = source;
+        packet.destination = destination;
+        packet.sequence = sequence;
+        packet.opcode = opcode;
+        packet.payloadLength = payloadLength;
+        packet.ackStatusAvailable = ackStatusAvailable;
+        packet.rawAckStatus = ackStatusAvailable ? rawAckStatus : 0;
+        packet.observedAtMs = observedAtMs;
+        lastInboundPacket_ = packet;
+    }
+
+    bool hasLastActivity() const {
+        return lastActivityAvailable_;
+    }
+
+    uint32_t lastActivityAtMs() const {
+        return lastActivityAtMs_;
+    }
+
+    void recordActivity(uint32_t observedAtMs) {
+        lastActivityAvailable_ = true;
+        lastActivityAtMs_ = observedAtMs;
+    }
+
+    const DiagnosticCounters& counters() const {
+        return counters_;
+    }
+
+    void incrementTransmissionsCompleted(uint32_t amount = 1) {
+        saturatingIncrement(counters_.transmissionsCompleted, amount);
+    }
+
+    void incrementDecodedPacketsReceived(uint32_t amount = 1) {
+        saturatingIncrement(counters_.decodedPacketsReceived, amount);
+    }
+
+    void incrementSuccessfulTransactions(uint32_t amount = 1) {
+        saturatingIncrement(counters_.successfulTransactions, amount);
+    }
+
+    void incrementAcceptedCommands(uint32_t amount = 1) {
+        saturatingIncrement(counters_.acceptedCommands, amount);
+    }
+
+    void incrementRetransmissions(uint32_t amount = 1) {
+        saturatingIncrement(counters_.retransmissions, amount);
+    }
+
+    void incrementAcknowledgmentTimeouts(uint32_t amount = 1) {
+        saturatingIncrement(counters_.acknowledgmentTimeouts, amount);
+    }
+
+    void incrementDuplicates(uint32_t amount = 1) {
+        saturatingIncrement(counters_.duplicates, amount);
+    }
+
+    void incrementMalformedPackets(uint32_t amount = 1) {
+        saturatingIncrement(counters_.malformedPackets, amount);
+    }
+
+    void incrementIgnoredPackets(uint32_t amount = 1) {
+        saturatingIncrement(counters_.ignoredPackets, amount);
+    }
+
+    void incrementRadioErrors(uint32_t amount = 1) {
+        saturatingIncrement(counters_.radioErrors, amount);
     }
 
 private:
+    static void saturatingIncrement(uint32_t& value, uint32_t amount) {
+        value = amount > UINT32_MAX - value
+            ? UINT32_MAX
+            : value + amount;
+    }
+
     DeviceRole role_;
     uint8_t localId_;
     uint8_t peerId_;
     bool ready_ = false;
     RuntimePhase phase_;
+    Health health_ = Health::STARTING;
+    ErrorClass lastError_ = ErrorClass::NONE;
+    bool radioMetricsAvailable_ = false;
     float latestRssi_ = 0.0F;
     float latestSnr_ = 0.0F;
+    LastInboundPacket lastInboundPacket_;
+    bool lastActivityAvailable_ = false;
+    uint32_t lastActivityAtMs_ = 0;
+    DiagnosticCounters counters_;
 };
 
 }  // namespace RuntimeState

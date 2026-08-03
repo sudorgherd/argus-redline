@@ -1,0 +1,10 @@
+{
+  "name": "heltec_display",
+  "version": "0.3.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "device_ui": "*",
+    "thingpulse/ESP8266 and ESP32 OLED driver for SSD1306 displays": "^4.6.1"
+  }
+}

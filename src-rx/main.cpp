@@ -7,11 +7,18 @@
 #include "redline_version.h"
 #include "runtime_state.h"
 #include "transaction_engine.h"
+#include "device_input.h"
+#include "device_ui.h"
+#include "heltec_display.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
 SPIClass radioSPI(FSPI);
 SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
+
+constexpr uint8_t APPLICATION_BUTTON_PIN = 0;
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
+constexpr uint32_t BUTTON_LONG_PRESS_MS = 800;
 
 volatile bool operationDone = false;
 
@@ -20,6 +27,13 @@ RuntimeState::State runtimeState(
     DeviceConfig::LOCAL_ID,
     DeviceConfig::PEER_ID
 );
+DeviceInput::Button applicationButton(
+    BUTTON_DEBOUNCE_MS,
+    BUTTON_LONG_PRESS_MS
+);
+DeviceUi::Controller uiController(0);
+HeltecDisplay::Renderer displayRenderer(display);
+DeviceUi::PeerState peerState = DeviceUi::PeerState::UNKNOWN;
 
 uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -34,33 +48,99 @@ void IRAM_ATTR setRadioFlag() {
     operationDone = true;
 }
 
-const unsigned char rgLogo26x16[] PROGMEM = {
-0xff,0x00,0xfc,0x01,0xff,0x03,0xff,0x01,0xff,0x87,0xff,0x01,0x07,0xc7,0x03,
-0x00,0x07,0xef,0x01,0x00,0x07,0xe7,0x00,0x00,0x07,0xe7,0x00,0x00,0x87,0xe7,
-0xf0,0x03,0xff,0xe3,0xf0,0x03,0xff,0xe1,0xf0,0x03,0xc7,0xe1,0x80,0x03,0x87,
-0xe3,0x81,0x03,0x87,0xc7,0x83,0x03,0x07,0xc7,0xff,0x03,0x07,0x8f,0xff,0x03,
-0x07,0x0e,0xfe,0x00
-};
+void markPresentationChanged() {
+    uiController.markDirty();
+}
 
-void showHomeScreen(const String& status) {
-    display.clear();
+void setRuntimePhase(RuntimeState::RuntimePhase phase) {
+    if (runtimeState.phase() != phase) {
+        runtimeState.setPhase(phase);
+        markPresentationChanged();
+    }
+}
 
-    display.setColor(WHITE);
-    display.fillRect(48, 0, 32, 32);
+void setHealth(RuntimeState::Health health) {
+    if (runtimeState.health() != health) {
+        runtimeState.setHealth(health);
+        markPresentationChanged();
+    }
+}
 
-    display.setColor(BLACK);
-    display.drawXbm(51, 8, 26, 16, rgLogo26x16);
+void recordError(RuntimeState::ErrorClass error) {
+    runtimeState.recordError(error);
+    markPresentationChanged();
+}
 
-    display.setColor(WHITE);
-    display.setTextAlignment(TEXT_ALIGN_CENTER);
+void setPeerState(DeviceUi::PeerState state) {
+    if (peerState != state) {
+        peerState = state;
+        markPresentationChanged();
+    }
+}
 
-    display.setFont(ArialMT_Plain_16);
-    display.drawString(64, 34, "RaveGoat Labs");
+DeviceUi::PresentationInput buildPresentationInput() {
+    DeviceUi::PresentationInput input;
+    input.role = runtimeState.role();
+    input.localId = runtimeState.localId();
+    input.peerId = runtimeState.peerId();
+    input.ready = runtimeState.isReady();
+    input.health = runtimeState.health();
+    input.phase = runtimeState.phase();
+    input.firmwareVersion = RedlineVersion::FIRMWARE;
+    input.wireProtocolVersion = RedlineVersion::WIRE_PROTOCOL;
+    input.hardwareProfile = RedlineVersion::HARDWARE_PROFILE;
+    input.radioMetricsAvailable = runtimeState.hasRadioMetrics();
+    input.rssi = runtimeState.latestRssi();
+    input.snr = runtimeState.latestSnr();
+    input.peerState = peerState;
+    input.lastInboundPacket = runtimeState.lastInboundPacket();
+    input.counters = runtimeState.counters();
+    input.lastError = runtimeState.lastError();
+    return input;
+}
 
-    display.setFont(ArialMT_Plain_10);
-    display.drawString(64, 53, status);
+void renderCurrentPresentation(uint32_t nowMs) {
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(
+            uiController.screen(),
+            buildPresentationInput()
+        );
+    displayRenderer.render(snapshot);
+    uiController.recordRendered(nowMs);
+}
 
-    display.display();
+void serviceButton(uint32_t nowMs) {
+    const bool pressed = digitalRead(APPLICATION_BUTTON_PIN) == LOW;
+    const DeviceInput::ButtonEvents events =
+        applicationButton.update(pressed, nowMs);
+    uiController.handle(events.first, nowMs);
+    uiController.handle(events.second, nowMs);
+}
+
+void serviceUi(uint32_t nowMs) {
+    const DeviceUi::UiAction action = uiController.update(nowMs);
+
+    switch (action) {
+        case DeviceUi::UiAction::RENDER:
+            renderCurrentPresentation(nowMs);
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_ON:
+            displayRenderer.displayOn();
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_ON_AND_RENDER:
+            displayRenderer.displayOn();
+            renderCurrentPresentation(nowMs);
+            break;
+
+        case DeviceUi::UiAction::DISPLAY_OFF:
+            displayRenderer.displayOff();
+            break;
+
+        case DeviceUi::UiAction::NONE:
+            break;
+    }
 }
 
 void showStatus(const String& primary, const String& secondary) {
@@ -99,11 +179,14 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
 
 bool startListening() {
     operationDone = false;
-    runtimeState.setPhase(RuntimeState::RuntimePhase::LISTENING);
+    setRuntimePhase(RuntimeState::RuntimePhase::LISTENING);
 
     const int state = radio.startReceive();
 
     if (state != RADIOLIB_ERR_NONE) {
+        runtimeState.incrementRadioErrors();
+        setHealth(RuntimeState::Health::DEGRADED);
+        recordError(RuntimeState::ErrorClass::RADIO_START_RECEIVE);
         showStatus(
             "RX START FAILED",
             String("CODE ") + state
@@ -116,7 +199,9 @@ bool startListening() {
 
 void resumeListening() {
     radio.standby();
-    startListening();
+    if (startListening()) {
+        setHealth(RuntimeState::Health::READY);
+    }
 }
 
 bool startAcknowledgment(
@@ -148,7 +233,7 @@ bool startAcknowledgment(
     delay(100);
 
     operationDone = false;
-    runtimeState.setPhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
+    setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
     digitalWrite(LED_BUILTIN, HIGH);
 
     const int state = radio.startTransmit(
@@ -158,6 +243,9 @@ bool startAcknowledgment(
 
     if (state != RADIOLIB_ERR_NONE) {
         digitalWrite(LED_BUILTIN, LOW);
+        runtimeState.incrementRadioErrors();
+        setHealth(RuntimeState::Health::DEGRADED);
+        recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
 
         showStatus(
             "ACK FAILED",
@@ -182,7 +270,14 @@ void finishAcknowledgment() {
         String("ACK SEQ ") + pendingAcknowledgment.sequence
     );
 
-    startListening();
+    const bool listening = startListening();
+    runtimeState.incrementTransmissionsCompleted();
+    runtimeState.recordActivity(static_cast<uint32_t>(millis()));
+    markPresentationChanged();
+
+    if (listening) {
+        setHealth(RuntimeState::Health::READY);
+    }
 }
 
 void handleReceivedPacket() {
@@ -192,6 +287,8 @@ void handleReceivedPacket() {
         packetLength < Protocol::HEADER_SIZE ||
         packetLength > Protocol::MAX_PACKET_SIZE
     ) {
+        runtimeState.incrementMalformedPackets();
+        recordError(RuntimeState::ErrorClass::PACKET_LENGTH);
         showStatus(
             "RX MALFORMED",
             String("LEN ") + packetLength
@@ -207,6 +304,9 @@ void handleReceivedPacket() {
     );
 
     if (readState != RADIOLIB_ERR_NONE) {
+        runtimeState.incrementRadioErrors();
+        setHealth(RuntimeState::Health::DEGRADED);
+        recordError(RuntimeState::ErrorClass::RADIO_READ);
         showStatus(
             "RX FAILED",
             String("CODE ") + readState
@@ -216,19 +316,38 @@ void handleReceivedPacket() {
         return;
     }
 
+    const uint32_t observedAtMs = static_cast<uint32_t>(millis());
+    const float rssi = radio.getRSSI();
+    const float snr = radio.getSNR();
+    runtimeState.updateRadioMetrics(rssi, snr);
+    runtimeState.recordActivity(observedAtMs);
+    markPresentationChanged();
+
     Protocol::Packet command = {};
 
     if (!Protocol::decode(receiveBuffer, packetLength, command)) {
+        runtimeState.incrementMalformedPackets();
+        recordError(RuntimeState::ErrorClass::PACKET_DECODE);
         showStatus("RX MALFORMED", "decode failed");
         resumeListening();
         return;
     }
 
-    logPacket("RX", command);
+    runtimeState.incrementDecodedPacketsReceived();
+    runtimeState.recordInboundPacket(
+        static_cast<uint8_t>(command.type),
+        command.source,
+        command.destination,
+        command.sequence,
+        command.opcode,
+        command.payloadLength,
+        false,
+        0,
+        observedAtMs
+    );
+    markPresentationChanged();
 
-    const float rssi = radio.getRSSI();
-    const float snr = radio.getSNR();
-    runtimeState.updateRadioMetrics(rssi, snr);
+    logPacket("RX", command);
 
     Serial.print("RSSI: ");
     Serial.print(runtimeState.latestRssi());
@@ -247,6 +366,8 @@ void handleReceivedPacket() {
     switch (evaluation.outcome) {
         case TransactionEngine::NodeCommandOutcome::
             IGNORE_WRONG_DESTINATION:
+            runtimeState.incrementIgnoredPackets();
+            recordError(RuntimeState::ErrorClass::PACKET_IGNORED);
             showStatus(
                 "RX IGNORED",
                 String("DST ") + command.destination
@@ -258,19 +379,36 @@ void handleReceivedPacket() {
             IGNORE_WRONG_SENDER:
         case TransactionEngine::NodeCommandOutcome::
             IGNORE_WRONG_PACKET_TYPE:
+            runtimeState.incrementIgnoredPackets();
+            recordError(RuntimeState::ErrorClass::PACKET_IGNORED);
             showStatus("RX IGNORED", "invalid sender/type");
             resumeListening();
             return;
 
         case TransactionEngine::NodeCommandOutcome::DUPLICATE:
+            runtimeState.incrementDuplicates();
+            markPresentationChanged();
             startAcknowledgment(command, evaluation.status, true);
             return;
 
         case TransactionEngine::NodeCommandOutcome::ACK_SUCCESS:
+            runtimeState.incrementAcceptedCommands();
+            setHealth(RuntimeState::Health::READY);
+            recordError(RuntimeState::ErrorClass::NONE);
+            setPeerState(DeviceUi::PeerState::SEEN);
+            markPresentationChanged();
+            startAcknowledgment(command, evaluation.status, false);
+            return;
+
         case TransactionEngine::NodeCommandOutcome::
             ACK_UNSUPPORTED_OPCODE:
+            startAcknowledgment(command, evaluation.status, false);
+            return;
+
         case TransactionEngine::NodeCommandOutcome::
             ACK_MALFORMED_PACKET:
+            runtimeState.incrementMalformedPackets();
+            markPresentationChanged();
             startAcknowledgment(command, evaluation.status, false);
             return;
     }
@@ -282,6 +420,8 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(Vext, OUTPUT);
     pinMode(RST_OLED, OUTPUT);
+    // GPIO0 is also a boot strap; holding it during reset may enter download mode.
+    pinMode(APPLICATION_BUTTON_PIN, INPUT_PULLUP);
 
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(Vext, LOW);
@@ -302,15 +442,27 @@ void setup() {
     Serial.println(state);
 
     if (state != RADIOLIB_ERR_NONE) {
-        showHomeScreen(String("RADIO ERR ") + state);
+        runtimeState.setReady(false);
+        setHealth(RuntimeState::Health::ERROR);
+        recordError(RuntimeState::ErrorClass::RADIO_INITIALIZATION);
+        serviceUi(static_cast<uint32_t>(millis()));
         showStatus("RADIO ERROR", String("CODE ") + state);
         return;
     }
 
     radio.setDio1Action(setRadioFlag);
 
+    if (!startListening()) {
+        runtimeState.setReady(false);
+        setHealth(RuntimeState::Health::ERROR);
+        serviceUi(static_cast<uint32_t>(millis()));
+        return;
+    }
+
     runtimeState.setReady(true);
-    showHomeScreen("RX | READY");
+    setHealth(RuntimeState::Health::READY);
+    markPresentationChanged();
+    serviceUi(static_cast<uint32_t>(millis()));
     showStatus(
         runtimeState.role() == RuntimeState::DeviceRole::NODE
             ? "NODE READY"
@@ -318,32 +470,34 @@ void setup() {
         String("Firmware: ") + RedlineVersion::FIRMWARE
     );
     logVersionMetadata();
-
-    if (!startListening()) {
-        runtimeState.setReady(false);
-        showHomeScreen("RX START ERR");
-    }
 }
 
 void loop() {
-    if (!runtimeState.isReady()) {
-        delay(1000);
-        return;
+    const uint32_t nowMs = static_cast<uint32_t>(millis());
+    serviceButton(nowMs);
+
+    if (runtimeState.isReady() && operationDone) {
+        operationDone = false;
+
+        if (
+            runtimeState.phase() ==
+            RuntimeState::RuntimePhase::TRANSMITTING_ACK
+        ) {
+            finishAcknowledgment();
+        } else {
+            handleReceivedPacket();
+        }
     }
 
-    if (!operationDone) {
-        return;
-    }
-
-    operationDone = false;
-
+    // Defer OLED I/O until an active ACK has completed and receive restarted.
     if (
-        runtimeState.phase() ==
+        runtimeState.phase() !=
         RuntimeState::RuntimePhase::TRANSMITTING_ACK
     ) {
-        finishAcknowledgment();
-        return;
+        serviceUi(nowMs);
     }
 
-    handleReceivedPacket();
+    if (!runtimeState.isReady()) {
+        yield();
+    }
 }

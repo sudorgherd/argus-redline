@@ -360,12 +360,12 @@ Target capabilities:
 
 ## Implemented Now
 
-The current firmware foundation already provides:
+The current v0.3.0 firmware foundation already provides:
 
 - Two independently buildable Heltec firmware targets
 - Bidirectional LoRa communication at 915 MHz
 - Asynchronous Hub and Node radio state machines
-- Protocol v0.1 wire-format support; the firmware source identifies itself as v0.1.03
+- Protocol v0.1 wire-format support using Wire Protocol 1
 - Explicit device addressing
 - Sequence-matched acknowledgments
 - Bounded retransmission
@@ -374,7 +374,12 @@ The current firmware foundation already provides:
 - Opcode and payload validation
 - Configurable compile-time device identities
 - RSSI and SNR diagnostics
-- Physical two-board validation
+- Hardware-independent runtime health, error, metric, activity, inbound-packet, and saturating-counter state
+- A deterministic active-low GPIO0 input classifier with debounced short and long presses
+- Shared Home, Radio, Device, Last Packet, Diagnostics, and About OLED screens
+- Nonblocking, dirty and rate-limited presentation with a 30-second timeout and wake-without-navigation behavior
+- Shared bounded presentation snapshots and a Heltec OLED rendering adapter
+- Physical two-board validation on two Heltec WiFi LoRa 32 V4.3 boards
 
 The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
 
@@ -382,7 +387,7 @@ The current application behavior remains intentionally narrow: a test command an
 
 Current packets are structured and validated but are **not yet cryptographically authenticated or encrypted**.
 
-Sensors, trigger mechanisms, transferred procedures, multiple active Nodes, repeaters, and mesh routing are targeted directions—not completed capabilities.
+Persistent settings, sensors, trigger mechanisms, transferred procedures, multiple active Nodes, security, provisioning, host integration, repeaters, and mesh routing are targeted directions—not completed capabilities.
 
 ---
 
