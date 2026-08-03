@@ -8,7 +8,7 @@
 
 ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
-> **Firmware identifier:** v0.2.0 — firmware architecture and native-test foundation, preserving the Protocol v0.1 wire format.
+> **Firmware identifier:** v0.3.0 — device runtime, screens, and input, preserving the Protocol v0.1 wire format.
 
 ## What is ARGUS REDLINE?
 
@@ -22,11 +22,11 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
 
-The **[v0.2.0 Release Notes](docs/V0.2.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known evidence limitations.
+The **[v0.3.0 Release Notes](docs/V0.3.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known limitations. The [v0.3.0 two-board regression](docs/V0.3.0_TWO_BOARD_REGRESSION.md) records the physical evidence.
 
 ## Implemented now
 
-Protocol v0.1 behavior was built, flashed, and tested on two physical Heltec WiFi LoRa 32 V4 devices using the `0.2.0-dev` build. After that regression passed, the firmware source identifier was finalized as v0.2.0; the finalization changes only the reported firmware-version value.
+Firmware v0.3.0 was validated on two physical Heltec WiFi LoRa 32 V4.3 boards. The physical regression used the behavior-complete build while it still reported `v0.2.0`; finalization changes only the authoritative firmware-version value and its test expectation.
 
 Verified behavior includes:
 
@@ -40,6 +40,11 @@ Verified behavior includes:
 - Recovery after temporary node loss
 - Packet-length and packet-type validation
 - RSSI and SNR diagnostics
+- Hardware-independent runtime health, error, metric, activity, inbound-packet, and saturating-counter state
+- Deterministic active-low GPIO0 input using `INPUT_PULLUP`, 30 ms debounce, and 800 ms long press
+- Six shared OLED screens: Home, Radio, Device, Last Packet, Diagnostics, and About
+- Short-press navigation, long-press return Home, and a 30-second OLED inactivity timeout
+- Wake without navigation while radio processing continues independently of the display
 
 ## Project
 
@@ -73,7 +78,7 @@ Current logical device roles:
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies wire-format compatibility. Firmware v0.2.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
+Protocol v0.1 identifies wire-format compatibility. Firmware v0.3.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field |
 |---:|---|
@@ -131,7 +136,7 @@ The first published radio protocol release remains:
 
 - [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.2.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
+The firmware identifier in the source is v0.3.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
 
 The history includes the original string-based exchange, binary protocol implementation, reliability testing, and Protocol v0.1 merge.
 
@@ -147,6 +152,8 @@ The history includes the original string-based exchange, binary protocol impleme
 - Authenticated encryption, persistent counters, replay rejection, credential rotation, device revocation, and recovery after missed updates
 
 These bullets describe complete v1 targets. Some radio-transport foundations are implemented now, but the listed v1 capabilities are not complete.
+
+Persistent settings, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented in v0.3.0.
 
 ### Exploratory and later concepts
 

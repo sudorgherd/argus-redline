@@ -1,8 +1,8 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current completed release:** `v0.2.0`
-**Immediate next release:** `v0.3.0` — Device Runtime, Screens, and Input
+**Current completed release:** `v0.3.0`
+**Immediate next release:** `v0.4.0` — Persistent Settings and Configuration Recovery
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -175,7 +175,11 @@ test/
 
 ---
 
-## `v0.3.0` — Device Runtime, Screens, and Input
+## `v0.3.0` — Device Runtime, Screens, and Input — Complete
+
+**Status:** Completed release candidate; all core software and physical gates
+passed. Controlled physical duplicate reproduction was not completed, while
+duplicate behavior remains covered by native tests and source audit.
 
 ### Objective
 
@@ -209,20 +213,20 @@ About
 ```text
 PRESS
 RELEASE
+SHORT_PRESS
 LONG_PRESS
-DOUBLE_PRESS
 ```
 
 ### Release gate
 
 ```text
-[ ] Screen navigation never interrupts receive mode
-[ ] Radio behavior does not depend on the visible screen
-[ ] Input is debounced
-[ ] Short and long presses are reliably distinguishable
-[ ] DeviceState is the display's authoritative source
-[ ] Home screen remains stable during ordinary activity
-[ ] Errors can be displayed without blocking the radio
+[x] Screen navigation never interrupts receive mode
+[x] Radio behavior does not depend on the visible screen
+[x] Input is debounced
+[x] Short and long presses are reliably distinguishable
+[x] Runtime presentation state is the display's authoritative data source
+[x] Home screen remains stable during ordinary activity
+[x] Errors can be displayed without blocking the radio
 ```
 
 ### Explicit non-goals
@@ -958,20 +962,18 @@ Stable routing, security, and procedure-package interfaces
 The next planned release is:
 
 ```text
-v0.3.0
-Device Runtime, Screens, and Input
+v0.4.0
+Persistent Settings and Configuration Recovery
 ```
 
 Immediate work:
 
 ```text
-[ ] Extend authoritative runtime presentation and diagnostic state
-[ ] Add shared Hub and Node screen behavior
-[ ] Add debounced semantic button input
-[ ] Add nonblocking dirty and rate-limited display updates
-[ ] Add display timeout and wake behavior
-[ ] Add native tests for input, navigation, state, and presentation policy
-[ ] Build and flash both physical boards
-[ ] Verify existing Protocol 1 TEST/ACK behavior remains unchanged
-[ ] Publish v0.3.0 only after physical regression passes
+[ ] Define a versioned settings schema and deterministic defaults
+[ ] Persist approved local display and diagnostics settings
+[ ] Validate and repair missing or invalid stored values
+[ ] Add factory reset and configuration recovery behavior
+[ ] Keep identity, security, radio, and protocol values protected from ordinary settings
+[ ] Prevent continuous flash writes during normal operation
+[ ] Verify storage operations do not interrupt radio or UI behavior
 ```
