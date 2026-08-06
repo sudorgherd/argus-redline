@@ -95,6 +95,15 @@ public:
             return result;
         }
 
+        const DeviceSettings::StoreResult configuredResult =
+            slot == DeviceSettings::RecordSlot::A
+                ? slotAReadResult
+                : slotBReadResult;
+        if (configuredResult != DeviceSettings::StoreResult::OK) {
+            length = 0;
+            return configuredResult;
+        }
+
         if (replaceNextRead ||
             (replaceReadAtCount != 0 && readCount == replaceReadAtCount)) {
             replaceNextRead = false;
@@ -135,6 +144,11 @@ public:
         }
 
         SlotData& target = data(slot);
+        if (slot == DeviceSettings::RecordSlot::A) {
+            slotAReadResult = DeviceSettings::StoreResult::OK;
+        } else {
+            slotBReadResult = DeviceSettings::StoreResult::OK;
+        }
         target.present = true;
         target.length = length;
         const size_t copyLength = length < DeviceSettings::RECORD_SIZE
@@ -280,6 +294,10 @@ public:
     DeviceSettings::StoreResult writeResult =
         DeviceSettings::StoreResult::OK;
     DeviceSettings::StoreResult nextReadResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult slotAReadResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult slotBReadResult =
         DeviceSettings::StoreResult::OK;
     bool replaceNextRead = false;
     uint32_t failReadAtCount = 0;
@@ -1206,6 +1224,89 @@ void testBothCorruptDefaultWithoutAutomaticWrite() {
     TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
 }
 
+void testValidAWithMalformedBLoadsAAsFallback() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings valid = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, valid, 10);
+    store.slotBReadResult = DeviceSettings::StoreResult::MALFORMED;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == valid);
+    TEST_ASSERT_EQUAL_UINT32(10, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testMalformedAWithValidBLoadsBAsFallback() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings valid = settingsWithTimeout(120);
+    store.slotAReadResult = DeviceSettings::StoreResult::MALFORMED;
+    store.setRecord(DeviceSettings::RecordSlot::B, valid, 10);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == valid);
+    TEST_ASSERT_EQUAL_UINT32(10, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testBothMalformedSlotsDefaultAsCorrupt() {
+    FakeRecordStore store;
+    store.slotAReadResult = DeviceSettings::StoreResult::MALFORMED;
+    store.slotBReadResult = DeviceSettings::StoreResult::MALFORMED;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::DEFAULTED_CORRUPT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testExactSizeCrcInvalidSlotRemainsCorruptNotUnavailable() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings valid = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, valid, 10);
+    store.setRecord(
+        DeviceSettings::RecordSlot::B,
+        settingsWithTimeout(120),
+        11
+    );
+    TEST_ASSERT_EQUAL_UINT32(
+        DeviceSettings::RECORD_SIZE,
+        store.slotB.length
+    );
+    store.slotB.bytes[20] ^= 1U;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == valid);
+    TEST_ASSERT_EQUAL_UINT32(10, manager.generation());
+    TEST_ASSERT_TRUE(manager.repairPending());
+}
+
 void testValidSchemaRecordRepairsAllInvalidFieldsInRam() {
     FakeRecordStore store;
     DeviceSettings::Settings stored;
@@ -1438,6 +1539,70 @@ void testStorageUnavailableReadsBothSlotsAndDefaults() {
     TEST_ASSERT_EQUAL_UINT32(1, store.readACount);
     TEST_ASSERT_EQUAL_UINT32(1, store.readBCount);
     TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testStorageUnavailableFromSlotBRemainsUnavailable() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A,
+        settingsWithTimeout(60),
+        10
+    );
+    store.slotBReadResult = DeviceSettings::StoreResult::UNAVAILABLE;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::STORAGE_UNAVAILABLE,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+    TEST_ASSERT_EQUAL_UINT32(1, store.readACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.readBCount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testFallbackRepairSaveCanonicalizesInactiveSlot() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings valid = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, valid, 10);
+    store.slotBReadResult = DeviceSettings::StoreResult::MALFORMED;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == valid);
+    TEST_ASSERT_EQUAL_UINT32(10, manager.generation());
+    TEST_ASSERT_TRUE(manager.repairPending());
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::SAVED,
+        manager.save(store, manager.settings())
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeBCount);
+    TEST_ASSERT_EQUAL_UINT32(11, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_FALSE(manager.repairPending());
+
+    DeviceSettings::SettingsManager reloaded;
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED,
+        reloaded.load(store)
+    );
+    TEST_ASSERT_TRUE(reloaded.settings() == valid);
+    TEST_ASSERT_EQUAL_UINT32(11, reloaded.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(reloaded.activeSlot())
+    );
+    TEST_ASSERT_FALSE(reloaded.repairPending());
 }
 
 void testUnchangedSavePerformsZeroStorageOperations() {
@@ -2161,6 +2326,10 @@ int main(int, char**) {
     RUN_TEST(testEqualGenerationDifferentRecordsDefaultAsCorrupt);
     RUN_TEST(testCorruptNewerSlotFallsBackToOlderValidSlot);
     RUN_TEST(testBothCorruptDefaultWithoutAutomaticWrite);
+    RUN_TEST(testValidAWithMalformedBLoadsAAsFallback);
+    RUN_TEST(testMalformedAWithValidBLoadsBAsFallback);
+    RUN_TEST(testBothMalformedSlotsDefaultAsCorrupt);
+    RUN_TEST(testExactSizeCrcInvalidSlotRemainsCorruptNotUnavailable);
     RUN_TEST(testValidSchemaRecordRepairsAllInvalidFieldsInRam);
     RUN_TEST(testSupportedAWithUnsupportedBLoadsA);
     RUN_TEST(testUnsupportedAWithSupportedBLoadsB);
@@ -2169,6 +2338,8 @@ int main(int, char**) {
     RUN_TEST(testUnsupportedAndMissingDefaultsAndBlocksSave);
     RUN_TEST(testUnsupportedAndCorruptDefaultsAndBlocksSave);
     RUN_TEST(testStorageUnavailableReadsBothSlotsAndDefaults);
+    RUN_TEST(testStorageUnavailableFromSlotBRemainsUnavailable);
+    RUN_TEST(testFallbackRepairSaveCanonicalizesInactiveSlot);
     RUN_TEST(testUnchangedSavePerformsZeroStorageOperations);
     RUN_TEST(testChangedSaveWritesInactiveSlotOnceAndVerifiesReadBack);
     RUN_TEST(testWriteFailurePreservesPreviousAuthoritativeState);

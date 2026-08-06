@@ -366,6 +366,7 @@ enum class RecordSlot : uint8_t {
 enum class StoreResult : uint8_t {
     OK,
     MISSING,
+    MALFORMED,
     UNAVAILABLE,
     ERROR
 };
@@ -598,7 +599,7 @@ public:
         if (!hasActiveSlot_ && unsupportedSchema()) {
             return SaveStatus::UNSUPPORTED_SCHEMA;
         }
-        if (canonical == settings_) {
+        if (canonical == settings_ && !repairPending_) {
             return candidateRepaired
                 ? SaveStatus::REPAIRED_UNCHANGED
                 : SaveStatus::UNCHANGED;
@@ -766,6 +767,10 @@ private:
 
         if (readResult == StoreResult::MISSING) {
             record.kind = SlotKind::MISSING;
+            return record;
+        }
+        if (readResult == StoreResult::MALFORMED) {
+            record.kind = SlotKind::CORRUPT;
             return record;
         }
         if (readResult != StoreResult::OK) {

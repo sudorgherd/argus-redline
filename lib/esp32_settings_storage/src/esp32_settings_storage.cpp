@@ -11,6 +11,36 @@ constexpr char SLOT_A_KEY[] = "cfg_a";
 constexpr char SLOT_B_KEY[] = "cfg_b";
 constexpr char RESET_MARKER_KEY[] = "rst_pend";
 
+constexpr DeviceSettings::StoreResult classifySlotMetadata(
+    bool isBlob,
+    size_t storedLength
+) {
+    return isBlob && storedLength == DeviceSettings::RECORD_SIZE
+        ? DeviceSettings::StoreResult::OK
+        : DeviceSettings::StoreResult::MALFORMED;
+}
+
+static_assert(
+    classifySlotMetadata(true, DeviceSettings::RECORD_SIZE) ==
+        DeviceSettings::StoreResult::OK,
+    "An exact-size blob must continue to physical retrieval"
+);
+static_assert(
+    classifySlotMetadata(true, DeviceSettings::RECORD_SIZE - 1U) ==
+        DeviceSettings::StoreResult::MALFORMED,
+    "An undersized stored blob is malformed data"
+);
+static_assert(
+    classifySlotMetadata(true, DeviceSettings::RECORD_SIZE + 1U) ==
+        DeviceSettings::StoreResult::MALFORMED,
+    "An oversized stored blob is malformed data"
+);
+static_assert(
+    classifySlotMetadata(false, DeviceSettings::RECORD_SIZE) ==
+        DeviceSettings::StoreResult::MALFORMED,
+    "A stored value with the wrong NVS type is malformed data"
+);
+
 constexpr DeviceSettings::StoreResult classifyNamespaceOpen(
     esp_err_t result
 ) {
@@ -104,10 +134,13 @@ DeviceSettings::StoreResult PreferencesRecordStore::readSlot(
         preferences.end();
         return DeviceSettings::StoreResult::MISSING;
     }
-    if (preferences.getType(key) != PT_BLOB ||
-        preferences.getBytesLength(key) != DeviceSettings::RECORD_SIZE) {
+    const DeviceSettings::StoreResult metadataResult = classifySlotMetadata(
+        preferences.getType(key) == PT_BLOB,
+        preferences.getBytesLength(key)
+    );
+    if (metadataResult != DeviceSettings::StoreResult::OK) {
         preferences.end();
-        return DeviceSettings::StoreResult::ERROR;
+        return metadataResult;
     }
 
     const size_t bytesRead = preferences.getBytes(
