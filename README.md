@@ -8,7 +8,7 @@
 
 ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
-> **Firmware identifier:** v0.3.0 — device runtime, screens, and input, preserving the Protocol v0.1 wire format.
+> **Firmware identifier:** v0.4.0 — persistent validated settings and local configuration recovery, preserving the Protocol v0.1 wire format.
 
 ## What is ARGUS REDLINE?
 
@@ -22,11 +22,11 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
 
-The **[v0.3.0 Release Notes](docs/V0.3.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known limitations. The [v0.3.0 two-board regression](docs/V0.3.0_TWO_BOARD_REGRESSION.md) records the physical evidence.
+The **[v0.4.0 Release Notes](docs/V0.4.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known limitations. The [v0.4.0 storage characterization](docs/V0.4.0_STORAGE_CHARACTERIZATION.md) records the dedicated persistence evidence.
 
 ## Implemented now
 
-Firmware v0.3.0 was validated on two physical Heltec WiFi LoRa 32 V4.3 boards. The physical regression used the behavior-complete build while it still reported `v0.2.0`; finalization changes only the authoritative firmware-version value and its test expectation.
+Firmware v0.4.0 was validated on two physical Heltec WiFi LoRa 32 V4.3 boards before the final identity-only version change from `v0.3.0` to `v0.4.0`.
 
 Verified behavior includes:
 
@@ -45,6 +45,9 @@ Verified behavior includes:
 - Six shared OLED screens: Home, Radio, Device, Last Packet, Diagnostics, and About
 - Short-press navigation, long-press return Home, and a 30-second OLED inactivity timeout
 - Wake without navigation while radio processing continues independently of the display
+- Validated local settings with dual-slot generation recovery and a recoverable factory-reset policy
+- A bounded nine-item settings editor for display, LED, diagnostics, default-screen, and feedback preferences
+- Role-safe persistence service points for both Hub transactions and Node receive/ACK ownership
 
 ## Project
 
@@ -78,7 +81,7 @@ Current logical device roles:
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies wire-format compatibility. Firmware v0.3.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
+Protocol v0.1 identifies wire-format compatibility. Firmware v0.4.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field |
 |---:|---|
@@ -136,7 +139,7 @@ The first published radio protocol release remains:
 
 - [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.3.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
+The firmware identifier in the source is v0.4.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
 
 The history includes the original string-based exchange, binary protocol implementation, reliability testing, and Protocol v0.1 merge.
 
@@ -153,7 +156,7 @@ The history includes the original string-based exchange, binary protocol impleme
 
 These bullets describe complete v1 targets. Some radio-transport foundations are implemented now, but the listed v1 capabilities are not complete.
 
-Persistent settings, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented in v0.3.0.
+Persistent ordinary device settings are implemented in v0.4.0. Persistent identity, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented.
 
 ### Exploratory and later concepts
 

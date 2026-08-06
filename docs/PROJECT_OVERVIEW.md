@@ -360,7 +360,7 @@ Target capabilities:
 
 ## Implemented Now
 
-The current v0.3.0 firmware foundation already provides:
+The current v0.4.0 firmware foundation already provides:
 
 - Two independently buildable Heltec firmware targets
 - Bidirectional LoRa communication at 915 MHz
@@ -375,10 +375,12 @@ The current v0.3.0 firmware foundation already provides:
 - Configurable compile-time device identities
 - RSSI and SNR diagnostics
 - Hardware-independent runtime health, error, metric, activity, inbound-packet, and saturating-counter state
-- A deterministic active-low GPIO0 input classifier with debounced short and long presses
+- A deterministic active-low GPIO0 input classifier with debounced short, long, and very-long presses
 - Shared Home, Radio, Device, Last Packet, Diagnostics, and About OLED screens
 - Nonblocking, dirty and rate-limited presentation with a 30-second timeout and wake-without-navigation behavior
 - Shared bounded presentation snapshots and a Heltec OLED rendering adapter
+- Validated Schema 1 local settings with dual-slot generation selection, fallback repair, and prepared-state-tested factory-reset recovery
+- A bounded nine-item settings editor with role-safe persistence integration on both Hub and Node
 - Physical two-board validation on two Heltec WiFi LoRa 32 V4.3 boards
 
 The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
@@ -387,7 +389,7 @@ The current application behavior remains intentionally narrow: a test command an
 
 Current packets are structured and validated but are **not yet cryptographically authenticated or encrypted**.
 
-Persistent settings, sensors, trigger mechanisms, transferred procedures, multiple active Nodes, security, provisioning, host integration, repeaters, and mesh routing are targeted directions—not completed capabilities.
+Persistent identity and provisioning, sensors, trigger mechanisms, transferred procedures, multiple active Nodes, security, host integration, repeaters, and mesh routing are targeted directions—not completed capabilities.
 
 ---
 

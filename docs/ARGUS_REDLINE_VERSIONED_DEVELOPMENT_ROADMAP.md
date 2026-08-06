@@ -1,8 +1,8 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current completed release:** `v0.3.0`
-**Immediate next release:** `v0.4.0` — Persistent Settings and Configuration Recovery
+**Current completed release:** `v0.4.0`
+**Immediate next release:** `v0.5.0` — Capability Registry and Safe Hardware Abstraction
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -240,6 +240,8 @@ LONG_PRESS
 
 ## `v0.4.0` — Persistent Settings and Configuration Recovery
 
+**Status:** Completed
+
 ### Objective
 
 Allow safe local settings to survive reboot and power loss.
@@ -282,13 +284,13 @@ Raw GPIO assignments
 ### Release gate
 
 ```text
-[ ] Settings survive power removal
-[ ] Missing settings receive safe defaults
-[ ] Invalid values are rejected or repaired
-[ ] Factory reset restores documented defaults
-[ ] Schema version is visible
-[ ] Storage writes do not interrupt radio operation
-[ ] Repeated ordinary operation does not cause continuous flash writes
+[x] Settings survive power removal
+[x] Missing settings receive safe defaults
+[x] Invalid values are rejected or repaired
+[x] Factory reset restores documented defaults
+[x] Schema version is visible
+[x] Storage writes do not interrupt observed radio operation
+[x] Repeated ordinary operation does not cause continuous flash writes
 ```
 
 ---
@@ -962,18 +964,16 @@ Stable routing, security, and procedure-package interfaces
 The next planned release is:
 
 ```text
-v0.4.0
-Persistent Settings and Configuration Recovery
+v0.5.0
+Capability Registry and Safe Hardware Abstraction
 ```
 
 Immediate work:
 
 ```text
-[ ] Define a versioned settings schema and deterministic defaults
-[ ] Persist approved local display and diagnostics settings
-[ ] Validate and repair missing or invalid stored values
-[ ] Add factory reset and configuration recovery behavior
-[ ] Keep identity, security, radio, and protocol values protected from ordinary settings
-[ ] Prevent continuous flash writes during normal operation
-[ ] Verify storage operations do not interrupt radio or UI behavior
+[ ] Define a bounded capability descriptor and logical capability IDs
+[ ] Add capability discovery without unrestricted hardware access
+[ ] Add per-capability authorization, validation, safety, and interlock hooks
+[ ] Implement the first complete sensor/input/output vertical slice
+[ ] Preserve protocol, radio, and role ownership while capabilities are introduced
 ```
