@@ -10,6 +10,8 @@
 #include "device_input.h"
 #include "device_ui.h"
 #include "heltec_display.h"
+#include "esp32_settings_storage.h"
+#include "node_settings_integration.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -19,6 +21,8 @@ SX1262 radio = new Module(8, 14, 12, 13, radioSPI);
 constexpr uint8_t APPLICATION_BUTTON_PIN = 0;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t BUTTON_LONG_PRESS_MS = 800;
+constexpr uint32_t BUTTON_VERY_LONG_PRESS_MS = 3000;
+constexpr uint32_t BUTTON_FEEDBACK_MS = 50;
 
 volatile bool operationDone = false;
 
@@ -29,11 +33,24 @@ RuntimeState::State runtimeState(
 );
 DeviceInput::Button applicationButton(
     BUTTON_DEBOUNCE_MS,
-    BUTTON_LONG_PRESS_MS
+    BUTTON_LONG_PRESS_MS,
+    BUTTON_VERY_LONG_PRESS_MS
 );
 DeviceUi::Controller uiController(0);
 HeltecDisplay::Renderer displayRenderer(display);
 DeviceUi::PeerState peerState = DeviceUi::PeerState::UNKNOWN;
+Esp32SettingsStorage::PreferencesRecordStore settingsStore;
+DeviceSettings::SettingsManager settingsManager;
+DeviceSettings::Settings currentSettings = DeviceSettings::defaults();
+NodeSettingsIntegration::ConfigurationState configurationState;
+NodeSettingsIntegration::RequestQueue persistenceRequests;
+
+bool renderingPresentation = false;
+bool radioLedActive = false;
+bool feedbackLedActive = false;
+uint32_t feedbackLedUntilMs = 0;
+bool quietMaintenanceAttemptArmed = false;
+bool maintenanceOwnershipActive = false;
 
 uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -96,17 +113,83 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
     input.lastError = runtimeState.lastError();
+    input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
+    input.configurationStatus = configurationState.status;
+    input.configurationSource = configurationState.source;
+    input.configurationGenerationAvailable =
+        configurationState.generationAvailable;
+    input.configurationGeneration = configurationState.generation;
+    input.configurationRepairPending = configurationState.repairPending;
+    input.unsupportedConfigurationPreserved =
+        configurationState.unsupportedPreserved;
     return input;
 }
 
 void renderCurrentPresentation(uint32_t nowMs) {
-    const DeviceUi::PresentationSnapshot snapshot =
-        DeviceUi::buildPresentation(
-            uiController.screen(),
-            buildPresentationInput()
-        );
-    displayRenderer.render(snapshot);
+    renderingPresentation = true;
+    if (uiController.editorActive()) {
+        const DeviceUi::EditorPresentationSnapshot snapshot =
+            DeviceUi::buildEditorSnapshot(
+                uiController.editorPresentation()
+            );
+        displayRenderer.render(snapshot);
+    } else {
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(
+                uiController.screen(),
+                buildPresentationInput()
+            );
+        displayRenderer.render(snapshot);
+    }
+    renderingPresentation = false;
     uiController.recordRendered(nowMs);
+}
+
+void updateLedOutput() {
+    digitalWrite(
+        LED_BUILTIN,
+        currentSettings.ledEnabled &&
+                (radioLedActive || feedbackLedActive)
+            ? HIGH
+            : LOW
+    );
+}
+
+void requestButtonFeedback(
+    DeviceInput::ButtonEvent event,
+    uint32_t nowMs
+) {
+    if (!NodeSettingsIntegration::feedbackAllowed(currentSettings, event)) {
+        return;
+    }
+    feedbackLedActive = true;
+    feedbackLedUntilMs = nowMs + BUTTON_FEEDBACK_MS;
+    updateLedOutput();
+}
+
+void serviceButtonFeedback(uint32_t nowMs) {
+    if (
+        feedbackLedActive &&
+        static_cast<int32_t>(nowMs - feedbackLedUntilMs) >= 0
+    ) {
+        feedbackLedActive = false;
+        updateLedOutput();
+    }
+}
+
+void queueEditorAction() {
+    switch (uiController.takeEditorAction()) {
+        case DeviceUi::EditorAction::SAVE_SETTINGS_REQUEST:
+            persistenceRequests.queueSave(uiController.draftSettings());
+            quietMaintenanceAttemptArmed = true;
+            break;
+        case DeviceUi::EditorAction::FACTORY_RESET_REQUEST:
+            persistenceRequests.queueFactoryReset();
+            quietMaintenanceAttemptArmed = true;
+            break;
+        case DeviceUi::EditorAction::NONE:
+            break;
+    }
 }
 
 void serviceButton(uint32_t nowMs) {
@@ -114,7 +197,10 @@ void serviceButton(uint32_t nowMs) {
     const DeviceInput::ButtonEvents events =
         applicationButton.update(pressed, nowMs);
     uiController.handle(events.first, nowMs);
+    requestButtonFeedback(events.first, nowMs);
     uiController.handle(events.second, nowMs);
+    requestButtonFeedback(events.second, nowMs);
+    queueEditorAction();
 }
 
 void serviceUi(uint32_t nowMs) {
@@ -177,6 +263,103 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.println(packet.payloadLength);
 }
 
+void applyCurrentSettings(uint32_t nowMs, bool applyDefaultScreen) {
+    uiController.setCurrentSettings(currentSettings);
+    uiController.setInactivityTimeoutMs(
+        NodeSettingsIntegration::timeoutMs(currentSettings),
+        nowMs
+    );
+    displayRenderer.setContrast(currentSettings.displayContrast);
+    if (applyDefaultScreen) {
+        uiController.selectConfiguredScreen(
+            NodeSettingsIntegration::screen(currentSettings.defaultScreen)
+        );
+    }
+    updateLedOutput();
+    markPresentationChanged();
+}
+
+void loadSettings(uint32_t nowMs) {
+    const DeviceSettings::LoadStatus result =
+        settingsManager.load(settingsStore);
+    currentSettings = settingsManager.settings();
+    configurationState = NodeSettingsIntegration::fromLoad(
+        result,
+        settingsManager
+    );
+    applyCurrentSettings(nowMs, true);
+    if (settingsManager.repairPending()) {
+        persistenceRequests.queueAutomaticRepair();
+        quietMaintenanceAttemptArmed = true;
+    }
+}
+
+void servicePendingPersistence(uint32_t nowMs) {
+    const NodeSettingsIntegration::Request request =
+        persistenceRequests.pending();
+    if (request == NodeSettingsIntegration::Request::FACTORY_RESET) {
+        const DeviceSettings::ResetResult result =
+            settingsManager.factoryReset(settingsStore);
+        configurationState = NodeSettingsIntegration::fromReset(
+            result,
+            settingsManager
+        );
+        if (result == DeviceSettings::ResetResult::RESET_COMPLETED) {
+            currentSettings = settingsManager.settings();
+            applyCurrentSettings(nowMs, true);
+        } else {
+            markPresentationChanged();
+        }
+        persistenceRequests.clear();
+        quietMaintenanceAttemptArmed = false;
+        return;
+    }
+
+    const DeviceSettings::Settings& candidate =
+        request == NodeSettingsIntegration::Request::SAVE
+            ? persistenceRequests.saveDraft()
+            : currentSettings;
+    const DeviceSettings::SaveStatus result =
+        settingsManager.save(settingsStore, candidate);
+    configurationState = NodeSettingsIntegration::fromSave(
+        result,
+        settingsManager
+    );
+    if (NodeSettingsIntegration::saveSucceeded(result)) {
+        currentSettings = settingsManager.settings();
+        applyCurrentSettings(nowMs, false);
+    } else {
+        markPresentationChanged();
+    }
+    persistenceRequests.clear();
+    quietMaintenanceAttemptArmed = false;
+}
+
+void servicePersistenceAfterAcknowledgment(
+    uint32_t nowMs,
+    bool radioStandby
+) {
+    if (
+        persistenceRequests.pending() ==
+            NodeSettingsIntegration::Request::NONE
+    ) {
+        return;
+    }
+
+    NodeSettingsIntegration::SafePointState safePoint;
+    safePoint.acknowledgmentCompleted = true;
+    safePoint.radioEventPending = operationDone;
+    safePoint.radioStandby = radioStandby;
+    safePoint.rendering = renderingPresentation;
+    if (!NodeSettingsIntegration::persistenceSafe(safePoint)) {
+        if (!radioStandby) {
+            quietMaintenanceAttemptArmed = false;
+        }
+        return;
+    }
+    servicePendingPersistence(nowMs);
+}
+
 bool startListening() {
     operationDone = false;
     setRuntimePhase(RuntimeState::RuntimePhase::LISTENING);
@@ -202,6 +385,63 @@ void resumeListening() {
     if (startListening()) {
         setHealth(RuntimeState::Health::READY);
     }
+}
+
+void serviceQuietMaintenance(uint32_t nowMs) {
+    if (!NodeSettingsIntegration::quietMaintenanceAllowed(
+            persistenceRequests.pending(),
+            quietMaintenanceAttemptArmed,
+            runtimeState.phase(),
+            operationDone,
+            false,
+            false,
+            renderingPresentation
+        )) {
+        return;
+    }
+
+    maintenanceOwnershipActive = true;
+    // standby() is the ownership boundary. Recheck the ISR flag after it;
+    // an event that wins this race remains set for normal packet processing.
+    const int standbyState = radio.standby();
+    const bool eventArrivedDuringAcquisition = operationDone;
+    const NodeSettingsIntegration::AcquisitionOutcome acquisition =
+        NodeSettingsIntegration::classifyAcquisition(
+            standbyState == RADIOLIB_ERR_NONE,
+            eventArrivedDuringAcquisition || operationDone
+        );
+    if (
+        acquisition ==
+            NodeSettingsIntegration::AcquisitionOutcome::EVENT_PENDING
+    ) {
+        maintenanceOwnershipActive = false;
+        return;
+    }
+    if (
+        acquisition ==
+            NodeSettingsIntegration::AcquisitionOutcome::STANDBY_FAILED
+    ) {
+        maintenanceOwnershipActive = false;
+        quietMaintenanceAttemptArmed = false;
+        startListening();
+        return;
+    }
+
+    NodeSettingsIntegration::SafePointState safePoint;
+    safePoint.quietListeningMaintenance = true;
+    safePoint.radioEventPending = operationDone;
+    safePoint.radioStandby = true;
+    safePoint.rendering = renderingPresentation;
+    if (!NodeSettingsIntegration::persistenceSafe(safePoint)) {
+        maintenanceOwnershipActive = false;
+        if (!operationDone) {
+            startListening();
+        }
+        return;
+    }
+    servicePendingPersistence(nowMs);
+    maintenanceOwnershipActive = false;
+    startListening();
 }
 
 bool startAcknowledgment(
@@ -234,7 +474,8 @@ bool startAcknowledgment(
 
     operationDone = false;
     setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
-    digitalWrite(LED_BUILTIN, HIGH);
+    radioLedActive = true;
+    updateLedOutput();
 
     const int state = radio.startTransmit(
         transmitBuffer,
@@ -242,7 +483,8 @@ bool startAcknowledgment(
     );
 
     if (state != RADIOLIB_ERR_NONE) {
-        digitalWrite(LED_BUILTIN, LOW);
+        radioLedActive = false;
+        updateLedOutput();
         runtimeState.incrementRadioErrors();
         setHealth(RuntimeState::Health::DEGRADED);
         recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
@@ -260,8 +502,9 @@ bool startAcknowledgment(
 }
 
 void finishAcknowledgment() {
-    digitalWrite(LED_BUILTIN, LOW);
-    radio.standby();
+    radioLedActive = false;
+    updateLedOutput();
+    const int standbyState = radio.standby();
 
     logPacket("TX", pendingAcknowledgment);
 
@@ -270,6 +513,10 @@ void finishAcknowledgment() {
         String("ACK SEQ ") + pendingAcknowledgment.sequence
     );
 
+    servicePersistenceAfterAcknowledgment(
+        static_cast<uint32_t>(millis()),
+        standbyState == RADIOLIB_ERR_NONE
+    );
     const bool listening = startListening();
     runtimeState.incrementTransmissionsCompleted();
     runtimeState.recordActivity(static_cast<uint32_t>(millis()));
@@ -434,6 +681,8 @@ void setup() {
 
     display.init();
 
+    loadSettings(static_cast<uint32_t>(millis()));
+
     radioSPI.begin(9, 11, 10, 8);
 
     const int state = radio.begin(915.0);
@@ -475,6 +724,7 @@ void setup() {
 void loop() {
     const uint32_t nowMs = static_cast<uint32_t>(millis());
     serviceButton(nowMs);
+    serviceButtonFeedback(nowMs);
 
     if (runtimeState.isReady() && operationDone) {
         operationDone = false;
@@ -489,10 +739,16 @@ void loop() {
         }
     }
 
+    if (runtimeState.isReady()) {
+        serviceQuietMaintenance(nowMs);
+    }
+
     // Defer OLED I/O until an active ACK has completed and receive restarted.
     if (
         runtimeState.phase() !=
-        RuntimeState::RuntimePhase::TRANSMITTING_ACK
+            RuntimeState::RuntimePhase::TRANSMITTING_ACK &&
+        !operationDone &&
+        !maintenanceOwnershipActive
     ) {
         serviceUi(nowMs);
     }
