@@ -832,6 +832,273 @@ void assertRow(
     TEST_ASSERT_EQUAL_STRING(value, snapshot.rows[index].value);
 }
 
+void assertEditorText(
+    const DeviceUi::EditorPresentationSnapshot& snapshot,
+    const char* position,
+    const char* label,
+    const char* value
+) {
+    TEST_ASSERT_EQUAL_STRING("SETTINGS", snapshot.title);
+    TEST_ASSERT_EQUAL_STRING(position, snapshot.position);
+    TEST_ASSERT_EQUAL_STRING(label, snapshot.label);
+    TEST_ASSERT_EQUAL_STRING(value, snapshot.value);
+}
+
+void testEveryEditorItemBuildsApprovedLabelAndPosition() {
+    const DeviceUi::EditorItem items[] = {
+        DeviceUi::EditorItem::DISPLAY_TIMEOUT,
+        DeviceUi::EditorItem::DISPLAY_CONTRAST,
+        DeviceUi::EditorItem::LED_ENABLED,
+        DeviceUi::EditorItem::DIAGNOSTICS_ENABLED,
+        DeviceUi::EditorItem::DEFAULT_SCREEN,
+        DeviceUi::EditorItem::BUTTON_FEEDBACK,
+        DeviceUi::EditorItem::SAVE,
+        DeviceUi::EditorItem::CANCEL,
+        DeviceUi::EditorItem::FACTORY_RESET
+    };
+    const char* labels[] = {
+        "TIMEOUT", "CONTRAST", "LED", "DIAGNOSTICS", "DEFAULT SCREEN",
+        "BUTTON FEEDBACK", "SAVE", "CANCEL", "FACTORY RESET"
+    };
+    const char* positions[] = {
+        "1/9", "2/9", "3/9", "4/9", "5/9", "6/9", "7/9", "8/9", "9/9"
+    };
+    for (uint8_t index = 0; index < 9; ++index) {
+        DeviceUi::EditorPresentationInput input;
+        input.selectedItem = items[index];
+        const DeviceUi::EditorPresentationSnapshot snapshot =
+            DeviceUi::buildEditorSnapshot(input);
+        TEST_ASSERT_EQUAL_STRING("SETTINGS", snapshot.title);
+        TEST_ASSERT_EQUAL_STRING(positions[index], snapshot.position);
+        TEST_ASSERT_EQUAL_STRING(labels[index], snapshot.label);
+    }
+}
+
+void testTimeoutFormattingCoversOffPresetsAndArbitraryValue() {
+    const uint16_t values[] = {0, 15, 30, 60, 120, 300, 600, 77};
+    const char* labels[] = {"OFF", "15s", "30s", "60s", "120s", "300s", "600s", "77s"};
+    for (uint8_t index = 0; index < 8; ++index) {
+        DeviceUi::EditorPresentationInput input;
+        input.selectedItem = DeviceUi::EditorItem::DISPLAY_TIMEOUT;
+        input.draft.displayTimeoutSeconds = values[index];
+        assertEditorText(
+            DeviceUi::buildEditorSnapshot(input),
+            "1/9",
+            "TIMEOUT",
+            labels[index]
+        );
+    }
+}
+
+void testContrastFormattingCoversPresetsAndArbitraryValue() {
+    const uint8_t values[] = {32, 64, 128, 207, 255, 99};
+    const char* labels[] = {"32", "64", "128", "207", "255", "99"};
+    for (uint8_t index = 0; index < 6; ++index) {
+        DeviceUi::EditorPresentationInput input;
+        input.selectedItem = DeviceUi::EditorItem::DISPLAY_CONTRAST;
+        input.draft.displayContrast = values[index];
+        assertEditorText(
+            DeviceUi::buildEditorSnapshot(input),
+            "2/9",
+            "CONTRAST",
+            labels[index]
+        );
+    }
+}
+
+void testBooleanAndDefaultScreenFormattingIsComplete() {
+    const DeviceUi::EditorItem booleanItems[] = {
+        DeviceUi::EditorItem::LED_ENABLED,
+        DeviceUi::EditorItem::DIAGNOSTICS_ENABLED,
+        DeviceUi::EditorItem::BUTTON_FEEDBACK
+    };
+    for (DeviceUi::EditorItem item : booleanItems) {
+        DeviceUi::EditorPresentationInput input;
+        input.selectedItem = item;
+        input.draft.ledEnabled = false;
+        input.draft.diagnosticsEnabled = false;
+        input.draft.buttonFeedbackEnabled = false;
+        TEST_ASSERT_EQUAL_STRING(
+            "OFF",
+            DeviceUi::buildEditorSnapshot(input).value
+        );
+        input.draft.ledEnabled = true;
+        input.draft.diagnosticsEnabled = true;
+        input.draft.buttonFeedbackEnabled = true;
+        TEST_ASSERT_EQUAL_STRING(
+            "ON",
+            DeviceUi::buildEditorSnapshot(input).value
+        );
+    }
+
+    const DeviceSettings::DefaultScreen screens[] = {
+        DeviceSettings::DefaultScreen::HOME,
+        DeviceSettings::DefaultScreen::RADIO,
+        DeviceSettings::DefaultScreen::DEVICE,
+        DeviceSettings::DefaultScreen::LAST_PACKET,
+        DeviceSettings::DefaultScreen::DIAGNOSTICS,
+        DeviceSettings::DefaultScreen::ABOUT
+    };
+    const char* labels[] = {
+        "HOME", "RADIO", "DEVICE", "LAST PACKET", "DIAGNOSTICS", "ABOUT"
+    };
+    for (uint8_t index = 0; index < 6; ++index) {
+        DeviceUi::EditorPresentationInput input;
+        input.selectedItem = DeviceUi::EditorItem::DEFAULT_SCREEN;
+        input.draft.defaultScreen = screens[index];
+        TEST_ASSERT_EQUAL_STRING(
+            labels[index],
+            DeviceUi::buildEditorSnapshot(input).value
+        );
+    }
+}
+
+void testDirtySaveAndCancelPresentationIsExplicit() {
+    DeviceUi::EditorPresentationInput input;
+    input.selectedItem = DeviceUi::EditorItem::DISPLAY_TIMEOUT;
+    TEST_ASSERT_EQUAL_STRING(
+        "CLEAN",
+        DeviceUi::buildEditorSnapshot(input).state
+    );
+    input.dirty = true;
+    TEST_ASSERT_EQUAL_STRING(
+        "MODIFIED",
+        DeviceUi::buildEditorSnapshot(input).state
+    );
+
+    input.selectedItem = DeviceUi::EditorItem::SAVE;
+    TEST_ASSERT_EQUAL_STRING(
+        "MODIFIED",
+        DeviceUi::buildEditorSnapshot(input).value
+    );
+    input.dirty = false;
+    TEST_ASSERT_EQUAL_STRING(
+        "UNCHANGED",
+        DeviceUi::buildEditorSnapshot(input).value
+    );
+
+    input.selectedItem = DeviceUi::EditorItem::CANCEL;
+    TEST_ASSERT_EQUAL_STRING(
+        "NO CHANGES",
+        DeviceUi::buildEditorSnapshot(input).value
+    );
+    input.dirty = true;
+    TEST_ASSERT_EQUAL_STRING(
+        "DISCARD CHANGES",
+        DeviceUi::buildEditorSnapshot(input).value
+    );
+}
+
+void testResetPresentationNeverShowsExpiredStateAsArmed() {
+    DeviceUi::EditorPresentationInput input;
+    input.selectedItem = DeviceUi::EditorItem::FACTORY_RESET;
+    DeviceUi::EditorPresentationSnapshot snapshot =
+        DeviceUi::buildEditorSnapshot(input);
+    assertEditorText(snapshot, "9/9", "FACTORY RESET", "NOT ARMED");
+    TEST_ASSERT_EQUAL_STRING("NO RESET", snapshot.state);
+
+    input.resetArmed = true;
+    snapshot = DeviceUi::buildEditorSnapshot(input);
+    TEST_ASSERT_EQUAL_STRING("HOLD AGAIN", snapshot.value);
+    TEST_ASSERT_EQUAL_STRING("CONFIRM RESET", snapshot.state);
+    TEST_ASSERT_EQUAL_STRING("10s WINDOW", snapshot.hint);
+
+    DeviceUi::Controller controller(0);
+    enterEditor(controller, 0);
+    uint32_t nowMs = 0;
+    moveToReset(controller, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 1);
+    TEST_ASSERT_TRUE(controller.editorPresentation().resetArmed);
+    controller.update(10002);
+    TEST_ASSERT_FALSE(controller.editorPresentation().resetArmed);
+    snapshot = DeviceUi::buildEditorSnapshot(controller.editorPresentation());
+    TEST_ASSERT_EQUAL_STRING("NOT ARMED", snapshot.value);
+}
+
+void testEditorSnapshotsAreBoundedReplacedAndInputIsNotMutated() {
+    DeviceUi::EditorPresentationInput input;
+    input.selectedItem = DeviceUi::EditorItem::FACTORY_RESET;
+    input.dirty = true;
+    input.resetArmed = true;
+    const DeviceSettings::Settings before = input.draft;
+    DeviceUi::EditorPresentationSnapshot snapshot =
+        DeviceUi::buildEditorSnapshot(input);
+    input.selectedItem = DeviceUi::EditorItem::DISPLAY_TIMEOUT;
+    input.resetArmed = false;
+    snapshot = DeviceUi::buildEditorSnapshot(input);
+    TEST_ASSERT_EQUAL_STRING("TIMEOUT", snapshot.label);
+    TEST_ASSERT_EQUAL_STRING("HOLD TO CHANGE", snapshot.hint);
+    TEST_ASSERT_TRUE(input.draft == before);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.title[DeviceUi::EDITOR_TEXT_CAPACITY - 1]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.position[DeviceUi::EDITOR_POSITION_CAPACITY - 1]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.label[DeviceUi::EDITOR_TEXT_CAPACITY - 1]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.value[DeviceUi::EDITOR_TEXT_CAPACITY - 1]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.state[DeviceUi::EDITOR_TEXT_CAPACITY - 1]);
+    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.hint[DeviceUi::EDITOR_TEXT_CAPACITY - 1]);
+}
+
+void testDiagnosticsDisabledRendersExplicitlyWithoutChangingOrder() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.diagnosticsEnabled = false;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    assertScreen(DeviceUi::Screen::DIAGNOSTICS, snapshot.screen);
+    TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
+    assertRow(snapshot, 0, "STATUS", "DISABLED");
+
+    DeviceUi::Controller controller(0);
+    for (uint8_t index = 0; index < 4; ++index) {
+        controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, index + 1);
+    }
+    assertScreen(DeviceUi::Screen::DIAGNOSTICS, controller.screen());
+}
+
+void testAboutConfigurationStatusUsesCompleteCompactStrings() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    TEST_ASSERT_EQUAL_UINT8(4, snapshot.rowCount);
+
+    input.configurationStatus = DeviceUi::ConfigurationStatus::LOADED;
+    input.configurationSource = DeviceUi::ConfigurationSource::SLOT_A;
+    input.configurationGenerationAvailable = true;
+    input.configurationGeneration = 10;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    TEST_ASSERT_EQUAL_UINT8(5, snapshot.rowCount);
+    assertRow(snapshot, 4, "CFG", "A G10");
+
+    input.configurationSource = DeviceUi::ConfigurationSource::SLOT_B;
+    input.configurationGeneration = 11;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "B G11");
+
+    input.configurationStatus = DeviceUi::ConfigurationStatus::FALLBACK;
+    input.configurationSource = DeviceUi::ConfigurationSource::SLOT_A;
+    input.configurationGeneration = 10;
+    input.configurationRepairPending = true;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "A G10 REPAIR");
+
+    input.configurationStatus = DeviceUi::ConfigurationStatus::SAVED;
+    input.configurationSource = DeviceUi::ConfigurationSource::SLOT_B;
+    input.configurationGeneration = 11;
+    input.configurationRepairPending = false;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "SAVED B G11");
+
+    input.configurationStatus = DeviceUi::ConfigurationStatus::UNAVAILABLE;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "UNAVAILABLE");
+
+    input.configurationStatus = DeviceUi::ConfigurationStatus::RESET_COMPLETED;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "RESET OK");
+
+    input.unsupportedConfigurationPreserved = true;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::ABOUT, input);
+    assertRow(snapshot, 4, "CFG", "UNSUPPORTED");
+}
+
 void testEveryScreenBuildsWithMatchingIdAndBoundedRows() {
     const DeviceUi::Screen screens[] = {
         DeviceUi::Screen::HOME,
@@ -1309,6 +1576,15 @@ int main(int, char**) {
     RUN_TEST(testResetConfirmationIsRolloverSafe);
     RUN_TEST(testEditorInactivityDiscardsWithoutRequestAndTurnsDisplayOff);
     RUN_TEST(testEditorTimeoutZeroNeverExpiresAndAcceptedInputResetsTimer);
+    RUN_TEST(testEveryEditorItemBuildsApprovedLabelAndPosition);
+    RUN_TEST(testTimeoutFormattingCoversOffPresetsAndArbitraryValue);
+    RUN_TEST(testContrastFormattingCoversPresetsAndArbitraryValue);
+    RUN_TEST(testBooleanAndDefaultScreenFormattingIsComplete);
+    RUN_TEST(testDirtySaveAndCancelPresentationIsExplicit);
+    RUN_TEST(testResetPresentationNeverShowsExpiredStateAsArmed);
+    RUN_TEST(testEditorSnapshotsAreBoundedReplacedAndInputIsNotMutated);
+    RUN_TEST(testDiagnosticsDisabledRendersExplicitlyWithoutChangingOrder);
+    RUN_TEST(testAboutConfigurationStatusUsesCompleteCompactStrings);
     RUN_TEST(testEveryScreenBuildsWithMatchingIdAndBoundedRows);
     RUN_TEST(testBuilderFullyReplacesReusedSnapshotAndDoesNotMutateInput);
     RUN_TEST(testFixedStringsAreBoundedAndNullTerminated);

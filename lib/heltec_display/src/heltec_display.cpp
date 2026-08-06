@@ -23,6 +23,10 @@ constexpr int16_t DISPLAY_CENTER = 64;
 constexpr int16_t TITLE_Y = 0;
 constexpr int16_t FIRST_ROW_Y = 10;
 constexpr int16_t ROW_SPACING = 10;
+constexpr int16_t EDITOR_LABEL_Y = 13;
+constexpr int16_t EDITOR_VALUE_Y = 25;
+constexpr int16_t EDITOR_STATE_Y = 43;
+constexpr int16_t EDITOR_HINT_Y = 53;
 constexpr size_t HOME_STATUS_CAPACITY =
     DeviceUi::PRESENTATION_LABEL_CAPACITY +
     DeviceUi::PRESENTATION_VALUE_CAPACITY +
@@ -42,6 +46,18 @@ void Renderer::render(const DeviceUi::PresentationSnapshot& snapshot) {
     }
 
     display_.display();
+}
+
+void Renderer::render(
+    const DeviceUi::EditorPresentationSnapshot& snapshot
+) {
+    display_.clear();
+    renderEditor(snapshot);
+    display_.display();
+}
+
+void Renderer::setContrast(uint8_t contrast) {
+    display_.setContrast(contrast);
 }
 
 void Renderer::displayOn() {
@@ -103,6 +119,25 @@ void Renderer::renderInformation(
         display_.setTextAlignment(TEXT_ALIGN_RIGHT);
         display_.drawString(DISPLAY_RIGHT, y, row.value);
     }
+}
+
+void Renderer::renderEditor(
+    const DeviceUi::EditorPresentationSnapshot& snapshot
+) {
+    display_.setColor(WHITE);
+    display_.setFont(ArialMT_Plain_10);
+    display_.setTextAlignment(TEXT_ALIGN_LEFT);
+    display_.drawString(0, TITLE_Y, snapshot.title);
+    display_.setTextAlignment(TEXT_ALIGN_RIGHT);
+    display_.drawString(DISPLAY_RIGHT, TITLE_Y, snapshot.position);
+
+    display_.setTextAlignment(TEXT_ALIGN_CENTER);
+    display_.drawString(DISPLAY_CENTER, EDITOR_LABEL_Y, snapshot.label);
+    display_.setFont(ArialMT_Plain_16);
+    display_.drawString(DISPLAY_CENTER, EDITOR_VALUE_Y, snapshot.value);
+    display_.setFont(ArialMT_Plain_10);
+    display_.drawString(DISPLAY_CENTER, EDITOR_STATE_Y, snapshot.state);
+    display_.drawString(DISPLAY_CENTER, EDITOR_HINT_Y, snapshot.hint);
 }
 
 }  // namespace HeltecDisplay
