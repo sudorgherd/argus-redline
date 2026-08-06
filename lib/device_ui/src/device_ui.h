@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "device_input.h"
+#include "device_settings.h"
 #include "redline_protocol.h"
 #include "runtime_state.h"
 
@@ -32,6 +33,24 @@ enum class UiAction : uint8_t {
     DISPLAY_ON,
     DISPLAY_ON_AND_RENDER,
     DISPLAY_OFF
+};
+
+enum class EditorAction : uint8_t {
+    NONE,
+    SAVE_SETTINGS_REQUEST,
+    FACTORY_RESET_REQUEST
+};
+
+enum class EditorItem : uint8_t {
+    DISPLAY_TIMEOUT,
+    DISPLAY_CONTRAST,
+    LED_ENABLED,
+    DIAGNOSTICS_ENABLED,
+    DEFAULT_SCREEN,
+    BUTTON_FEEDBACK,
+    SAVE,
+    CANCEL,
+    FACTORY_RESET
 };
 
 enum class PeerState : uint8_t {
@@ -406,6 +425,7 @@ public:
     static constexpr uint32_t DEFAULT_INACTIVITY_TIMEOUT_MS = 30000;
     static constexpr uint32_t DEFAULT_MINIMUM_RENDER_INTERVAL_MS = 100;
     static constexpr uint32_t DEFAULT_LIVE_REFRESH_INTERVAL_MS = 1000;
+    static constexpr uint32_t RESET_CONFIRMATION_TIMEOUT_MS = 10000;
 
     Controller(
         uint32_t initialTimeMs,
@@ -432,6 +452,43 @@ public:
         return dirty_;
     }
 
+    void setCurrentSettings(const DeviceSettings::Settings& settings) {
+        currentSettings_ = settings;
+        if (!editorActive_) {
+            draftSettings_ = settings;
+        }
+    }
+
+    const DeviceSettings::Settings& currentSettings() const {
+        return currentSettings_;
+    }
+
+    const DeviceSettings::Settings& draftSettings() const {
+        return draftSettings_;
+    }
+
+    bool editorActive() const {
+        return editorActive_;
+    }
+
+    EditorItem selectedEditorItem() const {
+        return selectedEditorItem_;
+    }
+
+    bool editorDirty() const {
+        return draftSettings_ != currentSettings_;
+    }
+
+    bool resetArmed() const {
+        return resetArmed_;
+    }
+
+    EditorAction takeEditorAction() {
+        const EditorAction action = pendingEditorAction_;
+        pendingEditorAction_ = EditorAction::NONE;
+        return action;
+    }
+
     void markDirty() {
         invalidate();
     }
@@ -454,6 +511,12 @@ public:
             return;
         }
 
+
+        if (editorActive_) {
+            handleEditor(event, nowMs);
+            return;
+        }
+
         switch (event) {
             case DeviceInput::ButtonEvent::PRESS:
                 lastInputAtMs_ = nowMs;
@@ -473,6 +536,10 @@ public:
                 }
                 break;
 
+            case DeviceInput::ButtonEvent::VERY_LONG_PRESS:
+                enterEditor(nowMs);
+                break;
+
             case DeviceInput::ButtonEvent::NONE:
             case DeviceInput::ButtonEvent::RELEASE:
                 break;
@@ -480,7 +547,34 @@ public:
     }
 
     UiAction update(uint32_t nowMs) {
+        if (editorActive_) {
+            const uint32_t editorTimeoutMs =
+                static_cast<uint32_t>(
+                    currentSettings_.displayTimeoutSeconds
+                ) * 1000U;
+            if (
+                editorTimeoutMs != 0U &&
+                elapsed(nowMs, lastInputAtMs_) >= editorTimeoutMs
+            ) {
+                exitEditor(false);
+                displayAwake_ = false;
+                displayOnPending_ = false;
+                renderPending_ = false;
+                dirtyWhileRenderPending_ = false;
+                return UiAction::DISPLAY_OFF;
+            }
+            if (
+                resetArmed_ &&
+                elapsed(nowMs, resetArmedAtMs_) >
+                    RESET_CONFIRMATION_TIMEOUT_MS
+            ) {
+                resetArmed_ = false;
+                invalidate();
+            }
+        }
+
         if (
+            !editorActive_ &&
             displayAwake_ &&
             elapsed(nowMs, lastInputAtMs_) >= inactivityTimeoutMs_
         ) {
@@ -497,6 +591,7 @@ public:
 
         if (
             !dirty_ &&
+            !editorActive_ &&
             isLiveScreen(screen_) &&
             elapsed(nowMs, lastLiveRefreshAtMs_) >= liveRefreshIntervalMs_
         ) {
@@ -535,7 +630,7 @@ public:
         dirtyWhileRenderPending_ = false;
         hasRendered_ = true;
         lastRenderAtMs_ = nowMs;
-        if (isLiveScreen(screen_)) {
+        if (!editorActive_ && isLiveScreen(screen_)) {
             lastLiveRefreshAtMs_ = nowMs;
         }
     }
@@ -564,6 +659,142 @@ private:
         return Screen::HOME;
     }
 
+    static EditorItem nextEditorItem(EditorItem item) {
+        const uint8_t next = static_cast<uint8_t>(item) + 1U;
+        return next > static_cast<uint8_t>(EditorItem::FACTORY_RESET)
+            ? EditorItem::DISPLAY_TIMEOUT
+            : static_cast<EditorItem>(next);
+    }
+
+    template <typename Value, size_t Count>
+    static Value nextPreset(Value current, const Value (&presets)[Count]) {
+        for (size_t index = 0; index < Count; ++index) {
+            if (presets[index] > current) {
+                return presets[index];
+            }
+        }
+        return presets[0];
+    }
+
+    void enterEditor(uint32_t nowMs) {
+        editorActive_ = true;
+        draftSettings_ = currentSettings_;
+        selectedEditorItem_ = EditorItem::DISPLAY_TIMEOUT;
+        resetArmed_ = false;
+        lastInputAtMs_ = nowMs;
+        invalidate();
+    }
+
+    void exitEditor(bool retainDraft) {
+        editorActive_ = false;
+        resetArmed_ = false;
+        selectedEditorItem_ = EditorItem::DISPLAY_TIMEOUT;
+        if (!retainDraft) {
+            draftSettings_ = currentSettings_;
+        }
+        invalidate();
+    }
+
+    void advanceSelectedSetting() {
+        static constexpr uint16_t TIMEOUT_PRESETS[] = {
+            0, 15, 30, 60, 120, 300, 600
+        };
+        static constexpr uint8_t CONTRAST_PRESETS[] = {
+            32, 64, 128, 207, 255
+        };
+        switch (selectedEditorItem_) {
+            case EditorItem::DISPLAY_TIMEOUT:
+                draftSettings_.displayTimeoutSeconds = nextPreset(
+                    draftSettings_.displayTimeoutSeconds,
+                    TIMEOUT_PRESETS
+                );
+                break;
+            case EditorItem::DISPLAY_CONTRAST:
+                draftSettings_.displayContrast = nextPreset(
+                    draftSettings_.displayContrast,
+                    CONTRAST_PRESETS
+                );
+                break;
+            case EditorItem::LED_ENABLED:
+                draftSettings_.ledEnabled = !draftSettings_.ledEnabled;
+                break;
+            case EditorItem::DIAGNOSTICS_ENABLED:
+                draftSettings_.diagnosticsEnabled =
+                    !draftSettings_.diagnosticsEnabled;
+                break;
+            case EditorItem::DEFAULT_SCREEN: {
+                const uint8_t next =
+                    static_cast<uint8_t>(draftSettings_.defaultScreen) + 1U;
+                draftSettings_.defaultScreen = next > static_cast<uint8_t>(
+                    DeviceSettings::DefaultScreen::ABOUT
+                )
+                    ? DeviceSettings::DefaultScreen::HOME
+                    : static_cast<DeviceSettings::DefaultScreen>(next);
+                break;
+            }
+            case EditorItem::BUTTON_FEEDBACK:
+                draftSettings_.buttonFeedbackEnabled =
+                    !draftSettings_.buttonFeedbackEnabled;
+                break;
+            case EditorItem::SAVE:
+            case EditorItem::CANCEL:
+            case EditorItem::FACTORY_RESET:
+                break;
+        }
+    }
+
+    void handleEditor(DeviceInput::ButtonEvent event, uint32_t nowMs) {
+        switch (event) {
+            case DeviceInput::ButtonEvent::PRESS:
+                lastInputAtMs_ = nowMs;
+                break;
+            case DeviceInput::ButtonEvent::SHORT_PRESS:
+                selectedEditorItem_ = nextEditorItem(selectedEditorItem_);
+                resetArmed_ = false;
+                lastInputAtMs_ = nowMs;
+                invalidate();
+                break;
+            case DeviceInput::ButtonEvent::LONG_PRESS:
+                lastInputAtMs_ = nowMs;
+                activateEditorItem(nowMs);
+                break;
+            case DeviceInput::ButtonEvent::NONE:
+            case DeviceInput::ButtonEvent::RELEASE:
+            case DeviceInput::ButtonEvent::VERY_LONG_PRESS:
+                break;
+        }
+    }
+
+    void activateEditorItem(uint32_t nowMs) {
+        if (selectedEditorItem_ == EditorItem::SAVE) {
+            pendingEditorAction_ = EditorAction::SAVE_SETTINGS_REQUEST;
+            exitEditor(true);
+            return;
+        }
+        if (selectedEditorItem_ == EditorItem::CANCEL) {
+            exitEditor(false);
+            return;
+        }
+        if (selectedEditorItem_ == EditorItem::FACTORY_RESET) {
+            if (
+                resetArmed_ &&
+                elapsed(nowMs, resetArmedAtMs_) <=
+                    RESET_CONFIRMATION_TIMEOUT_MS
+            ) {
+                pendingEditorAction_ = EditorAction::FACTORY_RESET_REQUEST;
+                exitEditor(false);
+            } else {
+                resetArmed_ = true;
+                resetArmedAtMs_ = nowMs;
+                invalidate();
+            }
+            return;
+        }
+        resetArmed_ = false;
+        advanceSelectedSetting();
+        invalidate();
+    }
+
     void invalidate() {
         dirty_ = true;
         if (renderPending_) {
@@ -577,7 +808,10 @@ private:
     }
 
     void handleSuppressedWakeGesture(DeviceInput::ButtonEvent event) {
-        if (event == DeviceInput::ButtonEvent::LONG_PRESS) {
+        if (
+            event == DeviceInput::ButtonEvent::LONG_PRESS ||
+            event == DeviceInput::ButtonEvent::VERY_LONG_PRESS
+        ) {
             wakeGestureWasLong_ = true;
         } else if (event == DeviceInput::ButtonEvent::SHORT_PRESS) {
             suppressWakeGesture_ = false;
@@ -604,6 +838,13 @@ private:
     uint32_t lastInputAtMs_;
     uint32_t lastRenderAtMs_ = 0;
     uint32_t lastLiveRefreshAtMs_;
+    DeviceSettings::Settings currentSettings_ = DeviceSettings::defaults();
+    DeviceSettings::Settings draftSettings_ = DeviceSettings::defaults();
+    EditorItem selectedEditorItem_ = EditorItem::DISPLAY_TIMEOUT;
+    EditorAction pendingEditorAction_ = EditorAction::NONE;
+    bool editorActive_ = false;
+    bool resetArmed_ = false;
+    uint32_t resetArmedAtMs_ = 0;
 };
 
 }  // namespace DeviceUi

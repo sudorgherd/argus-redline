@@ -9,7 +9,8 @@ enum class ButtonEvent : uint8_t {
     PRESS,
     RELEASE,
     SHORT_PRESS,
-    LONG_PRESS
+    LONG_PRESS,
+    VERY_LONG_PRESS
 };
 
 // At most two semantic events can result from one sample. When two occur,
@@ -21,9 +22,14 @@ struct ButtonEvents {
 
 class Button {
 public:
-    Button(uint32_t debounceMs, uint32_t longPressMs) :
+    Button(
+        uint32_t debounceMs,
+        uint32_t longPressMs,
+        uint32_t veryLongPressMs = 3000
+    ) :
         debounceMs_(debounceMs),
-        longPressMs_(longPressMs) {}
+        longPressMs_(longPressMs),
+        veryLongPressMs_(veryLongPressMs) {}
 
     ButtonEvents update(bool pressed, uint32_t nowMs) {
         ButtonEvents events;
@@ -56,6 +62,7 @@ public:
                 if (stablePressed_) {
                     pressSinceMs_ = nowMs;
                     longPressEmitted_ = false;
+                    veryLongPressEmitted_ = false;
                     events.first = ButtonEvent::PRESS;
                 } else {
                     events.first = ButtonEvent::RELEASE;
@@ -75,6 +82,15 @@ public:
             append(events, ButtonEvent::LONG_PRESS);
         }
 
+        if (
+            stablePressed_ &&
+            !veryLongPressEmitted_ &&
+            elapsed(nowMs, pressSinceMs_) >= veryLongPressMs_
+        ) {
+            veryLongPressEmitted_ = true;
+            append(events, ButtonEvent::VERY_LONG_PRESS);
+        }
+
         return events;
     }
 
@@ -86,7 +102,7 @@ private:
     static void append(ButtonEvents& events, ButtonEvent event) {
         if (events.first == ButtonEvent::NONE) {
             events.first = event;
-        } else {
+        } else if (events.second == ButtonEvent::NONE) {
             events.second = event;
         }
     }
@@ -111,11 +127,13 @@ private:
 
     const uint32_t debounceMs_;
     const uint32_t longPressMs_;
+    const uint32_t veryLongPressMs_;
     bool initialized_ = false;
     bool armed_ = false;
     bool stablePressed_ = false;
     bool candidatePressed_ = false;
     bool longPressEmitted_ = false;
+    bool veryLongPressEmitted_ = false;
     uint32_t candidateSinceMs_ = 0;
     uint32_t pressSinceMs_ = 0;
 };

@@ -6,6 +6,7 @@ namespace {
 
 constexpr uint32_t DEBOUNCE_MS = 30;
 constexpr uint32_t LONG_PRESS_MS = 800;
+constexpr uint32_t VERY_LONG_PRESS_MS = 3000;
 
 void assertNoEvents(const DeviceInput::ButtonEvents& events) {
     TEST_ASSERT_EQUAL_UINT8(
@@ -367,6 +368,67 @@ void testZeroThresholdsApplyOnObservedTransition() {
     );
 }
 
+void testLongThenVeryLongAtExactThresholds() {
+    DeviceInput::Button button(
+        DEBOUNCE_MS,
+        LONG_PRESS_MS,
+        VERY_LONG_PRESS_MS
+    );
+    establishReleasedStartup(button);
+    establishPressedState(button, 10, 40);
+    assertOneEvent(button.update(true, 840), DeviceInput::ButtonEvent::LONG_PRESS);
+    assertNoEvents(button.update(true, 3039));
+    assertOneEvent(
+        button.update(true, 3040),
+        DeviceInput::ButtonEvent::VERY_LONG_PRESS
+    );
+}
+
+void testVeryLongDoesNotRepeatAndReleaseHasNoShortPress() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS, VERY_LONG_PRESS_MS);
+    establishReleasedStartup(button);
+    establishPressedState(button, 10, 40);
+    assertOneEvent(button.update(true, 840), DeviceInput::ButtonEvent::LONG_PRESS);
+    assertOneEvent(button.update(true, 3040), DeviceInput::ButtonEvent::VERY_LONG_PRESS);
+    assertNoEvents(button.update(true, 3041));
+    assertNoEvents(button.update(true, 10000));
+    assertNoEvents(button.update(false, 10100));
+    assertOneEvent(button.update(false, 10130), DeviceInput::ButtonEvent::RELEASE);
+}
+
+void testStartupHeldSuppressesVeryLongPress() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS, VERY_LONG_PRESS_MS);
+    assertNoEvents(button.update(true, 0));
+    assertNoEvents(button.update(true, 800));
+    assertNoEvents(button.update(true, 3000));
+    assertNoEvents(button.update(true, 100000));
+}
+
+void testReleaseAllowsSecondVeryLongHold() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS, VERY_LONG_PRESS_MS);
+    establishReleasedStartup(button);
+    establishPressedState(button, 10, 40);
+    assertOneEvent(button.update(true, 840), DeviceInput::ButtonEvent::LONG_PRESS);
+    assertOneEvent(button.update(true, 3040), DeviceInput::ButtonEvent::VERY_LONG_PRESS);
+    assertNoEvents(button.update(false, 3100));
+    assertOneEvent(button.update(false, 3130), DeviceInput::ButtonEvent::RELEASE);
+    establishPressedState(button, 4000, 4030);
+    assertOneEvent(button.update(true, 4830), DeviceInput::ButtonEvent::LONG_PRESS);
+    assertOneEvent(button.update(true, 7030), DeviceInput::ButtonEvent::VERY_LONG_PRESS);
+}
+
+void testVeryLongThresholdWorksAcrossRollover() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS, VERY_LONG_PRESS_MS);
+    assertNoEvents(button.update(false, 0xFFFFE000U));
+    establishPressedState(button, 0xFFFFFFD0U, 0xFFFFFFEEU);
+    assertOneEvent(button.update(true, 0x0000030EU), DeviceInput::ButtonEvent::LONG_PRESS);
+    assertNoEvents(button.update(true, 0x00000BA5U));
+    assertOneEvent(
+        button.update(true, 0x00000BA6U),
+        DeviceInput::ButtonEvent::VERY_LONG_PRESS
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -401,5 +463,10 @@ int main(int, char**) {
     RUN_TEST(testLongPressThenShortPressClassifyIndependently);
     RUN_TEST(testZeroTimestampIsHandledNormally);
     RUN_TEST(testZeroThresholdsApplyOnObservedTransition);
+    RUN_TEST(testLongThenVeryLongAtExactThresholds);
+    RUN_TEST(testVeryLongDoesNotRepeatAndReleaseHasNoShortPress);
+    RUN_TEST(testStartupHeldSuppressesVeryLongPress);
+    RUN_TEST(testReleaseAllowsSecondVeryLongHold);
+    RUN_TEST(testVeryLongThresholdWorksAcrossRollover);
     return UNITY_END();
 }

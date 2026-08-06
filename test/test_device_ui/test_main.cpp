@@ -18,6 +18,26 @@ void assertScreen(DeviceUi::Screen expected, DeviceUi::Screen actual) {
     );
 }
 
+void assertEditorAction(
+    DeviceUi::EditorAction expected,
+    DeviceUi::EditorAction actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
+void assertEditorItem(
+    DeviceUi::EditorItem expected,
+    DeviceUi::EditorItem actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
 void renderAndRecord(DeviceUi::Controller& controller, uint32_t nowMs) {
     assertAction(DeviceUi::UiAction::RENDER, controller.update(nowMs));
     controller.recordRendered(nowMs);
@@ -459,6 +479,328 @@ void testControllersRemainIndependent() {
     assertScreen(DeviceUi::Screen::RADIO, first.screen());
     assertScreen(DeviceUi::Screen::HOME, second.screen());
     TEST_ASSERT_TRUE(second.displayAwake());
+}
+
+void enterEditor(DeviceUi::Controller& controller, uint32_t nowMs = 1) {
+    controller.handle(DeviceInput::ButtonEvent::VERY_LONG_PRESS, nowMs);
+    TEST_ASSERT_TRUE(controller.editorActive());
+}
+
+void selectEditorItem(
+    DeviceUi::Controller& controller,
+    DeviceUi::EditorItem target,
+    uint32_t& nowMs
+) {
+    while (controller.selectedEditorItem() != target) {
+        controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, ++nowMs);
+    }
+}
+
+void testVeryLongEntersEditorFromAwakeNormalUi() {
+    DeviceUi::Controller controller(0);
+    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 1);
+    enterEditor(controller, 3000);
+    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertEditorItem(
+        DeviceUi::EditorItem::DISPLAY_TIMEOUT,
+        controller.selectedEditorItem()
+    );
+}
+
+void testLongReturnsHomeBeforeVeryLongEntry() {
+    DeviceUi::Controller controller(0);
+    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 1);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 800);
+    assertScreen(DeviceUi::Screen::HOME, controller.screen());
+    TEST_ASSERT_FALSE(controller.editorActive());
+    enterEditor(controller, 3000);
+}
+
+void testSleepingWakeGestureCannotEnterEditorAndTailIsSuppressed() {
+    DeviceUi::Controller controller(0);
+    sleepController(controller, 30000);
+    controller.handle(DeviceInput::ButtonEvent::PRESS, 31000);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 31800);
+    controller.handle(DeviceInput::ButtonEvent::VERY_LONG_PRESS, 34000);
+    TEST_ASSERT_FALSE(controller.editorActive());
+    controller.handle(DeviceInput::ButtonEvent::RELEASE, 34100);
+    assertScreen(DeviceUi::Screen::HOME, controller.screen());
+    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 35000);
+    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+}
+
+void testStartupHeldInputCannotEnterEditor() {
+    DeviceInput::Button button(30, 800, 3000);
+    DeviceUi::Controller controller(0);
+    const uint32_t times[] = {0, 800, 3000, 10000};
+    for (uint32_t time : times) {
+        const DeviceInput::ButtonEvents events = button.update(true, time);
+        controller.handle(events.first, time);
+        controller.handle(events.second, time);
+    }
+    TEST_ASSERT_FALSE(controller.editorActive());
+}
+
+void testEntryCopiesCompleteCurrentSettingsAndStartsClean() {
+    DeviceSettings::Settings settings = DeviceSettings::defaults();
+    settings.displayTimeoutSeconds = 77;
+    settings.displayContrast = 99;
+    settings.ledEnabled = false;
+    settings.diagnosticsEnabled = false;
+    settings.defaultScreen = DeviceSettings::DefaultScreen::ABOUT;
+    settings.buttonFeedbackEnabled = true;
+    DeviceUi::Controller controller(0);
+    controller.setCurrentSettings(settings);
+    enterEditor(controller);
+    TEST_ASSERT_TRUE(controller.draftSettings() == settings);
+    TEST_ASSERT_FALSE(controller.editorDirty());
+}
+
+void testEditorItemOrderWrapsWithoutRequests() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    const DeviceUi::EditorItem expected[] = {
+        DeviceUi::EditorItem::DISPLAY_CONTRAST,
+        DeviceUi::EditorItem::LED_ENABLED,
+        DeviceUi::EditorItem::DIAGNOSTICS_ENABLED,
+        DeviceUi::EditorItem::DEFAULT_SCREEN,
+        DeviceUi::EditorItem::BUTTON_FEEDBACK,
+        DeviceUi::EditorItem::SAVE,
+        DeviceUi::EditorItem::CANCEL,
+        DeviceUi::EditorItem::FACTORY_RESET,
+        DeviceUi::EditorItem::DISPLAY_TIMEOUT
+    };
+    for (uint8_t index = 0; index < 9; ++index) {
+        controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, index + 2);
+        assertEditorItem(expected[index], controller.selectedEditorItem());
+        assertEditorAction(
+            DeviceUi::EditorAction::NONE,
+            controller.takeEditorAction()
+        );
+    }
+}
+
+void testTimeoutPresetsArbitraryAdvanceAndWrap() {
+    DeviceUi::Controller controller(0);
+    DeviceSettings::Settings settings = DeviceSettings::defaults();
+    settings.displayTimeoutSeconds = 7;
+    controller.setCurrentSettings(settings);
+    enterEditor(controller);
+    const uint16_t expected[] = {15, 30, 60, 120, 300, 600, 0, 15};
+    for (uint16_t value : expected) {
+        controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, value + 10);
+        TEST_ASSERT_EQUAL_UINT16(
+            value,
+            controller.draftSettings().displayTimeoutSeconds
+        );
+    }
+}
+
+void testContrastPresetsArbitraryAdvanceAndWrap() {
+    DeviceUi::Controller controller(0);
+    DeviceSettings::Settings settings = DeviceSettings::defaults();
+    settings.displayContrast = 65;
+    controller.setCurrentSettings(settings);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    selectEditorItem(controller, DeviceUi::EditorItem::DISPLAY_CONTRAST, nowMs);
+    const uint8_t expected[] = {128, 207, 255, 32, 64, 128};
+    for (uint8_t value : expected) {
+        controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+        TEST_ASSERT_EQUAL_UINT8(value, controller.draftSettings().displayContrast);
+    }
+}
+
+void testDefaultScreenOrderAndWrap() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    selectEditorItem(controller, DeviceUi::EditorItem::DEFAULT_SCREEN, nowMs);
+    const DeviceSettings::DefaultScreen expected[] = {
+        DeviceSettings::DefaultScreen::RADIO,
+        DeviceSettings::DefaultScreen::DEVICE,
+        DeviceSettings::DefaultScreen::LAST_PACKET,
+        DeviceSettings::DefaultScreen::DIAGNOSTICS,
+        DeviceSettings::DefaultScreen::ABOUT,
+        DeviceSettings::DefaultScreen::HOME
+    };
+    for (DeviceSettings::DefaultScreen value : expected) {
+        controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(value),
+            static_cast<uint8_t>(controller.draftSettings().defaultScreen)
+        );
+    }
+}
+
+void testAllThreeBooleansToggleAndDirtyUsesEquality() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    const DeviceUi::EditorItem items[] = {
+        DeviceUi::EditorItem::LED_ENABLED,
+        DeviceUi::EditorItem::DIAGNOSTICS_ENABLED,
+        DeviceUi::EditorItem::BUTTON_FEEDBACK
+    };
+    for (DeviceUi::EditorItem item : items) {
+        selectEditorItem(controller, item, nowMs);
+        controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    }
+    TEST_ASSERT_FALSE(controller.draftSettings().ledEnabled);
+    TEST_ASSERT_FALSE(controller.draftSettings().diagnosticsEnabled);
+    TEST_ASSERT_TRUE(controller.draftSettings().buttonFeedbackEnabled);
+    TEST_ASSERT_TRUE(controller.editorDirty());
+    selectEditorItem(controller, DeviceUi::EditorItem::LED_ENABLED, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    selectEditorItem(controller, DeviceUi::EditorItem::DIAGNOSTICS_ENABLED, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    selectEditorItem(controller, DeviceUi::EditorItem::BUTTON_FEEDBACK, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    TEST_ASSERT_FALSE(controller.editorDirty());
+}
+
+void testVeryLongWhileEditingDoesNothing() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    const DeviceSettings::Settings before = controller.draftSettings();
+    controller.handle(DeviceInput::ButtonEvent::VERY_LONG_PRESS, 3001);
+    TEST_ASSERT_TRUE(controller.editorActive());
+    TEST_ASSERT_TRUE(controller.draftSettings() == before);
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+}
+
+void testSaveEmitsOneCompleteDraftRequestAndExits() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 2);
+    const DeviceSettings::Settings expected = controller.draftSettings();
+    uint32_t nowMs = 2;
+    selectEditorItem(controller, DeviceUi::EditorItem::SAVE, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    TEST_ASSERT_FALSE(controller.editorActive());
+    TEST_ASSERT_TRUE(controller.draftSettings() == expected);
+    assertEditorAction(
+        DeviceUi::EditorAction::SAVE_SETTINGS_REQUEST,
+        controller.takeEditorAction()
+    );
+    controller.update(++nowMs);
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+}
+
+void testUnchangedSaveStillRequestsSave() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    selectEditorItem(controller, DeviceUi::EditorItem::SAVE, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    assertEditorAction(
+        DeviceUi::EditorAction::SAVE_SETTINGS_REQUEST,
+        controller.takeEditorAction()
+    );
+}
+
+void testCancelDiscardsAndReentryUsesLatestSuppliedSettings() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 2);
+    uint32_t nowMs = 2;
+    selectEditorItem(controller, DeviceUi::EditorItem::CANCEL, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, ++nowMs);
+    TEST_ASSERT_FALSE(controller.editorActive());
+    TEST_ASSERT_TRUE(controller.draftSettings() == controller.currentSettings());
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+    DeviceSettings::Settings replacement = DeviceSettings::defaults();
+    replacement.displayTimeoutSeconds = 120;
+    controller.setCurrentSettings(replacement);
+    enterEditor(controller, ++nowMs);
+    TEST_ASSERT_TRUE(controller.draftSettings() == replacement);
+}
+
+void moveToReset(DeviceUi::Controller& controller, uint32_t& nowMs) {
+    selectEditorItem(controller, DeviceUi::EditorItem::FACTORY_RESET, nowMs);
+}
+
+void testResetArmsThenConfirmsOnceWithinDeadline() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    moveToReset(controller, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 100);
+    TEST_ASSERT_TRUE(controller.resetArmed());
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 10100);
+    TEST_ASSERT_FALSE(controller.editorActive());
+    assertEditorAction(
+        DeviceUi::EditorAction::FACTORY_RESET_REQUEST,
+        controller.takeEditorAction()
+    );
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+}
+
+void testResetExpiryAndUnrelatedEventsEmitNothing() {
+    DeviceUi::Controller controller(0);
+    enterEditor(controller);
+    uint32_t nowMs = 1;
+    moveToReset(controller, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 100);
+    controller.update(10101);
+    TEST_ASSERT_FALSE(controller.resetArmed());
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 10102);
+    TEST_ASSERT_TRUE(controller.resetArmed());
+    controller.handle(DeviceInput::ButtonEvent::VERY_LONG_PRESS, 10103);
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 10104);
+    TEST_ASSERT_FALSE(controller.resetArmed());
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+}
+
+void testResetConfirmationIsRolloverSafe() {
+    DeviceUi::Controller controller(0xFFFFF000U);
+    enterEditor(controller, 0xFFFFFF00U);
+    uint32_t nowMs = 0xFFFFFF00U;
+    moveToReset(controller, nowMs);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 0xFFFFFFF0U);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 0x00002700U);
+    assertEditorAction(
+        DeviceUi::EditorAction::FACTORY_RESET_REQUEST,
+        controller.takeEditorAction()
+    );
+}
+
+void testEditorInactivityDiscardsWithoutRequestAndTurnsDisplayOff() {
+    DeviceUi::Controller controller(0);
+    DeviceSettings::Settings settings = DeviceSettings::defaults();
+    settings.displayTimeoutSeconds = 5;
+    controller.setCurrentSettings(settings);
+    enterEditor(controller, 0);
+    controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 1);
+    renderAndRecord(controller, 2);
+    assertAction(DeviceUi::UiAction::NONE, controller.update(4999));
+    assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(5001));
+    TEST_ASSERT_FALSE(controller.editorActive());
+    TEST_ASSERT_TRUE(controller.draftSettings() == settings);
+    TEST_ASSERT_FALSE(controller.resetArmed());
+    assertEditorAction(DeviceUi::EditorAction::NONE, controller.takeEditorAction());
+}
+
+void testEditorTimeoutZeroNeverExpiresAndAcceptedInputResetsTimer() {
+    DeviceUi::Controller zeroController(0);
+    DeviceSettings::Settings zero = DeviceSettings::defaults();
+    zero.displayTimeoutSeconds = 0;
+    zeroController.setCurrentSettings(zero);
+    enterEditor(zeroController, 0);
+    zeroController.update(UINT32_MAX);
+    TEST_ASSERT_TRUE(zeroController.editorActive());
+
+    DeviceUi::Controller controller(0);
+    DeviceSettings::Settings timed = DeviceSettings::defaults();
+    timed.displayTimeoutSeconds = 5;
+    controller.setCurrentSettings(timed);
+    enterEditor(controller, 0);
+    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 4000);
+    controller.update(8999);
+    TEST_ASSERT_TRUE(controller.editorActive());
+    assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(9000));
 }
 
 DeviceUi::PresentationInput makePresentationInput(
@@ -948,6 +1290,25 @@ int main(int, char**) {
     RUN_TEST(testWakeRespectsRenderCapWithSeparateDisplayOnAction);
     RUN_TEST(testWakeBehaviorWorksAcrossRollover);
     RUN_TEST(testControllersRemainIndependent);
+    RUN_TEST(testVeryLongEntersEditorFromAwakeNormalUi);
+    RUN_TEST(testLongReturnsHomeBeforeVeryLongEntry);
+    RUN_TEST(testSleepingWakeGestureCannotEnterEditorAndTailIsSuppressed);
+    RUN_TEST(testStartupHeldInputCannotEnterEditor);
+    RUN_TEST(testEntryCopiesCompleteCurrentSettingsAndStartsClean);
+    RUN_TEST(testEditorItemOrderWrapsWithoutRequests);
+    RUN_TEST(testTimeoutPresetsArbitraryAdvanceAndWrap);
+    RUN_TEST(testContrastPresetsArbitraryAdvanceAndWrap);
+    RUN_TEST(testDefaultScreenOrderAndWrap);
+    RUN_TEST(testAllThreeBooleansToggleAndDirtyUsesEquality);
+    RUN_TEST(testVeryLongWhileEditingDoesNothing);
+    RUN_TEST(testSaveEmitsOneCompleteDraftRequestAndExits);
+    RUN_TEST(testUnchangedSaveStillRequestsSave);
+    RUN_TEST(testCancelDiscardsAndReentryUsesLatestSuppliedSettings);
+    RUN_TEST(testResetArmsThenConfirmsOnceWithinDeadline);
+    RUN_TEST(testResetExpiryAndUnrelatedEventsEmitNothing);
+    RUN_TEST(testResetConfirmationIsRolloverSafe);
+    RUN_TEST(testEditorInactivityDiscardsWithoutRequestAndTurnsDisplayOff);
+    RUN_TEST(testEditorTimeoutZeroNeverExpiresAndAcceptedInputResetsTimer);
     RUN_TEST(testEveryScreenBuildsWithMatchingIdAndBoundedRows);
     RUN_TEST(testBuilderFullyReplacesReusedSnapshotAndDoesNotMutateInput);
     RUN_TEST(testFixedStringsAreBoundedAndNullTerminated);
