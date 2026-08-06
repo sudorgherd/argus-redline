@@ -1,0 +1,9 @@
+{
+  "name": "esp32_settings_storage",
+  "version": "0.4.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "device_settings": "*"
+  }
+}
