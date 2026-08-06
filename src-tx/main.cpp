@@ -10,6 +10,8 @@
 #include "device_input.h"
 #include "device_ui.h"
 #include "heltec_display.h"
+#include "esp32_settings_storage.h"
+#include "hub_settings_integration.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -22,6 +24,8 @@ constexpr unsigned long RETRY_DELAY_MS = 500;
 constexpr uint8_t APPLICATION_BUTTON_PIN = 0;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t BUTTON_LONG_PRESS_MS = 800;
+constexpr uint32_t BUTTON_VERY_LONG_PRESS_MS = 3000;
+constexpr uint32_t BUTTON_FEEDBACK_MS = 50;
 
 volatile bool operationDone = false;
 
@@ -32,11 +36,22 @@ RuntimeState::State runtimeState(
 );
 DeviceInput::Button applicationButton(
     BUTTON_DEBOUNCE_MS,
-    BUTTON_LONG_PRESS_MS
+    BUTTON_LONG_PRESS_MS,
+    BUTTON_VERY_LONG_PRESS_MS
 );
 DeviceUi::Controller uiController(0);
 HeltecDisplay::Renderer displayRenderer(display);
 DeviceUi::PeerState peerState = DeviceUi::PeerState::UNKNOWN;
+Esp32SettingsStorage::PreferencesRecordStore settingsStore;
+DeviceSettings::SettingsManager settingsManager;
+DeviceSettings::Settings currentSettings = DeviceSettings::defaults();
+HubSettingsIntegration::ConfigurationState configurationState;
+HubSettingsIntegration::RequestQueue persistenceRequests;
+
+bool renderingPresentation = false;
+bool radioLedActive = false;
+bool feedbackLedActive = false;
+uint32_t feedbackLedUntilMs = 0;
 
 unsigned long nextTransmitAt = 0;
 
@@ -98,17 +113,81 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
     input.lastError = runtimeState.lastError();
+    input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
+    input.configurationStatus = configurationState.status;
+    input.configurationSource = configurationState.source;
+    input.configurationGenerationAvailable =
+        configurationState.generationAvailable;
+    input.configurationGeneration = configurationState.generation;
+    input.configurationRepairPending = configurationState.repairPending;
+    input.unsupportedConfigurationPreserved =
+        configurationState.unsupportedPreserved;
     return input;
 }
 
 void renderCurrentPresentation(uint32_t nowMs) {
-    const DeviceUi::PresentationSnapshot snapshot =
-        DeviceUi::buildPresentation(
-            uiController.screen(),
-            buildPresentationInput()
-        );
-    displayRenderer.render(snapshot);
+    renderingPresentation = true;
+    if (uiController.editorActive()) {
+        const DeviceUi::EditorPresentationSnapshot snapshot =
+            DeviceUi::buildEditorSnapshot(
+                uiController.editorPresentation()
+            );
+        displayRenderer.render(snapshot);
+    } else {
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(
+                uiController.screen(),
+                buildPresentationInput()
+            );
+        displayRenderer.render(snapshot);
+    }
+    renderingPresentation = false;
     uiController.recordRendered(nowMs);
+}
+
+void updateLedOutput() {
+    digitalWrite(
+        LED_BUILTIN,
+        currentSettings.ledEnabled &&
+                (radioLedActive || feedbackLedActive)
+            ? HIGH
+            : LOW
+    );
+}
+
+void requestButtonFeedback(
+    DeviceInput::ButtonEvent event,
+    uint32_t nowMs
+) {
+    if (!HubSettingsIntegration::feedbackAllowed(currentSettings, event)) {
+        return;
+    }
+    feedbackLedActive = true;
+    feedbackLedUntilMs = nowMs + BUTTON_FEEDBACK_MS;
+    updateLedOutput();
+}
+
+void serviceButtonFeedback(uint32_t nowMs) {
+    if (
+        feedbackLedActive &&
+        static_cast<int32_t>(nowMs - feedbackLedUntilMs) >= 0
+    ) {
+        feedbackLedActive = false;
+        updateLedOutput();
+    }
+}
+
+void queueEditorAction() {
+    switch (uiController.takeEditorAction()) {
+        case DeviceUi::EditorAction::SAVE_SETTINGS_REQUEST:
+            persistenceRequests.queueSave(uiController.draftSettings());
+            break;
+        case DeviceUi::EditorAction::FACTORY_RESET_REQUEST:
+            persistenceRequests.queueFactoryReset();
+            break;
+        case DeviceUi::EditorAction::NONE:
+            break;
+    }
 }
 
 void serviceButton(uint32_t nowMs) {
@@ -116,7 +195,10 @@ void serviceButton(uint32_t nowMs) {
     const DeviceInput::ButtonEvents events =
         applicationButton.update(pressed, nowMs);
     uiController.handle(events.first, nowMs);
+    requestButtonFeedback(events.first, nowMs);
     uiController.handle(events.second, nowMs);
+    requestButtonFeedback(events.second, nowMs);
+    queueEditorAction();
 }
 
 void serviceUi(uint32_t nowMs) {
@@ -177,6 +259,93 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.print(packet.opcode);
     Serial.print(" payload=");
     Serial.println(packet.payloadLength);
+}
+
+void applyCurrentSettings(uint32_t nowMs, bool applyDefaultScreen) {
+    uiController.setCurrentSettings(currentSettings);
+    uiController.setInactivityTimeoutMs(
+        HubSettingsIntegration::timeoutMs(currentSettings),
+        nowMs
+    );
+    displayRenderer.setContrast(currentSettings.displayContrast);
+    if (applyDefaultScreen) {
+        uiController.selectConfiguredScreen(
+            HubSettingsIntegration::screen(currentSettings.defaultScreen)
+        );
+    }
+    updateLedOutput();
+    markPresentationChanged();
+}
+
+void loadSettings(uint32_t nowMs) {
+    const DeviceSettings::LoadStatus result =
+        settingsManager.load(settingsStore);
+    currentSettings = settingsManager.settings();
+    configurationState = HubSettingsIntegration::fromLoad(
+        result,
+        settingsManager
+    );
+    applyCurrentSettings(nowMs, true);
+    if (settingsManager.repairPending()) {
+        persistenceRequests.queueAutomaticRepair();
+    }
+}
+
+bool persistenceSafe() {
+    return HubSettingsIntegration::persistenceSafe(
+        runtimeState.phase(),
+        transactionState.isAwaitingAcknowledgment(),
+        transactionState.retryCount() != 0,
+        operationDone,
+        renderingPresentation
+    );
+}
+
+void servicePersistence(uint32_t nowMs) {
+    if (
+        persistenceRequests.pending() ==
+            HubSettingsIntegration::Request::NONE ||
+        !persistenceSafe()
+    ) {
+        return;
+    }
+
+    const HubSettingsIntegration::Request request =
+        persistenceRequests.pending();
+    if (request == HubSettingsIntegration::Request::FACTORY_RESET) {
+        const DeviceSettings::ResetResult result =
+            settingsManager.factoryReset(settingsStore);
+        configurationState = HubSettingsIntegration::fromReset(
+            result,
+            settingsManager
+        );
+        if (result == DeviceSettings::ResetResult::RESET_COMPLETED) {
+            currentSettings = settingsManager.settings();
+            applyCurrentSettings(nowMs, true);
+        } else {
+            markPresentationChanged();
+        }
+        persistenceRequests.clear();
+        return;
+    }
+
+    const DeviceSettings::Settings& candidate =
+        request == HubSettingsIntegration::Request::SAVE
+            ? persistenceRequests.saveDraft()
+            : currentSettings;
+    const DeviceSettings::SaveStatus result =
+        settingsManager.save(settingsStore, candidate);
+    configurationState = HubSettingsIntegration::fromSave(
+        result,
+        settingsManager
+    );
+    if (HubSettingsIntegration::saveSucceeded(result)) {
+        currentSettings = settingsManager.settings();
+        applyCurrentSettings(nowMs, false);
+    } else {
+        markPresentationChanged();
+    }
+    persistenceRequests.clear();
 }
 
 void scheduleNextTransaction() {
@@ -244,7 +413,8 @@ bool startCommandTransmission() {
     }
 
     operationDone = false;
-    digitalWrite(LED_BUILTIN, HIGH);
+    radioLedActive = true;
+    updateLedOutput();
 
     const int state = radio.startTransmit(
         transmitBuffer,
@@ -252,7 +422,8 @@ bool startCommandTransmission() {
     );
 
     if (state != RADIOLIB_ERR_NONE) {
-        digitalWrite(LED_BUILTIN, LOW);
+        radioLedActive = false;
+        updateLedOutput();
         runtimeState.incrementRadioErrors();
         recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
 
@@ -532,6 +703,8 @@ void setup() {
 
     display.init();
 
+    loadSettings(static_cast<uint32_t>(millis()));
+
     radioSPI.begin(9, 11, 10, 8);
 
     const int state = radio.begin(915.0);
@@ -603,7 +776,8 @@ void serviceHubTransport(uint32_t nowMs) {
         runtimeState.phase() ==
         RuntimeState::RuntimePhase::TRANSMITTING
     ) {
-        digitalWrite(LED_BUILTIN, LOW);
+        radioLedActive = false;
+        updateLedOutput();
         runtimeState.incrementTransmissionsCompleted();
         runtimeState.recordActivity(nowMs);
         markPresentationChanged();
@@ -627,6 +801,9 @@ void serviceHubTransport(uint32_t nowMs) {
 void loop() {
     const uint32_t nowMs = static_cast<uint32_t>(millis());
     serviceButton(nowMs);
+    serviceButtonFeedback(nowMs);
+
+    servicePersistence(nowMs);
 
     if (runtimeState.isReady()) {
         serviceHubTransport(nowMs);

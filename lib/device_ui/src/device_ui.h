@@ -732,6 +732,18 @@ public:
         }
     }
 
+    void setInactivityTimeoutMs(uint32_t timeoutMs, uint32_t nowMs) {
+        inactivityTimeoutMs_ = timeoutMs;
+        lastInputAtMs_ = nowMs;
+    }
+
+    void selectConfiguredScreen(Screen screen) {
+        if (screen_ != screen) {
+            screen_ = screen;
+            invalidate();
+        }
+    }
+
     const DeviceSettings::Settings& currentSettings() const {
         return currentSettings_;
     }
@@ -858,6 +870,7 @@ public:
         if (
             !editorActive_ &&
             displayAwake_ &&
+            inactivityTimeoutMs_ != 0U &&
             elapsed(nowMs, lastInputAtMs_) >= inactivityTimeoutMs_
         ) {
             displayAwake_ = false;
@@ -1105,7 +1118,7 @@ private:
         }
     }
 
-    const uint32_t inactivityTimeoutMs_;
+    uint32_t inactivityTimeoutMs_;
     const uint32_t minimumRenderIntervalMs_;
     const uint32_t liveRefreshIntervalMs_;
     Screen screen_ = Screen::HOME;

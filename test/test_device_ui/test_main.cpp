@@ -358,10 +358,23 @@ void testTimeoutWorksAcrossRollover() {
     assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(0x00007520U));
 }
 
-void testZeroTimeoutSleepsOnFirstService() {
+void testZeroTimeoutKeepsDisplayAwake() {
     DeviceUi::Controller controller(10, 0, 100, 1000);
-    assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(10));
-    TEST_ASSERT_FALSE(controller.displayAwake());
+    assertAction(DeviceUi::UiAction::RENDER, controller.update(10));
+    controller.recordRendered(10);
+    assertAction(DeviceUi::UiAction::NONE, controller.update(UINT32_MAX));
+    TEST_ASSERT_TRUE(controller.displayAwake());
+}
+
+void testRuntimeTimeoutAndConfiguredScreenApplyDeterministically() {
+    DeviceUi::Controller controller(0);
+    renderAndRecord(controller, 0);
+    controller.setInactivityTimeoutMs(15000, 100);
+    controller.selectConfiguredScreen(DeviceUi::Screen::ABOUT);
+    assertScreen(DeviceUi::Screen::ABOUT, controller.screen());
+    assertAction(DeviceUi::UiAction::RENDER, controller.update(15099));
+    controller.recordRendered(15099);
+    assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(15100));
 }
 
 void testWakePressRequestsOnAndRenderWithoutNavigation() {
@@ -1547,7 +1560,8 @@ int main(int, char**) {
     RUN_TEST(testAwakePressAndNavigationInputsResetTimeout);
     RUN_TEST(testReleaseDoesNotResetTimeout);
     RUN_TEST(testTimeoutWorksAcrossRollover);
-    RUN_TEST(testZeroTimeoutSleepsOnFirstService);
+    RUN_TEST(testZeroTimeoutKeepsDisplayAwake);
+    RUN_TEST(testRuntimeTimeoutAndConfiguredScreenApplyDeterministically);
     RUN_TEST(testWakePressRequestsOnAndRenderWithoutNavigation);
     RUN_TEST(testWakeShortGestureIsSuppressedThenNextGestureNavigates);
     RUN_TEST(testWakeLongGestureIsFullySuppressed);
