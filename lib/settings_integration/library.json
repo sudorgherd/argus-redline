@@ -1,0 +1,10 @@
+{
+  "name": "settings_integration",
+  "version": "0.4.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": {
+    "device_settings": "*",
+    "device_ui": "*"
+  }
+}

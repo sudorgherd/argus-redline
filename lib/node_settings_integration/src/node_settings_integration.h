@@ -1,20 +1,21 @@
 #pragma once
 
-#include "hub_settings_integration.h"
+#include "settings_integration.h"
+#include "runtime_state.h"
 
 namespace NodeSettingsIntegration {
 
-using Request = HubSettingsIntegration::Request;
-using RequestQueue = HubSettingsIntegration::RequestQueue;
-using ConfigurationState = HubSettingsIntegration::ConfigurationState;
+using Request = SettingsIntegration::Request;
+using RequestQueue = SettingsIntegration::RequestQueue;
+using ConfigurationState = SettingsIntegration::ConfigurationState;
 
-using HubSettingsIntegration::feedbackAllowed;
-using HubSettingsIntegration::fromLoad;
-using HubSettingsIntegration::fromReset;
-using HubSettingsIntegration::fromSave;
-using HubSettingsIntegration::saveSucceeded;
-using HubSettingsIntegration::screen;
-using HubSettingsIntegration::timeoutMs;
+using SettingsIntegration::feedbackAllowed;
+using SettingsIntegration::fromLoad;
+using SettingsIntegration::fromReset;
+using SettingsIntegration::fromSave;
+using SettingsIntegration::saveSucceeded;
+using SettingsIntegration::screen;
+using SettingsIntegration::timeoutMs;
 
 struct SafePointState {
     bool acknowledgmentCompleted = false;

@@ -110,8 +110,12 @@ void testRequestPriorityAndSingleConsumption() {
         static_cast<uint8_t>(HubSettingsIntegration::Request::FACTORY_RESET),
         static_cast<uint8_t>(queue.pending())
     );
+    TEST_ASSERT_TRUE(queue.saveDraft() == DeviceSettings::defaults());
     queue.clear();
     TEST_ASSERT_EQUAL_UINT8(0, static_cast<uint8_t>(queue.pending()));
+    TEST_ASSERT_TRUE(queue.saveDraft() == DeviceSettings::defaults());
+    queue.queueAutomaticRepair();
+    TEST_ASSERT_TRUE(queue.saveDraft() == DeviceSettings::defaults());
 }
 
 void testSafePredicateRejectsEveryActiveCondition() {
@@ -290,6 +294,97 @@ void testTimeoutScreenAndFeedbackApplicationArePure() {
     ));
 }
 
+void testEveryLoadStatusMapsExplicitly() {
+    DeviceSettings::SettingsManager manager;
+    const DeviceSettings::LoadStatus results[] = {
+        DeviceSettings::LoadStatus::LOADED,
+        DeviceSettings::LoadStatus::DEFAULTED_MISSING,
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        DeviceSettings::LoadStatus::REPAIRED_SCHEMA_1,
+        DeviceSettings::LoadStatus::DEFAULTED_CORRUPT,
+        DeviceSettings::LoadStatus::UNSUPPORTED_SCHEMA,
+        DeviceSettings::LoadStatus::STORAGE_UNAVAILABLE,
+        DeviceSettings::LoadStatus::RESET_COMPLETED,
+        DeviceSettings::LoadStatus::RESET_RECOVERY_FAILED
+    };
+    const DeviceUi::ConfigurationStatus expected[] = {
+        DeviceUi::ConfigurationStatus::LOADED,
+        DeviceUi::ConfigurationStatus::DEFAULTED,
+        DeviceUi::ConfigurationStatus::FALLBACK,
+        DeviceUi::ConfigurationStatus::REPAIRED,
+        DeviceUi::ConfigurationStatus::DEFAULTED,
+        DeviceUi::ConfigurationStatus::UNSUPPORTED,
+        DeviceUi::ConfigurationStatus::UNAVAILABLE,
+        DeviceUi::ConfigurationStatus::RESET_COMPLETED,
+        DeviceUi::ConfigurationStatus::RESET_FAILED
+    };
+    for (uint8_t index = 0; index < 9; ++index) {
+        const HubSettingsIntegration::ConfigurationState state =
+            HubSettingsIntegration::fromLoad(results[index], manager);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(expected[index]),
+            static_cast<uint8_t>(state.status)
+        );
+    }
+}
+
+void testEverySaveAndResetStatusMapsExplicitly() {
+    DeviceSettings::SettingsManager manager;
+    const DeviceSettings::SaveStatus results[] = {
+        DeviceSettings::SaveStatus::SAVED,
+        DeviceSettings::SaveStatus::REPAIRED_SAVED,
+        DeviceSettings::SaveStatus::UNCHANGED,
+        DeviceSettings::SaveStatus::REPAIRED_UNCHANGED,
+        DeviceSettings::SaveStatus::UNSUPPORTED_SCHEMA,
+        DeviceSettings::SaveStatus::STORAGE_UNAVAILABLE,
+        DeviceSettings::SaveStatus::WRITE_FAILED,
+        DeviceSettings::SaveStatus::READ_BACK_FAILED,
+        DeviceSettings::SaveStatus::VERIFICATION_FAILED
+    };
+    const DeviceUi::ConfigurationStatus expected[] = {
+        DeviceUi::ConfigurationStatus::SAVED,
+        DeviceUi::ConfigurationStatus::SAVED,
+        DeviceUi::ConfigurationStatus::UNCHANGED,
+        DeviceUi::ConfigurationStatus::UNCHANGED,
+        DeviceUi::ConfigurationStatus::UNSUPPORTED,
+        DeviceUi::ConfigurationStatus::SAVE_FAILED,
+        DeviceUi::ConfigurationStatus::SAVE_FAILED,
+        DeviceUi::ConfigurationStatus::SAVE_FAILED,
+        DeviceUi::ConfigurationStatus::SAVE_FAILED
+    };
+    for (uint8_t index = 0; index < 9; ++index) {
+        const HubSettingsIntegration::ConfigurationState state =
+            HubSettingsIntegration::fromSave(results[index], manager);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(expected[index]),
+            static_cast<uint8_t>(state.status)
+        );
+    }
+    const DeviceSettings::ResetResult resetResults[] = {
+        DeviceSettings::ResetResult::RESET_COMPLETED,
+        DeviceSettings::ResetResult::RESET_NOT_PENDING,
+        DeviceSettings::ResetResult::STORAGE_UNAVAILABLE,
+        DeviceSettings::ResetResult::MARKER_WRITE_FAILED,
+        DeviceSettings::ResetResult::MARKER_VERIFY_FAILED,
+        DeviceSettings::ResetResult::SLOT_REMOVE_FAILED,
+        DeviceSettings::ResetResult::DEFAULT_WRITE_FAILED,
+        DeviceSettings::ResetResult::DEFAULT_VERIFY_FAILED,
+        DeviceSettings::ResetResult::MARKER_REMOVE_FAILED
+    };
+    for (uint8_t index = 0; index < 9; ++index) {
+        const HubSettingsIntegration::ConfigurationState state =
+            HubSettingsIntegration::fromReset(resetResults[index], manager);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(
+                index == 0
+                    ? DeviceUi::ConfigurationStatus::RESET_COMPLETED
+                    : DeviceUi::ConfigurationStatus::RESET_FAILED
+            ),
+            static_cast<uint8_t>(state.status)
+        );
+    }
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -300,5 +395,7 @@ int main(int, char**) {
     RUN_TEST(testMissingCorruptUnavailableAndUnsupportedMapDistinctly);
     RUN_TEST(testResetAndSaveResultMappingsAreExplicit);
     RUN_TEST(testTimeoutScreenAndFeedbackApplicationArePure);
+    RUN_TEST(testEveryLoadStatusMapsExplicitly);
+    RUN_TEST(testEverySaveAndResetStatusMapsExplicitly);
     return UNITY_END();
 }

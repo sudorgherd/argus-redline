@@ -4,6 +4,7 @@
   "frameworks": "*",
   "platforms": "*",
   "dependencies": {
-    "hub_settings_integration": "*"
+    "settings_integration": "*",
+    "runtime_state": "*"
   }
 }
