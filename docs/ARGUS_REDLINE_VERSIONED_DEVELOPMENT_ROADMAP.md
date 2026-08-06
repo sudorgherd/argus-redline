@@ -297,6 +297,8 @@ Raw GPIO assignments
 
 ## `v0.5.0` — Capability Registry and Safe Hardware Abstraction
 
+**Preparation status:** Implementation brief, proposed capability model, and hardware validation plan prepared; implementation has not started.
+
 ### Objective
 
 Make REDLINE a reusable off-grid IoT platform without exposing unrestricted hardware control.
