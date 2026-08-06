@@ -48,6 +48,18 @@ void updateRecordCrc(uint8_t* record) {
     DeviceSettings::writeUint32Le(record + 20, crc);
 }
 
+enum class FakeOperation : uint8_t {
+    READ_A,
+    READ_B,
+    WRITE_A,
+    WRITE_B,
+    REMOVE_A,
+    REMOVE_B,
+    READ_MARKER,
+    WRITE_MARKER,
+    REMOVE_MARKER
+};
+
 class FakeRecordStore : public DeviceSettings::RecordStore {
 public:
     struct SlotData {
@@ -65,8 +77,15 @@ public:
         ++readCount;
         if (slot == DeviceSettings::RecordSlot::A) {
             ++readACount;
+            recordOperation(FakeOperation::READ_A);
         } else {
             ++readBCount;
+            recordOperation(FakeOperation::READ_B);
+        }
+
+        if (failReadAtCount != 0 && readCount == failReadAtCount) {
+            length = 0;
+            return failReadResult;
         }
 
         if (nextReadResult != DeviceSettings::StoreResult::OK) {
@@ -76,7 +95,8 @@ public:
             return result;
         }
 
-        if (replaceNextRead) {
+        if (replaceNextRead ||
+            (replaceReadAtCount != 0 && readCount == replaceReadAtCount)) {
             replaceNextRead = false;
             length = replacement.length;
             copyToOutput(replacement, output, capacity);
@@ -102,8 +122,10 @@ public:
         ++writeCount;
         if (slot == DeviceSettings::RecordSlot::A) {
             ++writeACount;
+            recordOperation(FakeOperation::WRITE_A);
         } else {
             ++writeBCount;
+            recordOperation(FakeOperation::WRITE_B);
         }
         lastWrittenSlot = slot;
         lastWriteLength = length;
@@ -120,6 +142,82 @@ public:
             : DeviceSettings::RECORD_SIZE;
         for (size_t index = 0; index < copyLength; ++index) {
             target.bytes[index] = input[index];
+        }
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    DeviceSettings::StoreResult removeSlot(
+        DeviceSettings::RecordSlot slot
+    ) override {
+        ++removeCount;
+        if (slot == DeviceSettings::RecordSlot::A) {
+            ++removeACount;
+            recordOperation(FakeOperation::REMOVE_A);
+            if (removeAResult != DeviceSettings::StoreResult::OK) {
+                return removeAResult;
+            }
+            if (!slotA.present) {
+                return DeviceSettings::StoreResult::MISSING;
+            }
+            if (!removeADeletes) {
+                return DeviceSettings::StoreResult::OK;
+            }
+        } else {
+            ++removeBCount;
+            recordOperation(FakeOperation::REMOVE_B);
+            if (removeBResult != DeviceSettings::StoreResult::OK) {
+                return removeBResult;
+            }
+            if (!slotB.present) {
+                return DeviceSettings::StoreResult::MISSING;
+            }
+            if (!removeBDeletes) {
+                return DeviceSettings::StoreResult::OK;
+            }
+        }
+        data(slot).present = false;
+        data(slot).length = 0;
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    DeviceSettings::StoreResult readResetMarker(bool& pending) override {
+        ++markerReadCount;
+        recordOperation(FakeOperation::READ_MARKER);
+        if (nextMarkerReadResult != DeviceSettings::StoreResult::OK) {
+            const DeviceSettings::StoreResult result = nextMarkerReadResult;
+            nextMarkerReadResult = DeviceSettings::StoreResult::OK;
+            return result;
+        }
+        if (!markerPresent) {
+            pending = false;
+            return DeviceSettings::StoreResult::MISSING;
+        }
+        pending = markerValue;
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    DeviceSettings::StoreResult writeResetMarker(bool pending) override {
+        ++markerWriteCount;
+        recordOperation(FakeOperation::WRITE_MARKER);
+        if (markerWriteResult != DeviceSettings::StoreResult::OK) {
+            return markerWriteResult;
+        }
+        markerPresent = markerWritePersists;
+        markerValue = markerWriteValueOverride
+            ? false
+            : pending;
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    DeviceSettings::StoreResult removeResetMarker() override {
+        ++markerRemoveCount;
+        recordOperation(FakeOperation::REMOVE_MARKER);
+        if (markerRemoveResult != DeviceSettings::StoreResult::OK) {
+            return markerRemoveResult;
+        }
+        if (markerRemovePersists) {
+            markerPresent = false;
+            markerValue = false;
         }
         return DeviceSettings::StoreResult::OK;
     }
@@ -184,17 +282,52 @@ public:
     DeviceSettings::StoreResult nextReadResult =
         DeviceSettings::StoreResult::OK;
     bool replaceNextRead = false;
+    uint32_t failReadAtCount = 0;
+    DeviceSettings::StoreResult failReadResult =
+        DeviceSettings::StoreResult::ERROR;
+    uint32_t replaceReadAtCount = 0;
     uint32_t readCount = 0;
     uint32_t readACount = 0;
     uint32_t readBCount = 0;
     uint32_t writeCount = 0;
     uint32_t writeACount = 0;
     uint32_t writeBCount = 0;
+    uint32_t removeCount = 0;
+    uint32_t removeACount = 0;
+    uint32_t removeBCount = 0;
+    uint32_t markerReadCount = 0;
+    uint32_t markerWriteCount = 0;
+    uint32_t markerRemoveCount = 0;
+    bool markerPresent = false;
+    bool markerValue = false;
+    bool markerWritePersists = true;
+    bool markerWriteValueOverride = false;
+    bool markerRemovePersists = true;
+    DeviceSettings::StoreResult markerWriteResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult nextMarkerReadResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult markerRemoveResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult removeAResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult removeBResult =
+        DeviceSettings::StoreResult::OK;
+    bool removeADeletes = true;
+    bool removeBDeletes = true;
+    FakeOperation operations[64] = {};
+    size_t operationCount = 0;
     DeviceSettings::RecordSlot lastWrittenSlot =
         DeviceSettings::RecordSlot::A;
     size_t lastWriteLength = 0;
 
 private:
+    void recordOperation(FakeOperation operation) {
+        if (operationCount < sizeof(operations) / sizeof(operations[0])) {
+            operations[operationCount++] = operation;
+        }
+    }
+
     static void copyToOutput(
         const SlotData& source,
         uint8_t* output,
@@ -222,6 +355,26 @@ void assertLoadStatus(
 void assertSaveStatus(
     DeviceSettings::SaveStatus expected,
     DeviceSettings::SaveStatus actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
+void assertResetResult(
+    DeviceSettings::ResetResult expected,
+    DeviceSettings::ResetResult actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
+void assertMigrationResult(
+    DeviceSettings::MigrationResult expected,
+    DeviceSettings::MigrationResult actual
 ) {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<uint8_t>(expected),
@@ -1479,6 +1632,485 @@ void testSaveStorageUnavailableDoesNotRetryOrChangeState() {
     TEST_ASSERT_FALSE(manager.hasActiveSlot());
 }
 
+void testNoResetMarkerContinuesOrdinaryLoad() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings expected = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, expected, 4);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_TRUE(manager.settings() == expected);
+    TEST_ASSERT_EQUAL_UINT32(1, store.markerReadCount);
+    TEST_ASSERT_EQUAL_UINT32(2, store.readCount);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(FakeOperation::READ_MARKER),
+        static_cast<uint8_t>(store.operations[0])
+    );
+}
+
+void testExplicitFactoryResetCompletesCanonicalSequence() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 7
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 8
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::RESET_COMPLETED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(1, manager.generation());
+    TEST_ASSERT_TRUE(manager.hasActiveSlot());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_FALSE(manager.repairPending());
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_FALSE(store.slotB.present);
+    TEST_ASSERT_FALSE(store.markerPresent);
+
+    DeviceSettings::Settings decoded;
+    uint32_t generation = 0;
+    assertCodecResult(
+        DeviceSettings::CodecResult::OK,
+        DeviceSettings::decodeRecord(
+            store.slotA.bytes,
+            store.slotA.length,
+            decoded,
+            generation
+        )
+    );
+    TEST_ASSERT_TRUE(decoded == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(1, generation);
+}
+
+void testResetOperationOrderAndCountsAreDeterministic() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 7
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 8
+    );
+    DeviceSettings::SettingsManager manager;
+    manager.factoryReset(store);
+    const FakeOperation expected[] = {
+        FakeOperation::WRITE_MARKER,
+        FakeOperation::READ_MARKER,
+        FakeOperation::REMOVE_A,
+        FakeOperation::READ_A,
+        FakeOperation::REMOVE_B,
+        FakeOperation::READ_B,
+        FakeOperation::WRITE_A,
+        FakeOperation::READ_A,
+        FakeOperation::REMOVE_MARKER,
+        FakeOperation::READ_MARKER
+    };
+
+    TEST_ASSERT_EQUAL_UINT32(sizeof(expected) / sizeof(expected[0]),
+        store.operationCount);
+    for (size_t index = 0; index < sizeof(expected) / sizeof(expected[0]);
+         ++index) {
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(expected[index]),
+            static_cast<uint8_t>(store.operations[index])
+        );
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, store.markerWriteCount);
+    TEST_ASSERT_EQUAL_UINT32(2, store.markerReadCount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeBCount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeACount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeBCount);
+    TEST_ASSERT_EQUAL_UINT32(3, store.readCount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.markerRemoveCount);
+}
+
+void testMarkerWriteFailurePreservesBothSlots() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.markerWriteResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::MARKER_WRITE_FAILED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_TRUE(store.slotB.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.removeCount);
+}
+
+void testMarkerVerificationFailurePreservesBothSlots() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.markerWritePersists = false;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::MARKER_VERIFY_FAILED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_TRUE(store.slotB.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.removeCount);
+}
+
+void testSlotARemoveFailureLeavesMarkerPending() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.removeAResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::SLOT_REMOVE_FAILED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_TRUE(store.slotB.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testSlotBRemoveFailureLeavesMarkerPending() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.removeBResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::SLOT_REMOVE_FAILED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_FALSE(store.slotA.present);
+    TEST_ASSERT_TRUE(store.slotB.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testPendingResetResumesWhenSlotAIsAlreadyMissing() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::RESET_COMPLETED,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(1, manager.generation());
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeACount);
+    TEST_ASSERT_EQUAL_UINT32(2, store.readACount);
+    TEST_ASSERT_FALSE(store.markerPresent);
+}
+
+void testPendingResetResumesWhenSlotBIsAlreadyMissing() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::RESET_COMPLETED,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeBCount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.readBCount);
+    TEST_ASSERT_FALSE(store.markerPresent);
+}
+
+void testRemoveSlotMissingIsIdempotentSuccessWithVerification() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::RESET_COMPLETED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeBCount);
+    TEST_ASSERT_EQUAL_UINT32(3, store.readCount);
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_FALSE(store.slotB.present);
+}
+
+void testSlotRemovalVerificationFailsWhenSlotRemainsPresent() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.removeADeletes = false;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::SLOT_REMOVE_FAILED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_TRUE(store.slotB.present);
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_EQUAL_UINT32(1, store.removeACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.readACount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.removeBCount);
+}
+
+void testDefaultWriteFailureLeavesMarkerPending() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.writeResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::DEFAULT_WRITE_FAILED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_FALSE(store.slotA.present);
+    TEST_ASSERT_FALSE(store.slotB.present);
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+}
+
+void testDefaultReadBackFailureLeavesMarkerPending() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.failReadAtCount = 3;
+    store.failReadResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::DEFAULT_VERIFY_FAILED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.markerRemoveCount);
+}
+
+void testDefaultMismatchLeavesMarkerPending() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.prepareReplacement(settingsWithTimeout(60), 1);
+    store.replaceNextRead = false;
+    store.replaceReadAtCount = 3;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::DEFAULT_VERIFY_FAILED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_EQUAL_UINT32(0, store.markerRemoveCount);
+}
+
+void testMarkerRemovalFailureDoesNotReportCompletion() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.markerRemoveResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::MARKER_REMOVE_FAILED,
+        manager.recoverPendingReset(store)
+    );
+    TEST_ASSERT_TRUE(store.markerPresent);
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+    TEST_ASSERT_EQUAL_UINT32(0, manager.generation());
+}
+
+void testInterruptedResetStagesResumeIdempotently() {
+    for (uint8_t stage = 0; stage < 5; ++stage) {
+        FakeRecordStore store;
+        store.setRecord(
+            DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 5
+        );
+        store.setRecord(
+            DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 6
+        );
+        if (stage == 0) {
+            store.removeAResult = DeviceSettings::StoreResult::ERROR;
+        } else if (stage == 1) {
+            store.removeBResult = DeviceSettings::StoreResult::ERROR;
+        } else if (stage == 2) {
+            store.writeResult = DeviceSettings::StoreResult::ERROR;
+        } else if (stage == 3) {
+            store.failReadAtCount = 3;
+        } else {
+            store.markerRemoveResult = DeviceSettings::StoreResult::ERROR;
+        }
+        DeviceSettings::SettingsManager manager;
+        TEST_ASSERT_NOT_EQUAL(
+            static_cast<uint8_t>(DeviceSettings::ResetResult::RESET_COMPLETED),
+            static_cast<uint8_t>(manager.factoryReset(store))
+        );
+        TEST_ASSERT_TRUE(store.markerPresent);
+
+        store.removeAResult = DeviceSettings::StoreResult::OK;
+        store.removeBResult = DeviceSettings::StoreResult::OK;
+        store.writeResult = DeviceSettings::StoreResult::OK;
+        store.failReadAtCount = 0;
+        store.markerRemoveResult = DeviceSettings::StoreResult::OK;
+
+        assertLoadStatus(
+            DeviceSettings::LoadStatus::RESET_COMPLETED,
+            manager.load(store)
+        );
+        TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+        TEST_ASSERT_EQUAL_UINT32(1, manager.generation());
+        TEST_ASSERT_FALSE(store.markerPresent);
+    }
+}
+
+void testPendingResetOnBootCompletesBeforeOrdinarySelection() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 50
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 51
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::RESET_COMPLETED,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(1, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(FakeOperation::READ_MARKER),
+        static_cast<uint8_t>(store.operations[0])
+    );
+    TEST_ASSERT_EQUAL_UINT32(3, store.readCount);
+}
+
+void testResetRecoveryFailureStopsBeforeOrdinarySelection() {
+    FakeRecordStore store;
+    store.markerPresent = true;
+    store.markerValue = true;
+    store.removeAResult = DeviceSettings::StoreResult::ERROR;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::RESET_RECOVERY_FAILED,
+        manager.load(store)
+    );
+    assertResetResult(
+        DeviceSettings::ResetResult::SLOT_REMOVE_FAILED,
+        manager.lastResetResult()
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, store.readCount);
+}
+
+void testExplicitResetMayRemoveUnsupportedSchemaSlots() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    DeviceSettings::writeUint16Le(store.slotA.bytes + 4, 2);
+    DeviceSettings::writeUint16Le(store.slotB.bytes + 4, 3);
+    updateRecordCrc(store.slotA.bytes);
+    updateRecordCrc(store.slotB.bytes);
+    DeviceSettings::SettingsManager manager;
+
+    assertResetResult(
+        DeviceSettings::ResetResult::RESET_COMPLETED,
+        manager.factoryReset(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_TRUE(store.slotA.present);
+    TEST_ASSERT_FALSE(store.slotB.present);
+    TEST_ASSERT_FALSE(manager.unsupportedSchema());
+}
+
+void testSchemaOneDirectLoadIsNotMigration() {
+    uint8_t record[DeviceSettings::RECORD_SIZE] = {};
+    encodeDefaults(record);
+    assertMigrationResult(
+        DeviceSettings::MigrationResult::SCHEMA_1_DIRECT,
+        DeviceSettings::dispatchMigration(record, sizeof(record))
+    );
+}
+
+void testUnknownSchemaIsUnsupportedWithoutDecoding() {
+    uint8_t record[DeviceSettings::RECORD_SIZE] = {};
+    encodeDefaults(record);
+    DeviceSettings::writeUint16Le(record + 4, 2);
+    updateRecordCrc(record);
+    assertMigrationResult(
+        DeviceSettings::MigrationResult::UNSUPPORTED_SCHEMA,
+        DeviceSettings::dispatchMigration(record, sizeof(record))
+    );
+}
+
+void testMissingAndUnversionedStorageAreNotMigration() {
+    uint8_t unversioned[DeviceSettings::RECORD_SIZE] = {};
+    assertMigrationResult(
+        DeviceSettings::MigrationResult::NOT_MIGRATION,
+        DeviceSettings::dispatchMigration(nullptr, 0)
+    );
+    assertMigrationResult(
+        DeviceSettings::MigrationResult::NOT_MIGRATION,
+        DeviceSettings::dispatchMigration(
+            unversioned,
+            sizeof(unversioned)
+        )
+    );
+    assertMigrationResult(
+        DeviceSettings::MigrationResult::NOT_MIGRATION,
+        DeviceSettings::dispatchMigration(unversioned, 4)
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -1546,5 +2178,27 @@ int main(int, char**) {
     RUN_TEST(testSaveCanonicalizesInvalidCandidateInOneWrite);
     RUN_TEST(testSaveReportsRepairedUnchangedWithoutWriting);
     RUN_TEST(testSaveStorageUnavailableDoesNotRetryOrChangeState);
+    RUN_TEST(testNoResetMarkerContinuesOrdinaryLoad);
+    RUN_TEST(testExplicitFactoryResetCompletesCanonicalSequence);
+    RUN_TEST(testResetOperationOrderAndCountsAreDeterministic);
+    RUN_TEST(testMarkerWriteFailurePreservesBothSlots);
+    RUN_TEST(testMarkerVerificationFailurePreservesBothSlots);
+    RUN_TEST(testSlotARemoveFailureLeavesMarkerPending);
+    RUN_TEST(testSlotBRemoveFailureLeavesMarkerPending);
+    RUN_TEST(testPendingResetResumesWhenSlotAIsAlreadyMissing);
+    RUN_TEST(testPendingResetResumesWhenSlotBIsAlreadyMissing);
+    RUN_TEST(testRemoveSlotMissingIsIdempotentSuccessWithVerification);
+    RUN_TEST(testSlotRemovalVerificationFailsWhenSlotRemainsPresent);
+    RUN_TEST(testDefaultWriteFailureLeavesMarkerPending);
+    RUN_TEST(testDefaultReadBackFailureLeavesMarkerPending);
+    RUN_TEST(testDefaultMismatchLeavesMarkerPending);
+    RUN_TEST(testMarkerRemovalFailureDoesNotReportCompletion);
+    RUN_TEST(testInterruptedResetStagesResumeIdempotently);
+    RUN_TEST(testPendingResetOnBootCompletesBeforeOrdinarySelection);
+    RUN_TEST(testResetRecoveryFailureStopsBeforeOrdinarySelection);
+    RUN_TEST(testExplicitResetMayRemoveUnsupportedSchemaSlots);
+    RUN_TEST(testSchemaOneDirectLoadIsNotMigration);
+    RUN_TEST(testUnknownSchemaIsUnsupportedWithoutDecoding);
+    RUN_TEST(testMissingAndUnversionedStorageAreNotMigration);
     return UNITY_END();
 }

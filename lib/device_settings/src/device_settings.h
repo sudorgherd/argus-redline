@@ -386,6 +386,14 @@ public:
         const uint8_t* input,
         size_t length
     ) = 0;
+
+    virtual StoreResult removeSlot(RecordSlot slot) = 0;
+
+    virtual StoreResult readResetMarker(bool& pending) = 0;
+
+    virtual StoreResult writeResetMarker(bool pending) = 0;
+
+    virtual StoreResult removeResetMarker() = 0;
 };
 
 enum class LoadStatus : uint8_t {
@@ -395,7 +403,9 @@ enum class LoadStatus : uint8_t {
     REPAIRED_SCHEMA_1,
     DEFAULTED_CORRUPT,
     UNSUPPORTED_SCHEMA,
-    STORAGE_UNAVAILABLE
+    STORAGE_UNAVAILABLE,
+    RESET_COMPLETED,
+    RESET_RECOVERY_FAILED
 };
 
 enum class SaveStatus : uint8_t {
@@ -410,6 +420,52 @@ enum class SaveStatus : uint8_t {
     VERIFICATION_FAILED
 };
 
+enum class ResetResult : uint8_t {
+    RESET_COMPLETED,
+    RESET_NOT_PENDING,
+    STORAGE_UNAVAILABLE,
+    MARKER_WRITE_FAILED,
+    MARKER_VERIFY_FAILED,
+    SLOT_REMOVE_FAILED,
+    DEFAULT_WRITE_FAILED,
+    DEFAULT_VERIFY_FAILED,
+    MARKER_REMOVE_FAILED
+};
+
+enum class MigrationResult : uint8_t {
+    SCHEMA_1_DIRECT,
+    NOT_MIGRATION,
+    UNSUPPORTED_SCHEMA
+};
+
+inline MigrationResult dispatchMigration(
+    const uint8_t* input,
+    size_t inputLength
+) {
+    if (input == nullptr || inputLength != RECORD_SIZE) {
+        return MigrationResult::NOT_MIGRATION;
+    }
+    if (
+        input[0] != 0x52 ||
+        input[1] != 0x4C ||
+        input[2] != 0x43 ||
+        input[3] != 0x46 ||
+        readUint16Le(input + 6) != RECORD_SIZE
+    ) {
+        return MigrationResult::NOT_MIGRATION;
+    }
+
+    uint32_t calculatedCrc = 0;
+    crc32IsoHdlc(input, CRC_INPUT_SIZE, calculatedCrc);
+    if (readUint32Le(input + 20) != calculatedCrc) {
+        return MigrationResult::NOT_MIGRATION;
+    }
+
+    return readUint16Le(input + 4) == SCHEMA_VERSION
+        ? MigrationResult::SCHEMA_1_DIRECT
+        : MigrationResult::UNSUPPORTED_SCHEMA;
+}
+
 inline bool generationIsNewer(uint32_t candidate, uint32_t reference) {
     return static_cast<int32_t>(candidate - reference) > 0;
 }
@@ -420,6 +476,17 @@ public:
 
     LoadStatus load(RecordStore& store) {
         resetRuntimeState();
+
+        const ResetResult resetResult = recoverPendingReset(store);
+        if (resetResult == ResetResult::RESET_COMPLETED) {
+            return LoadStatus::RESET_COMPLETED;
+        }
+        if (resetResult == ResetResult::STORAGE_UNAVAILABLE) {
+            return LoadStatus::STORAGE_UNAVAILABLE;
+        }
+        if (resetResult != ResetResult::RESET_NOT_PENDING) {
+            return LoadStatus::RESET_RECOVERY_FAILED;
+        }
 
         const SlotRecord slotA = readAndClassify(store, RecordSlot::A);
         const SlotRecord slotB = readAndClassify(store, RecordSlot::B);
@@ -474,6 +541,54 @@ public:
         const SlotRecord& other = aUsable ? slotB : slotA;
         const bool fallback = other.kind == SlotKind::CORRUPT;
         return applySelected(selected, selectedSlot, fallback);
+    }
+
+    ResetResult factoryReset(RecordStore& store) {
+        const StoreResult writeMarkerResult =
+            store.writeResetMarker(true);
+        if (writeMarkerResult == StoreResult::UNAVAILABLE) {
+            lastResetResult_ = ResetResult::STORAGE_UNAVAILABLE;
+            return lastResetResult_;
+        }
+        if (writeMarkerResult != StoreResult::OK) {
+            lastResetResult_ = ResetResult::MARKER_WRITE_FAILED;
+            return lastResetResult_;
+        }
+
+        bool pending = false;
+        const StoreResult readMarkerResult = store.readResetMarker(pending);
+        if (readMarkerResult == StoreResult::UNAVAILABLE) {
+            lastResetResult_ = ResetResult::STORAGE_UNAVAILABLE;
+            return lastResetResult_;
+        }
+        if (readMarkerResult != StoreResult::OK || !pending) {
+            lastResetResult_ = ResetResult::MARKER_VERIFY_FAILED;
+            return lastResetResult_;
+        }
+
+        lastResetResult_ = completeVerifiedReset(store);
+        return lastResetResult_;
+    }
+
+    ResetResult recoverPendingReset(RecordStore& store) {
+        bool pending = false;
+        const StoreResult markerResult = store.readResetMarker(pending);
+        if (markerResult == StoreResult::MISSING ||
+            (markerResult == StoreResult::OK && !pending)) {
+            lastResetResult_ = ResetResult::RESET_NOT_PENDING;
+            return lastResetResult_;
+        }
+        if (markerResult == StoreResult::UNAVAILABLE) {
+            lastResetResult_ = ResetResult::STORAGE_UNAVAILABLE;
+            return lastResetResult_;
+        }
+        if (markerResult != StoreResult::OK) {
+            lastResetResult_ = ResetResult::MARKER_VERIFY_FAILED;
+            return lastResetResult_;
+        }
+
+        lastResetResult_ = completeVerifiedReset(store);
+        return lastResetResult_;
     }
 
     SaveStatus save(RecordStore& store, const Settings& candidate) {
@@ -585,6 +700,10 @@ public:
         return isUnsupportedSlot(slot);
     }
 
+    ResetResult lastResetResult() const {
+        return lastResetResult_;
+    }
+
 private:
     enum class SlotKind : uint8_t {
         MISSING,
@@ -693,6 +812,130 @@ private:
         return LoadStatus::LOADED;
     }
 
+    ResetResult completeVerifiedReset(RecordStore& store) {
+        const ResetResult removeAResult = removeAndVerifySlot(
+            store,
+            RecordSlot::A
+        );
+        if (removeAResult != ResetResult::RESET_COMPLETED) {
+            return removeAResult;
+        }
+
+        const ResetResult removeBResult = removeAndVerifySlot(
+            store,
+            RecordSlot::B
+        );
+        if (removeBResult != ResetResult::RESET_COMPLETED) {
+            return removeBResult;
+        }
+
+        const Settings canonicalDefaults = defaults();
+        uint8_t encoded[RECORD_SIZE] = {};
+        if (encodeRecord(
+                canonicalDefaults,
+                1,
+                encoded,
+                sizeof(encoded)
+            ) != CodecResult::OK) {
+            return ResetResult::DEFAULT_WRITE_FAILED;
+        }
+
+        const StoreResult writeResult = store.writeSlot(
+            RecordSlot::A,
+            encoded,
+            sizeof(encoded)
+        );
+        if (writeResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+        if (writeResult != StoreResult::OK) {
+            return ResetResult::DEFAULT_WRITE_FAILED;
+        }
+
+        uint8_t readBack[RECORD_SIZE] = {};
+        size_t readBackLength = 0;
+        const StoreResult readResult = store.readSlot(
+            RecordSlot::A,
+            readBack,
+            sizeof(readBack),
+            readBackLength
+        );
+        if (readResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+
+        Settings verified;
+        uint32_t verifiedGeneration = 0;
+        if (readResult != StoreResult::OK ||
+            decodeRecord(
+                readBack,
+                readBackLength,
+                verified,
+                verifiedGeneration
+            ) != CodecResult::OK ||
+            verifiedGeneration != 1 ||
+            verified != canonicalDefaults) {
+            return ResetResult::DEFAULT_VERIFY_FAILED;
+        }
+
+        const StoreResult removeMarkerResult =
+            store.removeResetMarker();
+        if (removeMarkerResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+        if (removeMarkerResult != StoreResult::OK) {
+            return ResetResult::MARKER_REMOVE_FAILED;
+        }
+
+        bool pending = false;
+        const StoreResult verifyMarkerResult =
+            store.readResetMarker(pending);
+        if (verifyMarkerResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+        if (verifyMarkerResult != StoreResult::MISSING) {
+            return ResetResult::MARKER_REMOVE_FAILED;
+        }
+
+        settings_ = canonicalDefaults;
+        generation_ = 1;
+        activeSlot_ = RecordSlot::A;
+        hasActiveSlot_ = true;
+        repairPending_ = false;
+        unsupportedSlotA_ = false;
+        unsupportedSlotB_ = false;
+        return ResetResult::RESET_COMPLETED;
+    }
+
+    static ResetResult removeAndVerifySlot(
+        RecordStore& store,
+        RecordSlot slot
+    ) {
+        const StoreResult removeResult = store.removeSlot(slot);
+        if (removeResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+        if (removeResult != StoreResult::OK &&
+            removeResult != StoreResult::MISSING) {
+            return ResetResult::SLOT_REMOVE_FAILED;
+        }
+
+        uint8_t ignored[RECORD_SIZE] = {};
+        size_t ignoredLength = 0;
+        const StoreResult verifyResult = store.readSlot(
+            slot,
+            ignored,
+            sizeof(ignored),
+            ignoredLength
+        );
+        if (verifyResult == StoreResult::UNAVAILABLE) {
+            return ResetResult::STORAGE_UNAVAILABLE;
+        }
+        return verifyResult == StoreResult::MISSING
+            ? ResetResult::RESET_COMPLETED
+            : ResetResult::SLOT_REMOVE_FAILED;
+    }
+
     void resetRuntimeState() {
         settings_ = defaults();
         generation_ = 0;
@@ -701,6 +944,7 @@ private:
         repairPending_ = false;
         unsupportedSlotA_ = false;
         unsupportedSlotB_ = false;
+        lastResetResult_ = ResetResult::RESET_NOT_PENDING;
     }
 
     Settings settings_;
@@ -710,6 +954,7 @@ private:
     bool repairPending_ = false;
     bool unsupportedSlotA_ = false;
     bool unsupportedSlotB_ = false;
+    ResetResult lastResetResult_ = ResetResult::RESET_NOT_PENDING;
 };
 
 }  // namespace DeviceSettings
