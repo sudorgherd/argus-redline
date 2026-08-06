@@ -311,4 +311,405 @@ inline CodecResult decodeRecord(
     return decodeRecord(input, inputLength, &settings, &generation);
 }
 
+inline CodecResult decodeRecordWithRepair(
+    const uint8_t* input,
+    size_t inputLength,
+    Settings& settings,
+    uint32_t& generation,
+    bool& repaired
+) {
+    Settings decoded;
+    uint32_t decodedGeneration = 0;
+    const CodecResult strictResult = decodeRecord(
+        input,
+        inputLength,
+        decoded,
+        decodedGeneration
+    );
+
+    if (strictResult == CodecResult::OK) {
+        settings = decoded;
+        generation = decodedGeneration;
+        repaired = false;
+        return CodecResult::OK;
+    }
+
+    if (
+        strictResult != CodecResult::INVALID_TIMEOUT &&
+        strictResult != CodecResult::INVALID_CONTRAST &&
+        strictResult != CodecResult::INVALID_SCREEN
+    ) {
+        return strictResult;
+    }
+
+    decoded.displayTimeoutSeconds = readUint16Le(input + 12);
+    decoded.displayContrast = input[14];
+    decoded.defaultScreen = static_cast<DefaultScreen>(input[15]);
+    decoded.ledEnabled = (input[16] & FLAG_LED_ENABLED) != 0U;
+    decoded.diagnosticsEnabled =
+        (input[16] & FLAG_DIAGNOSTICS_ENABLED) != 0U;
+    decoded.buttonFeedbackEnabled =
+        (input[16] & FLAG_BUTTON_FEEDBACK_ENABLED) != 0U;
+    validateAndRepair(decoded);
+
+    settings = decoded;
+    generation = readUint32Le(input + 8);
+    repaired = true;
+    return CodecResult::OK;
+}
+
+enum class RecordSlot : uint8_t {
+    A,
+    B
+};
+
+enum class StoreResult : uint8_t {
+    OK,
+    MISSING,
+    UNAVAILABLE,
+    ERROR
+};
+
+class RecordStore {
+public:
+    virtual ~RecordStore() {}
+
+    virtual StoreResult readSlot(
+        RecordSlot slot,
+        uint8_t* output,
+        size_t capacity,
+        size_t& length
+    ) = 0;
+
+    virtual StoreResult writeSlot(
+        RecordSlot slot,
+        const uint8_t* input,
+        size_t length
+    ) = 0;
+};
+
+enum class LoadStatus : uint8_t {
+    LOADED,
+    DEFAULTED_MISSING,
+    LOADED_FALLBACK_SLOT,
+    REPAIRED_SCHEMA_1,
+    DEFAULTED_CORRUPT,
+    UNSUPPORTED_SCHEMA,
+    STORAGE_UNAVAILABLE
+};
+
+enum class SaveStatus : uint8_t {
+    SAVED,
+    REPAIRED_SAVED,
+    UNCHANGED,
+    REPAIRED_UNCHANGED,
+    UNSUPPORTED_SCHEMA,
+    STORAGE_UNAVAILABLE,
+    WRITE_FAILED,
+    READ_BACK_FAILED,
+    VERIFICATION_FAILED
+};
+
+inline bool generationIsNewer(uint32_t candidate, uint32_t reference) {
+    return static_cast<int32_t>(candidate - reference) > 0;
+}
+
+class SettingsManager {
+public:
+    SettingsManager() = default;
+
+    LoadStatus load(RecordStore& store) {
+        resetRuntimeState();
+
+        const SlotRecord slotA = readAndClassify(store, RecordSlot::A);
+        const SlotRecord slotB = readAndClassify(store, RecordSlot::B);
+
+        if (slotA.kind == SlotKind::UNAVAILABLE ||
+            slotB.kind == SlotKind::UNAVAILABLE) {
+            return LoadStatus::STORAGE_UNAVAILABLE;
+        }
+
+        unsupportedSlotA_ = slotA.kind == SlotKind::UNSUPPORTED;
+        unsupportedSlotB_ = slotB.kind == SlotKind::UNSUPPORTED;
+
+        const bool aUsable = isUsable(slotA);
+        const bool bUsable = isUsable(slotB);
+
+        if (!aUsable && !bUsable) {
+            if (unsupportedSlotA_ || unsupportedSlotB_) {
+                return LoadStatus::UNSUPPORTED_SCHEMA;
+            }
+            if (slotA.kind == SlotKind::MISSING &&
+                slotB.kind == SlotKind::MISSING) {
+                return LoadStatus::DEFAULTED_MISSING;
+            }
+            repairPending_ = true;
+            return LoadStatus::DEFAULTED_CORRUPT;
+        }
+
+        if (aUsable && bUsable) {
+            if (slotA.generation == slotB.generation) {
+                if (!recordsEqual(slotA, slotB)) {
+                    repairPending_ = true;
+                    return LoadStatus::DEFAULTED_CORRUPT;
+                }
+                return applySelected(slotA, RecordSlot::A, false);
+            }
+
+            if (generationIsNewer(slotA.generation, slotB.generation)) {
+                return applySelected(slotA, RecordSlot::A, false);
+            }
+            if (generationIsNewer(slotB.generation, slotA.generation)) {
+                return applySelected(slotB, RecordSlot::B, false);
+            }
+
+            repairPending_ = true;
+            return LoadStatus::DEFAULTED_CORRUPT;
+        }
+
+        const SlotRecord& selected = aUsable ? slotA : slotB;
+        const RecordSlot selectedSlot = aUsable
+            ? RecordSlot::A
+            : RecordSlot::B;
+        const SlotRecord& other = aUsable ? slotB : slotA;
+        const bool fallback = other.kind == SlotKind::CORRUPT;
+        return applySelected(selected, selectedSlot, fallback);
+    }
+
+    SaveStatus save(RecordStore& store, const Settings& candidate) {
+        Settings canonical = candidate;
+        const bool candidateRepaired =
+            validateAndRepair(canonical) == ValidationResult::REPAIRED;
+        if (!hasActiveSlot_ && unsupportedSchema()) {
+            return SaveStatus::UNSUPPORTED_SCHEMA;
+        }
+        if (canonical == settings_) {
+            return candidateRepaired
+                ? SaveStatus::REPAIRED_UNCHANGED
+                : SaveStatus::UNCHANGED;
+        }
+
+        const RecordSlot target = hasActiveSlot_
+            ? opposite(activeSlot_)
+            : RecordSlot::A;
+        if (isUnsupportedSlot(target)) {
+            return SaveStatus::UNSUPPORTED_SCHEMA;
+        }
+
+        const uint32_t nextGeneration = generation_ + 1U;
+        uint8_t encoded[RECORD_SIZE] = {};
+        if (encodeRecord(
+                canonical,
+                nextGeneration,
+                encoded,
+                sizeof(encoded)
+            ) != CodecResult::OK) {
+            return SaveStatus::VERIFICATION_FAILED;
+        }
+
+        const StoreResult writeResult = store.writeSlot(
+            target,
+            encoded,
+            sizeof(encoded)
+        );
+        if (writeResult == StoreResult::UNAVAILABLE) {
+            return SaveStatus::STORAGE_UNAVAILABLE;
+        }
+        if (writeResult != StoreResult::OK) {
+            return SaveStatus::WRITE_FAILED;
+        }
+
+        uint8_t readBack[RECORD_SIZE] = {};
+        size_t readBackLength = 0;
+        const StoreResult readResult = store.readSlot(
+            target,
+            readBack,
+            sizeof(readBack),
+            readBackLength
+        );
+        if (readResult == StoreResult::UNAVAILABLE) {
+            return SaveStatus::STORAGE_UNAVAILABLE;
+        }
+        if (readResult != StoreResult::OK) {
+            return SaveStatus::READ_BACK_FAILED;
+        }
+
+        Settings verified;
+        uint32_t verifiedGeneration = 0;
+        if (decodeRecord(
+                readBack,
+                readBackLength,
+                verified,
+                verifiedGeneration
+            ) != CodecResult::OK ||
+            verifiedGeneration != nextGeneration ||
+            verified != canonical) {
+            return SaveStatus::VERIFICATION_FAILED;
+        }
+
+        settings_ = canonical;
+        generation_ = nextGeneration;
+        activeSlot_ = target;
+        hasActiveSlot_ = true;
+        repairPending_ = false;
+        return candidateRepaired
+            ? SaveStatus::REPAIRED_SAVED
+            : SaveStatus::SAVED;
+    }
+
+    const Settings& settings() const {
+        return settings_;
+    }
+
+    uint32_t generation() const {
+        return generation_;
+    }
+
+    bool hasActiveSlot() const {
+        return hasActiveSlot_;
+    }
+
+    RecordSlot activeSlot() const {
+        return activeSlot_;
+    }
+
+    bool repairPending() const {
+        return repairPending_;
+    }
+
+    bool unsupportedSchema() const {
+        return unsupportedSlotA_ || unsupportedSlotB_;
+    }
+
+    bool unsupportedSlotPresent(RecordSlot slot) const {
+        return isUnsupportedSlot(slot);
+    }
+
+private:
+    enum class SlotKind : uint8_t {
+        MISSING,
+        VALID,
+        REPAIRED,
+        CORRUPT,
+        UNSUPPORTED,
+        UNAVAILABLE
+    };
+
+    struct SlotRecord {
+        SlotKind kind = SlotKind::MISSING;
+        Settings settings;
+        uint32_t generation = 0;
+        uint8_t bytes[RECORD_SIZE] = {};
+        size_t length = 0;
+    };
+
+    static RecordSlot opposite(RecordSlot slot) {
+        return slot == RecordSlot::A ? RecordSlot::B : RecordSlot::A;
+    }
+
+    bool isUnsupportedSlot(RecordSlot slot) const {
+        return slot == RecordSlot::A
+            ? unsupportedSlotA_
+            : unsupportedSlotB_;
+    }
+
+    static bool isUsable(const SlotRecord& record) {
+        return record.kind == SlotKind::VALID ||
+            record.kind == SlotKind::REPAIRED;
+    }
+
+    static bool recordsEqual(
+        const SlotRecord& left,
+        const SlotRecord& right
+    ) {
+        if (left.length != right.length) {
+            return false;
+        }
+        for (size_t index = 0; index < left.length; ++index) {
+            if (left.bytes[index] != right.bytes[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static SlotRecord readAndClassify(
+        RecordStore& store,
+        RecordSlot slot
+    ) {
+        SlotRecord record;
+        const StoreResult readResult = store.readSlot(
+            slot,
+            record.bytes,
+            sizeof(record.bytes),
+            record.length
+        );
+
+        if (readResult == StoreResult::MISSING) {
+            record.kind = SlotKind::MISSING;
+            return record;
+        }
+        if (readResult != StoreResult::OK) {
+            record.kind = SlotKind::UNAVAILABLE;
+            return record;
+        }
+
+        bool repaired = false;
+        const CodecResult decodeResult = decodeRecordWithRepair(
+            record.bytes,
+            record.length,
+            record.settings,
+            record.generation,
+            repaired
+        );
+        if (decodeResult == CodecResult::UNSUPPORTED_SCHEMA) {
+            record.kind = SlotKind::UNSUPPORTED;
+        } else if (decodeResult != CodecResult::OK) {
+            record.kind = SlotKind::CORRUPT;
+        } else {
+            record.kind = repaired ? SlotKind::REPAIRED : SlotKind::VALID;
+        }
+        return record;
+    }
+
+    LoadStatus applySelected(
+        const SlotRecord& selected,
+        RecordSlot slot,
+        bool fallback
+    ) {
+        settings_ = selected.settings;
+        generation_ = selected.generation;
+        activeSlot_ = slot;
+        hasActiveSlot_ = true;
+
+        if (selected.kind == SlotKind::REPAIRED) {
+            repairPending_ = true;
+            return LoadStatus::REPAIRED_SCHEMA_1;
+        }
+        if (fallback) {
+            repairPending_ = true;
+            return LoadStatus::LOADED_FALLBACK_SLOT;
+        }
+        return LoadStatus::LOADED;
+    }
+
+    void resetRuntimeState() {
+        settings_ = defaults();
+        generation_ = 0;
+        activeSlot_ = RecordSlot::A;
+        hasActiveSlot_ = false;
+        repairPending_ = false;
+        unsupportedSlotA_ = false;
+        unsupportedSlotB_ = false;
+    }
+
+    Settings settings_;
+    uint32_t generation_ = 0;
+    RecordSlot activeSlot_ = RecordSlot::A;
+    bool hasActiveSlot_ = false;
+    bool repairPending_ = false;
+    bool unsupportedSlotA_ = false;
+    bool unsupportedSlotB_ = false;
+};
+
 }  // namespace DeviceSettings

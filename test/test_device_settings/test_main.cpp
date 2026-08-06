@@ -48,6 +48,193 @@ void updateRecordCrc(uint8_t* record) {
     DeviceSettings::writeUint32Le(record + 20, crc);
 }
 
+class FakeRecordStore : public DeviceSettings::RecordStore {
+public:
+    struct SlotData {
+        bool present = false;
+        size_t length = 0;
+        uint8_t bytes[DeviceSettings::RECORD_SIZE] = {};
+    };
+
+    DeviceSettings::StoreResult readSlot(
+        DeviceSettings::RecordSlot slot,
+        uint8_t* output,
+        size_t capacity,
+        size_t& length
+    ) override {
+        ++readCount;
+        if (slot == DeviceSettings::RecordSlot::A) {
+            ++readACount;
+        } else {
+            ++readBCount;
+        }
+
+        if (nextReadResult != DeviceSettings::StoreResult::OK) {
+            const DeviceSettings::StoreResult result = nextReadResult;
+            nextReadResult = DeviceSettings::StoreResult::OK;
+            length = 0;
+            return result;
+        }
+
+        if (replaceNextRead) {
+            replaceNextRead = false;
+            length = replacement.length;
+            copyToOutput(replacement, output, capacity);
+            return DeviceSettings::StoreResult::OK;
+        }
+
+        const SlotData& source = data(slot);
+        if (!source.present) {
+            length = 0;
+            return DeviceSettings::StoreResult::MISSING;
+        }
+
+        length = source.length;
+        copyToOutput(source, output, capacity);
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    DeviceSettings::StoreResult writeSlot(
+        DeviceSettings::RecordSlot slot,
+        const uint8_t* input,
+        size_t length
+    ) override {
+        ++writeCount;
+        if (slot == DeviceSettings::RecordSlot::A) {
+            ++writeACount;
+        } else {
+            ++writeBCount;
+        }
+        lastWrittenSlot = slot;
+        lastWriteLength = length;
+
+        if (writeResult != DeviceSettings::StoreResult::OK) {
+            return writeResult;
+        }
+
+        SlotData& target = data(slot);
+        target.present = true;
+        target.length = length;
+        const size_t copyLength = length < DeviceSettings::RECORD_SIZE
+            ? length
+            : DeviceSettings::RECORD_SIZE;
+        for (size_t index = 0; index < copyLength; ++index) {
+            target.bytes[index] = input[index];
+        }
+        return DeviceSettings::StoreResult::OK;
+    }
+
+    void setRecord(
+        DeviceSettings::RecordSlot slot,
+        const DeviceSettings::Settings& settings,
+        uint32_t generation
+    ) {
+        SlotData& target = data(slot);
+        target.present = true;
+        target.length = DeviceSettings::RECORD_SIZE;
+        assertCodecResult(
+            DeviceSettings::CodecResult::OK,
+            DeviceSettings::encodeRecord(
+                settings,
+                generation,
+                target.bytes,
+                sizeof(target.bytes)
+            )
+        );
+    }
+
+    void copySlot(
+        DeviceSettings::RecordSlot destination,
+        DeviceSettings::RecordSlot source
+    ) {
+        data(destination) = data(source);
+    }
+
+    SlotData& data(DeviceSettings::RecordSlot slot) {
+        return slot == DeviceSettings::RecordSlot::A ? slotA : slotB;
+    }
+
+    const SlotData& data(DeviceSettings::RecordSlot slot) const {
+        return slot == DeviceSettings::RecordSlot::A ? slotA : slotB;
+    }
+
+    void prepareReplacement(
+        const DeviceSettings::Settings& settings,
+        uint32_t generation
+    ) {
+        replacement.present = true;
+        replacement.length = DeviceSettings::RECORD_SIZE;
+        assertCodecResult(
+            DeviceSettings::CodecResult::OK,
+            DeviceSettings::encodeRecord(
+                settings,
+                generation,
+                replacement.bytes,
+                sizeof(replacement.bytes)
+            )
+        );
+        replaceNextRead = true;
+    }
+
+    SlotData slotA;
+    SlotData slotB;
+    SlotData replacement;
+    DeviceSettings::StoreResult writeResult =
+        DeviceSettings::StoreResult::OK;
+    DeviceSettings::StoreResult nextReadResult =
+        DeviceSettings::StoreResult::OK;
+    bool replaceNextRead = false;
+    uint32_t readCount = 0;
+    uint32_t readACount = 0;
+    uint32_t readBCount = 0;
+    uint32_t writeCount = 0;
+    uint32_t writeACount = 0;
+    uint32_t writeBCount = 0;
+    DeviceSettings::RecordSlot lastWrittenSlot =
+        DeviceSettings::RecordSlot::A;
+    size_t lastWriteLength = 0;
+
+private:
+    static void copyToOutput(
+        const SlotData& source,
+        uint8_t* output,
+        size_t capacity
+    ) {
+        const size_t copyLength = source.length < capacity
+            ? source.length
+            : capacity;
+        for (size_t index = 0; index < copyLength; ++index) {
+            output[index] = source.bytes[index];
+        }
+    }
+};
+
+void assertLoadStatus(
+    DeviceSettings::LoadStatus expected,
+    DeviceSettings::LoadStatus actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
+void assertSaveStatus(
+    DeviceSettings::SaveStatus expected,
+    DeviceSettings::SaveStatus actual
+) {
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(expected),
+        static_cast<uint8_t>(actual)
+    );
+}
+
+DeviceSettings::Settings settingsWithTimeout(uint16_t timeout) {
+    DeviceSettings::Settings settings;
+    settings.displayTimeoutSeconds = timeout;
+    return settings;
+}
+
 void testSchemaVersionIsOne() {
     TEST_ASSERT_EQUAL_UINT16(1, DeviceSettings::SCHEMA_VERSION);
 }
@@ -686,6 +873,612 @@ void testEncodingIgnoresCompilerPadding() {
     );
 }
 
+void testLoadNoSlotsDefaultsWithoutWriting() {
+    FakeRecordStore store;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::DEFAULTED_MISSING,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+    TEST_ASSERT_FALSE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(2, store.readCount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testLoadSlotAOnly() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings expected = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, expected, 7);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_TRUE(manager.settings() == expected);
+    TEST_ASSERT_EQUAL_UINT32(7, manager.generation());
+    TEST_ASSERT_TRUE(manager.hasActiveSlot());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+}
+
+void testLoadSlotBOnly() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings expected = settingsWithTimeout(120);
+    store.setRecord(DeviceSettings::RecordSlot::B, expected, 8);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_TRUE(manager.settings() == expected);
+    TEST_ASSERT_EQUAL_UINT32(8, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+}
+
+void testTwoValidSlotsSelectNewerA() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(120), 11
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(60), 10
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_EQUAL_UINT16(120, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT32(11, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+}
+
+void testTwoValidSlotsSelectNewerB() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 10
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 11
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_EQUAL_UINT16(120, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT32(11, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+}
+
+void testGenerationComparisonAndSelectionHandleRollover() {
+    TEST_ASSERT_TRUE(DeviceSettings::generationIsNewer(0, UINT32_MAX));
+    TEST_ASSERT_FALSE(DeviceSettings::generationIsNewer(UINT32_MAX, 0));
+
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A,
+        settingsWithTimeout(60),
+        UINT32_MAX
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 0
+    );
+    DeviceSettings::SettingsManager manager;
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_EQUAL_UINT16(120, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT32(0, manager.generation());
+}
+
+void testEqualGenerationIdenticalRecordsLoadDeterministically() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 15
+    );
+    store.copySlot(DeviceSettings::RecordSlot::B, DeviceSettings::RecordSlot::A);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_EQUAL_UINT16(60, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+}
+
+void testEqualGenerationDifferentRecordsDefaultAsCorrupt() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 15
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 15
+    );
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::DEFAULTED_CORRUPT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testCorruptNewerSlotFallsBackToOlderValidSlot() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings older = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, older, 20);
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 21
+    );
+    store.slotB.bytes[20] ^= 1;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::LOADED_FALLBACK_SLOT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == older);
+    TEST_ASSERT_EQUAL_UINT32(20, manager.generation());
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testBothCorruptDefaultWithoutAutomaticWrite() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    store.slotA.bytes[20] ^= 1;
+    store.slotB.bytes[21] ^= 1;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::DEFAULTED_CORRUPT,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testValidSchemaRecordRepairsAllInvalidFieldsInRam() {
+    FakeRecordStore store;
+    DeviceSettings::Settings stored;
+    stored.ledEnabled = false;
+    stored.diagnosticsEnabled = false;
+    stored.buttonFeedbackEnabled = true;
+    store.setRecord(DeviceSettings::RecordSlot::A, stored, 9);
+    store.slotA.bytes[12] = 1;
+    store.slotA.bytes[13] = 0;
+    store.slotA.bytes[14] = 15;
+    store.slotA.bytes[15] = 6;
+    updateRecordCrc(store.slotA.bytes);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::REPAIRED_SCHEMA_1,
+        manager.load(store)
+    );
+    TEST_ASSERT_EQUAL_UINT16(30, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT8(207, manager.settings().displayContrast);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::DefaultScreen::HOME),
+        static_cast<uint8_t>(manager.settings().defaultScreen)
+    );
+    TEST_ASSERT_FALSE(manager.settings().ledEnabled);
+    TEST_ASSERT_FALSE(manager.settings().diagnosticsEnabled);
+    TEST_ASSERT_TRUE(manager.settings().buttonFeedbackEnabled);
+    TEST_ASSERT_TRUE(manager.repairPending());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testSupportedAWithUnsupportedBLoadsA() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings supported = settingsWithTimeout(120);
+    store.setRecord(DeviceSettings::RecordSlot::A, supported, 19);
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(60), 20
+    );
+    DeviceSettings::writeUint16Le(store.slotB.bytes + 4, 2);
+    updateRecordCrc(store.slotB.bytes);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_TRUE(manager.settings() == supported);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_TRUE(manager.unsupportedSchema());
+    TEST_ASSERT_FALSE(
+        manager.unsupportedSlotPresent(DeviceSettings::RecordSlot::A)
+    );
+    TEST_ASSERT_TRUE(
+        manager.unsupportedSlotPresent(DeviceSettings::RecordSlot::B)
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testUnsupportedAWithSupportedBLoadsB() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings supported = settingsWithTimeout(120);
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 20
+    );
+    DeviceSettings::writeUint16Le(store.slotA.bytes + 4, 2);
+    updateRecordCrc(store.slotA.bytes);
+    store.setRecord(DeviceSettings::RecordSlot::B, supported, 19);
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(DeviceSettings::LoadStatus::LOADED, manager.load(store));
+    TEST_ASSERT_TRUE(manager.settings() == supported);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_TRUE(
+        manager.unsupportedSlotPresent(DeviceSettings::RecordSlot::A)
+    );
+    TEST_ASSERT_FALSE(
+        manager.unsupportedSlotPresent(DeviceSettings::RecordSlot::B)
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testUnsupportedInactiveSlotIsNeverSelectedAsSaveTarget() {
+    const DeviceSettings::RecordSlot unsupportedSlots[] = {
+        DeviceSettings::RecordSlot::A,
+        DeviceSettings::RecordSlot::B
+    };
+
+    for (const DeviceSettings::RecordSlot unsupportedSlot : unsupportedSlots) {
+        FakeRecordStore store;
+        const DeviceSettings::RecordSlot supportedSlot =
+            unsupportedSlot == DeviceSettings::RecordSlot::A
+                ? DeviceSettings::RecordSlot::B
+                : DeviceSettings::RecordSlot::A;
+        store.setRecord(unsupportedSlot, settingsWithTimeout(60), 20);
+        DeviceSettings::writeUint16Le(
+            store.data(unsupportedSlot).bytes + 4, 2
+        );
+        updateRecordCrc(store.data(unsupportedSlot).bytes);
+        store.setRecord(supportedSlot, settingsWithTimeout(120), 19);
+        uint8_t unsupportedBefore[DeviceSettings::RECORD_SIZE] = {};
+        memcpy(
+            unsupportedBefore,
+            store.data(unsupportedSlot).bytes,
+            sizeof(unsupportedBefore)
+        );
+        DeviceSettings::SettingsManager manager;
+        manager.load(store);
+
+        assertSaveStatus(
+            DeviceSettings::SaveStatus::UNSUPPORTED_SCHEMA,
+            manager.save(store, settingsWithTimeout(300))
+        );
+        TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+        TEST_ASSERT_TRUE(manager.settings() == settingsWithTimeout(120));
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(
+            unsupportedBefore,
+            store.data(unsupportedSlot).bytes,
+            sizeof(unsupportedBefore)
+        );
+    }
+}
+
+void testUnsupportedSchemaInBothSlotsIsPreserved() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 1
+    );
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 2
+    );
+    DeviceSettings::writeUint16Le(store.slotA.bytes + 4, 2);
+    DeviceSettings::writeUint16Le(store.slotB.bytes + 4, 3);
+    updateRecordCrc(store.slotA.bytes);
+    updateRecordCrc(store.slotB.bytes);
+    uint8_t beforeA[DeviceSettings::RECORD_SIZE] = {};
+    uint8_t beforeB[DeviceSettings::RECORD_SIZE] = {};
+    memcpy(beforeA, store.slotA.bytes, sizeof(beforeA));
+    memcpy(beforeB, store.slotB.bytes, sizeof(beforeB));
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::UNSUPPORTED_SCHEMA,
+        manager.load(store)
+    );
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::UNSUPPORTED_SCHEMA,
+        manager.save(store, DeviceSettings::defaults())
+    );
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(beforeA, store.slotA.bytes, sizeof(beforeA));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(beforeB, store.slotB.bytes, sizeof(beforeB));
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testUnsupportedAndMissingDefaultsAndBlocksSave() {
+    const DeviceSettings::RecordSlot unsupportedSlots[] = {
+        DeviceSettings::RecordSlot::A,
+        DeviceSettings::RecordSlot::B
+    };
+    for (const DeviceSettings::RecordSlot unsupportedSlot : unsupportedSlots) {
+        FakeRecordStore store;
+        store.setRecord(unsupportedSlot, settingsWithTimeout(60), 1);
+        DeviceSettings::writeUint16Le(
+            store.data(unsupportedSlot).bytes + 4, 2
+        );
+        updateRecordCrc(store.data(unsupportedSlot).bytes);
+        uint8_t before[DeviceSettings::RECORD_SIZE] = {};
+        memcpy(before, store.data(unsupportedSlot).bytes, sizeof(before));
+        DeviceSettings::SettingsManager manager;
+
+        assertLoadStatus(
+            DeviceSettings::LoadStatus::UNSUPPORTED_SCHEMA,
+            manager.load(store)
+        );
+        TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+        assertSaveStatus(
+            DeviceSettings::SaveStatus::UNSUPPORTED_SCHEMA,
+            manager.save(store, settingsWithTimeout(60))
+        );
+        TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(
+            before, store.data(unsupportedSlot).bytes, sizeof(before)
+        );
+    }
+}
+
+void testUnsupportedAndCorruptDefaultsAndBlocksSave() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 2
+    );
+    DeviceSettings::writeUint16Le(store.slotA.bytes + 4, 2);
+    updateRecordCrc(store.slotA.bytes);
+    store.setRecord(
+        DeviceSettings::RecordSlot::B, settingsWithTimeout(120), 1
+    );
+    store.slotB.bytes[20] ^= 1;
+    uint8_t unsupportedBefore[DeviceSettings::RECORD_SIZE] = {};
+    memcpy(unsupportedBefore, store.slotA.bytes, sizeof(unsupportedBefore));
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::UNSUPPORTED_SCHEMA,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::UNSUPPORTED_SCHEMA,
+        manager.save(store, settingsWithTimeout(60))
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(
+        unsupportedBefore, store.slotA.bytes, sizeof(unsupportedBefore)
+    );
+}
+
+void testStorageUnavailableReadsBothSlotsAndDefaults() {
+    FakeRecordStore store;
+    store.nextReadResult = DeviceSettings::StoreResult::UNAVAILABLE;
+    DeviceSettings::SettingsManager manager;
+
+    assertLoadStatus(
+        DeviceSettings::LoadStatus::STORAGE_UNAVAILABLE,
+        manager.load(store)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(2, store.readCount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.readACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.readBCount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testUnchangedSavePerformsZeroStorageOperations() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 4
+    );
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    const uint32_t readsBefore = store.readCount;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::UNCHANGED,
+        manager.save(store, settingsWithTimeout(60))
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+    TEST_ASSERT_EQUAL_UINT32(readsBefore, store.readCount);
+}
+
+void testChangedSaveWritesInactiveSlotOnceAndVerifiesReadBack() {
+    FakeRecordStore store;
+    store.setRecord(
+        DeviceSettings::RecordSlot::A, settingsWithTimeout(60), 4
+    );
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    const uint32_t readsBefore = store.readCount;
+    const DeviceSettings::Settings changed = settingsWithTimeout(120);
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::SAVED,
+        manager.save(store, changed)
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeACount);
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeBCount);
+    TEST_ASSERT_EQUAL_UINT32(readsBefore + 1, store.readCount);
+    TEST_ASSERT_EQUAL_UINT32(DeviceSettings::RECORD_SIZE, store.lastWriteLength);
+    TEST_ASSERT_TRUE(manager.settings() == changed);
+    TEST_ASSERT_EQUAL_UINT32(5, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::B),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_TRUE(store.slotA.present);
+}
+
+void testWriteFailurePreservesPreviousAuthoritativeState() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings original = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, original, 4);
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    store.writeResult = DeviceSettings::StoreResult::ERROR;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::WRITE_FAILED,
+        manager.save(store, settingsWithTimeout(120))
+    );
+    TEST_ASSERT_TRUE(manager.settings() == original);
+    TEST_ASSERT_EQUAL_UINT32(4, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+}
+
+void testReadBackFailurePreservesPreviousAuthoritativeState() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings original = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, original, 4);
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    store.nextReadResult = DeviceSettings::StoreResult::ERROR;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::READ_BACK_FAILED,
+        manager.save(store, settingsWithTimeout(120))
+    );
+    TEST_ASSERT_TRUE(manager.settings() == original);
+    TEST_ASSERT_EQUAL_UINT32(4, manager.generation());
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+}
+
+void testReadBackMismatchPreservesPreviousAuthoritativeState() {
+    FakeRecordStore store;
+    const DeviceSettings::Settings original = settingsWithTimeout(60);
+    store.setRecord(DeviceSettings::RecordSlot::A, original, 4);
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    store.prepareReplacement(settingsWithTimeout(300), 5);
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::VERIFICATION_FAILED,
+        manager.save(store, settingsWithTimeout(120))
+    );
+    TEST_ASSERT_TRUE(manager.settings() == original);
+    TEST_ASSERT_EQUAL_UINT32(4, manager.generation());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::RecordSlot::A),
+        static_cast<uint8_t>(manager.activeSlot())
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+}
+
+void testMultipleDraftChangesProduceOneCompleteRecordWrite() {
+    FakeRecordStore store;
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    DeviceSettings::Settings draft = manager.settings();
+    draft.displayTimeoutSeconds = 120;
+    draft.displayContrast = 64;
+    draft.ledEnabled = false;
+    draft.diagnosticsEnabled = false;
+    draft.defaultScreen = DeviceSettings::DefaultScreen::ABOUT;
+    draft.buttonFeedbackEnabled = true;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::SAVED,
+        manager.save(store, draft)
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+    TEST_ASSERT_EQUAL_UINT32(DeviceSettings::RECORD_SIZE, store.lastWriteLength);
+    DeviceSettings::Settings decoded;
+    uint32_t generation = 0;
+    assertCodecResult(
+        DeviceSettings::CodecResult::OK,
+        DeviceSettings::decodeRecord(
+            store.slotA.bytes,
+            store.slotA.length,
+            decoded,
+            generation
+        )
+    );
+    TEST_ASSERT_TRUE(decoded == draft);
+    TEST_ASSERT_EQUAL_UINT32(1, generation);
+}
+
+void testSaveCanonicalizesInvalidCandidateInOneWrite() {
+    FakeRecordStore store;
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    DeviceSettings::Settings candidate = settingsWithTimeout(1);
+    candidate.displayContrast = 15;
+    candidate.defaultScreen = static_cast<DeviceSettings::DefaultScreen>(6);
+    candidate.ledEnabled = false;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::REPAIRED_SAVED,
+        manager.save(store, candidate)
+    );
+    TEST_ASSERT_EQUAL_UINT16(30, manager.settings().displayTimeoutSeconds);
+    TEST_ASSERT_EQUAL_UINT8(207, manager.settings().displayContrast);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceSettings::DefaultScreen::HOME),
+        static_cast<uint8_t>(manager.settings().defaultScreen)
+    );
+    TEST_ASSERT_FALSE(manager.settings().ledEnabled);
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+}
+
+void testSaveReportsRepairedUnchangedWithoutWriting() {
+    FakeRecordStore store;
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    DeviceSettings::Settings candidate = DeviceSettings::defaults();
+    candidate.displayTimeoutSeconds = 1;
+    candidate.displayContrast = 15;
+    candidate.defaultScreen = static_cast<DeviceSettings::DefaultScreen>(6);
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::REPAIRED_UNCHANGED,
+        manager.save(store, candidate)
+    );
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_EQUAL_UINT32(0, store.writeCount);
+}
+
+void testSaveStorageUnavailableDoesNotRetryOrChangeState() {
+    FakeRecordStore store;
+    DeviceSettings::SettingsManager manager;
+    manager.load(store);
+    store.writeResult = DeviceSettings::StoreResult::UNAVAILABLE;
+
+    assertSaveStatus(
+        DeviceSettings::SaveStatus::STORAGE_UNAVAILABLE,
+        manager.save(store, settingsWithTimeout(60))
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, store.writeCount);
+    TEST_ASSERT_TRUE(manager.settings() == DeviceSettings::defaults());
+    TEST_ASSERT_FALSE(manager.hasActiveSlot());
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -726,5 +1519,32 @@ int main(int, char**) {
     RUN_TEST(testEveryProtectedByteDetectsUnrecomputedCorruption);
     RUN_TEST(testDecodeFailureDoesNotModifyCallerOutputs);
     RUN_TEST(testEncodingIgnoresCompilerPadding);
+    RUN_TEST(testLoadNoSlotsDefaultsWithoutWriting);
+    RUN_TEST(testLoadSlotAOnly);
+    RUN_TEST(testLoadSlotBOnly);
+    RUN_TEST(testTwoValidSlotsSelectNewerA);
+    RUN_TEST(testTwoValidSlotsSelectNewerB);
+    RUN_TEST(testGenerationComparisonAndSelectionHandleRollover);
+    RUN_TEST(testEqualGenerationIdenticalRecordsLoadDeterministically);
+    RUN_TEST(testEqualGenerationDifferentRecordsDefaultAsCorrupt);
+    RUN_TEST(testCorruptNewerSlotFallsBackToOlderValidSlot);
+    RUN_TEST(testBothCorruptDefaultWithoutAutomaticWrite);
+    RUN_TEST(testValidSchemaRecordRepairsAllInvalidFieldsInRam);
+    RUN_TEST(testSupportedAWithUnsupportedBLoadsA);
+    RUN_TEST(testUnsupportedAWithSupportedBLoadsB);
+    RUN_TEST(testUnsupportedInactiveSlotIsNeverSelectedAsSaveTarget);
+    RUN_TEST(testUnsupportedSchemaInBothSlotsIsPreserved);
+    RUN_TEST(testUnsupportedAndMissingDefaultsAndBlocksSave);
+    RUN_TEST(testUnsupportedAndCorruptDefaultsAndBlocksSave);
+    RUN_TEST(testStorageUnavailableReadsBothSlotsAndDefaults);
+    RUN_TEST(testUnchangedSavePerformsZeroStorageOperations);
+    RUN_TEST(testChangedSaveWritesInactiveSlotOnceAndVerifiesReadBack);
+    RUN_TEST(testWriteFailurePreservesPreviousAuthoritativeState);
+    RUN_TEST(testReadBackFailurePreservesPreviousAuthoritativeState);
+    RUN_TEST(testReadBackMismatchPreservesPreviousAuthoritativeState);
+    RUN_TEST(testMultipleDraftChangesProduceOneCompleteRecordWrite);
+    RUN_TEST(testSaveCanonicalizesInvalidCandidateInOneWrite);
+    RUN_TEST(testSaveReportsRepairedUnchangedWithoutWriting);
+    RUN_TEST(testSaveStorageUnavailableDoesNotRetryOrChangeState);
     return UNITY_END();
 }
