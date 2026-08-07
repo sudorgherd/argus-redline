@@ -819,130 +819,378 @@ Final life-safety panic workflow
 
 # Post-v1 Expansion
 
-Post-v1 ordering is directional and may change as field use identifies real needs.
+Post-v1 ordering is directional and may change as field use identifies real needs. These milestones describe architectural direction, not implemented behavior or a binding release commitment. REDLINE v1 remains the stable direct-network substrate; post-v1 work expands it in layers without moving modules, relays, routing, or mesh into the v1 promise.
 
-## `v1.1.0` — Capability and Hardware Module Expansion
+> Do not implement modules before v1. Do not design v1 in a way that makes modules impossible after v1.
 
-- Additional sensor drivers
-- Additional approved outputs
-- Capability module SDK
-- Hardware profile abstraction
-- Additional ESP32 and LoRa board profiles
-- Capability conformance tests
+The directional expansion order is:
 
-## `v1.2.0` — Signed Policies and Transferable Procedures
+```text
+open application transport
+→ detachable module protocol
+→ detachable field hardware
+→ open module ecosystem
+→ bounded field automation
+→ disconnected/store-and-forward operation
+→ group and distributed security
+→ deliberate relays
+→ experimental routing
+→ stable distributed v2 platform
+```
+
+## `v1.1.0` — Open Application Transport Expansion
 
 ### Objective
 
-Expand the tiny-packet/complex-behavior model beyond compiled procedure IDs.
+Expand the stable computer-facing REDLINE interface into a general application transport without moving application logic into embedded firmware.
 
-### Scope
+### Scope and direction
 
-- Compact policy or workflow format
-- Multi-packet transfer
-- Chunk validation and recovery
-- Signed procedure packages
-- Compatibility declaration
-- Transactional installation
-- Rollback
-- Execution limits
-- Storage quotas
-- Procedure permissions
-- Audit record
+- Application namespaces or endpoints above the device transport.
+- Multiple local applications sharing one Hub through explicit endpoint registration.
+- Durable host-side queues and restart recovery.
+- Larger logical messages assembled outside embedded firmware.
+- Host-side segmentation and reassembly.
+- Resumable transfers where message class, storage, and link behavior justify them.
+- Delivery classes with documented reliability semantics.
+- Priority, TTL, expiration, and bounded embedded queue behavior.
+- Clean separation between REDLINE transport status and application-defined status.
+- An application SDK or reference client against the documented host API.
+- Richer local endpoint registration, lifecycle, and error reporting.
+- ARGUS as an important reference consumer of the interface, not a firmware dependency.
 
-This is not unrestricted native-code transfer. The preferred model is a constrained domain-specific language or bytecode with bounded operations.
+### Architectural boundary
 
-## `v1.3.0` — Store-and-Forward and Dead-Drop Synchronization
+```text
+embedded REDLINE
+  identity, authentication, radio scheduling, bounded queues,
+  retries, and transport state
 
-- Persistent message custody
-- Expiration and packet lifetime
-- Delivery receipts
-- Delayed-event classification
-- Synchronization after missed updates
-- Storage limits and garbage collection
-- Historical data from later-revoked devices
-- Dead-drop Node profile
+host service
+  larger-message handling, durable queues, segmentation/reassembly,
+  endpoint registration, and local API
 
-## `v1.4.0` — Group Security and Delegated Relay Authorization
+application
+  payload meaning, workflow, databases, automation,
+  permissions, and operator UI
+```
 
-- Group or event credentials
-- Key-generation or epoch model
-- Group membership
-- Rekeying
-- Disconnected-device resynchronization
-- Relay authorization
-- Management-authority signatures
-- Stale-generation rejection
+REDLINE must remain useful to applications other than ARGUS. Embedded firmware does not acquire application databases, workflow engines, human-facing schemas, or ARGUS-specific assumptions.
 
-## `v1.5.0` — Stationary and Mobile Relay Nodes
+### Directional release criteria
 
-- Controlled repeaters
-- Mobile collection
-- Duplicate propagation control
-- Hop limits
-- Relay custody records
-- Loop prevention
-- Congestion controls
-- Relay health reporting
+- Multiple local applications can register and use isolated namespaces through the host service.
+- Host restart does not silently discard messages whose delivery class promises durability.
+- Large logical messages are segmented/reassembled outside constrained radio handlers.
+- Transport completion and application acceptance remain distinguishable.
+- Existing direct-network security, bounded queues, and radio timing remain authoritative.
 
-## `v1.6.0` — ARGUS Integration
+## `v1.2.0` — REDLINE Module Protocol Foundation
 
-- ARGUS device registry synchronization
-- Operator command submission
-- Structured event intake
-- Check-in workflows
-- Alert review and escalation
-- Zones and assignments
-- Audit integration
-- Role-based access
-- Offline Hub operation
+### Objective
 
-## `v1.7.0` — Handheld, Vehicle, and GNSS Profiles
+Define the first transport-independent detachable smart-module protocol without requiring finished custom handheld hardware.
 
-- Handheld interaction profile
-- Vehicle power and mounting profile
-- Controlled GNSS request and reporting
-- Privacy-aware location policy
-- Mobile relay behavior
-- Field enclosure requirements
-- Antenna and power profile documentation
+### Scope and direction
 
-## `v1.8.0` — Experimental Distributed Routing
+Introduce the REDLINE Module Protocol (RMP) with an initial vocabulary such as:
 
-- Route discovery
-- Route metrics
-- Hop limits
-- Path failure recovery
-- Network partition behavior
-- Congestion and airtime controls
-- Routed event identity
-- Routed replay protection
-- Multi-relay field testing
+```text
+DISCOVER
+IDENTIFY
+CAPABILITIES
+CONFIG
+START
+STOP
+STATUS
+SAMPLE
+EVENT
+ERROR
+```
 
-This remains experimental and does not yet constitute a stable mesh promise.
+RMP direction includes:
+
+- Module discovery and stable module identity.
+- Bounded capability manifests using the established capability model.
+- Protocol and capability compatibility/version negotiation.
+- Explicit module permissions and lifecycle states.
+- Attach, identify, register, operate, stop, detach, and reconnect semantics.
+- Module failure isolation and bounded malformed-input handling.
+- Generic module events and structured module errors.
+- No direct module access to LoRa credentials or unrestricted radio control.
+- No arbitrary filesystem access or unrestricted GPIO access.
+- Explicit policy and permission before location access.
+- Continued REDLINE operation when a module is absent, incompatible, malformed, unresponsive, or removed.
+
+RMP is defined independently of its physical transport. The first proof should use a simple development transport such as UART rather than waiting for final USB-host hardware.
+
+The reference module should be deliberately simple: temperature/humidity or another bounded sensor, one button/input, and one LED/output. The proof tests protocol lifecycle and isolation rather than application novelty.
+
+### Directional release criteria
+
+- Attach, identify, capability registration, operation, disconnect, and reconnect complete deterministically.
+- Incompatible versions and malformed module behavior fail safely and visibly.
+- Module disappearance cannot destabilize radio, UI, settings, or onboard capabilities.
+- A module cannot obtain credentials, unrestricted radio, filesystem, GPIO, or location access through RMP.
+- The same logical protocol works independently of the initial UART proof transport.
+
+## `v1.3.0` — Detachable Smart Module Platform
+
+### Objective
+
+Turn the RMP proof into a field-usable detachable hardware architecture.
+
+### Scope and direction
+
+- Select and validate a production module transport, such as USB host or another appropriate physical interface.
+- Hot attach/detach and deterministic module-present detection.
+- Switched module power, current limiting, and power monitoring.
+- ESD, overcurrent, reverse-power, and fault protection appropriate to the interface.
+- Mechanical retention, connector-cycle, environmental, and field-service requirements.
+- Module lifecycle, status, configuration, firmware version, and compatibility visibility in device/host UI.
+- A finished handheld hardware profile and custom PCB/enclosure work where required.
+- Antenna, battery, charging, thermal, and power-budget documentation for the module-host device.
+- Vehicle power, mounting, transient protection, antenna, and mobile-gateway considerations where justified.
+
+Current Heltec development boards do not need to become the final module-host hardware. The production interface must support detachable operation and must not assume permanent attachment.
+
+```text
+Capability Registry
+    |
+    +-- native/onboard capability
+    |
+    +-- RMP smart-module capability
+```
+
+REDLINE consumes the bounded capability/event contract. It does not need to understand whether a module internally uses SPI, I2C, UART, a proprietary sensor bus, or another implementation detail.
+
+### Directional release criteria
+
+- Hot attach/detach and module power faults do not reset or destabilize REDLINE.
+- Onboard and external capabilities appear through one higher-level model where practical.
+- Module status and incompatibility remain inspectable without a full application-specific UI.
+- Electrical protection, current limits, power behavior, connector retention, and recovery are physically characterized.
+
+## `v1.4.0` — Module SDK and Open Hardware Ecosystem
+
+### Objective
+
+Allow third-party developers to create REDLINE-compatible modules without modifying REDLINE core firmware.
+
+### Scope and direction
+
+- Publish the RMP specification and compatibility rules.
+- Provide a module developer SDK and reference module firmware.
+- Publish reference schematics and electrical/interface requirements.
+- Define the module manifest and capability/event schema rules.
+- Provide compatibility and conformance test suites.
+- Provide module validation, lifecycle, and self-test tooling.
+- Document module permissions, failure isolation, update expectations, and review boundaries.
+- Publish example sensor, input, output, and storage modules without privileging one application.
+- Document a path for future environmental sensing, GNSS, radiation, storage, networking, RF sensing, and currently unknown module classes.
+
+The architectural test is that a developer unfamiliar with RaveGoat Labs can implement the documented interface, attach a module, and have its approved capabilities appear without changing REDLINE core firmware.
+
+Specialized projects such as BLACKSHEEP may consume this platform as an application/capability family. REDLINE must not contain BLACKSHEEP-specific application logic. The core interface remains intentionally generic; specialized behavior belongs in modules and host applications.
+
+### Directional release criteria
+
+- At least one independently implemented module passes published conformance tests.
+- Module manifests and events are bounded, versioned, and rejected safely when incompatible.
+- Adding a conforming module requires no REDLINE core firmware modification.
+- SDK examples do not grant unrestricted GPIO, filesystem, radio, credential, or location access.
+
+## `v1.5.0` — Signed Policies, Procedures, and Field Automation
+
+### Objective
+
+Allow approved native and module-provided capabilities to participate in bounded local automation without enabling arbitrary remote native-code execution.
+
+### Scope and direction
+
+- A constrained declarative policy, workflow representation, DSL, or bounded bytecode.
+- Signed procedure or policy packages.
+- Explicit compatibility and capability requirements.
+- Chunk validation and recovery for multi-part installation.
+- Transactional installation, activation, rollback, and removal.
+- Execution-time, instruction, memory, storage, and event-rate limits.
+- Capability permissions and policy-specific authorization.
+- Audit records for installation, activation, denial, execution, and failure.
+- Local event → approved procedure invocation.
+- Approved capability operation → structured event generation.
+- Consistent interaction between native and RMP module capabilities.
+
+This milestone never transfers unrestricted native executable code. Sandboxed host logic or WebAssembly may be explored later, but is not a v1.5.0 requirement and does not weaken embedded execution limits.
+
+### Directional release criteria
+
+- Unsigned, incompatible, over-quota, or unauthorized packages are rejected transactionally.
+- Interrupted installation preserves the previous working state or recovers predictably.
+- Execution cannot address undeclared capabilities or exceed documented limits.
+- Native and module capabilities use the same authorization, safety, audit, and result boundaries.
+
+## `v1.6.0` — Store-and-Forward and Disconnected Operation
+
+### Objective
+
+Preserve and eventually deliver useful information through temporary network partitions.
+
+### Scope and direction
+
+- Persistent message custody with explicit ownership and restart recovery.
+- TTL/expiration, delivery receipts, and delayed-event classification.
+- Queue priority, storage quotas, pressure behavior, and garbage collection.
+- Duplicate-safe delayed delivery and idempotent receipt handling.
+- Dead-drop synchronization and synchronization after missed updates.
+- Data-mule and mobile collection behavior for physically separated areas.
+- Historical handling of data received from devices later revoked.
+- Bounded recovery after restart, interrupted synchronization, or partial transfer.
+- Inspectable custody, age, expiration, and failure state.
+
+This is the directional milestone where handheld or mobile Nodes may physically carry queued information between disconnected areas. Custody does not imply that expired, revoked, unauthenticated, or policy-denied data becomes actionable.
+
+### Directional release criteria
+
+- Restart and interrupted synchronization preserve custody invariants.
+- TTL, priority, duplicate handling, quotas, and garbage collection are deterministic under storage pressure.
+- Delivery receipts cannot be confused with application acceptance.
+- Later revocation and delayed historical data have documented handling.
+
+## `v1.7.0` — Group Security and Delegated Relay Authorization
+
+### Objective
+
+Introduce the distributed security prerequisites required by disconnected delivery, forwarding, and future group traffic before general relay or routing behavior.
+
+### Scope and direction
+
+- Group or event credentials only where the communication model requires them.
+- Key-generation or epoch model and explicit group membership.
+- Rekeying and disconnected-device resynchronization.
+- Stale-generation rejection and replay boundaries.
+- Delegated relay authorization with bounded forwarding authority.
+- Management-authority signatures and credential rotation.
+- Revocation behavior across delayed or disconnected network segments.
+- Recovery for devices that miss group/key updates.
+- Auditable distinction between origin authentication, relay custody, and delivery.
+
+Pairwise security remains appropriate for direct relationships. Group/distributed mechanisms are added only where forwarding, group traffic, or disconnected operation requires them; they do not replace direct-device security without evidence.
+
+### Directional release criteria
+
+- Unauthorized relays cannot acquire forwarding authority by observing traffic.
+- Stale epochs, removed members, and replayed group traffic fail predictably.
+- Disconnected rejoin/rekey and revocation behavior are documented and field-tested.
+- Origin, relay, and management authority remain cryptographically distinguishable.
+
+## `v1.8.0` — Stationary and Mobile Relays / Gateways
+
+### Objective
+
+Introduce deliberate constrained forwarding before general mesh routing.
+
+### Scope and direction
+
+- Stationary relay Nodes and mobile relay/gateway Nodes.
+- Controlled forwarding under explicit relay identity and authorization.
+- Hop limits, duplicate-propagation suppression, and loop prevention.
+- Bounded forwarding queues, custody records, priority, and expiration.
+- Congestion controls and airtime governance.
+- Relay health, capacity, authorization, queue, and link status.
+- Vehicle/mobile gateway power, mounting, antenna, connectivity, and field profiles where justified.
+- Measured stationary and mobile relay field testing.
+
+The first forwarding topology should be simple and known:
+
+```text
+Node
+→ Relay
+→ Hub
+```
+
+This is not general mesh routing. Dynamic path selection, arbitrary forwarding, and unbounded broadcast remain excluded.
+
+### Directional release criteria
+
+- One-hop relay forwarding is authorized, bounded, duplicate-safe, and loop-safe.
+- Relay loss or queue pressure produces documented recovery rather than network-wide instability.
+- Airtime and congestion behavior are measured under representative field loads.
+- Mobile gateway behavior does not bypass custody, identity, authorization, or privacy policy.
+
+## `v1.9.0` — Experimental Distributed Routing
+
+### Objective
+
+Experimentally extend the proven relay model into dynamic distributed routing.
+
+### Scope and direction
+
+- Neighbor state and bounded route discovery.
+- Explicit route representation, metrics, path selection, and expiration.
+- Loop prevention, hop limits, and path-failure recovery.
+- Network-partition and merge behavior.
+- Congestion, broadcast, and airtime controls.
+- Routed event/message identity and duplicate suppression.
+- Routed replay protection and security through forwarding Nodes.
+- Multi-relay laboratory and field testing.
+- Diagnostics sufficient to explain route choice, failure, congestion, and recovery.
+
+No routing algorithm is selected by this roadmap. Algorithm choice must be informed by measured LoRa behavior, security analysis, failure testing, and actual deployment geometry.
+
+This milestone remains explicitly experimental and does not constitute a stable mesh promise.
+
+### Directional release criteria
+
+- Multiple candidate routing approaches are evaluated against documented measurements.
+- Loops, stale routes, partitions, congestion, replay, and relay compromise have bounded tested behavior.
+- Multi-relay field evidence is sufficient to decide whether a stable v2 routing contract is supportable.
+
+## Cross-cutting post-v1 directions
+
+### ARGUS and other host applications
+
+ARGUS is an important reference/operator application consuming the stable Host API and open application transport. Device-registry synchronization, command submission, event intake, check-ins, alert review/escalation, zones, assignments, audit integration, role-based access, and offline Hub operation belong in ARGUS or host services—not embedded REDLINE assumptions.
+
+REDLINE remains application-agnostic. NIGHTWATCH, if explored, is another application that may transport compact evidence metadata or status through REDLINE; this does not imply media transfer over LoRa.
+
+### Handheld, vehicle, and module-host hardware
+
+Finished handheld enclosure, connector, antenna, battery, charging, thermal, and interaction requirements belong primarily to the detachable module platform. Vehicle power, transient protection, mounting, antenna, and mobile-gateway requirements belong to the module-host and relay/gateway milestones. These profiles consume the stable REDLINE substrate rather than expanding the v1 promise retroactively.
+
+### GNSS and location privacy
+
+GNSS/location is an approved `LOCATION_PROVIDER` capability that may be onboard or module-provided. Access requires explicit authorization, privacy policy, lifecycle, and visibility. Continuous tracking is not a core REDLINE requirement, and location data is not exposed to a module or application merely because hardware is present.
+
+### Specialized module families
+
+BLACKSHEEP may be an example specialized future module/capability family. It is neither a firmware dependency nor the architectural reason for RMP. Environmental sensing, radiation, storage, networking, RF sensing, and unknown future modules use the same generic manifest, capability, permission, lifecycle, and failure-isolation rules.
 
 ---
 
 # `v2.0.0` — Stable Distributed and Mesh-Capable Platform
 
-`v2.0.0` is earned when REDLINE supports a documented, secured, field-tested distributed network rather than only direct Hub-to-Node operation.
+`v2.0.0` is earned rather than scheduled. It represents the point where the secure, application-agnostic, capability-driven direct platform created in v1 operates reliably across a documented, secured, field-tested distributed network.
 
 ### v2 promise
 
 ```text
-Direct and relayed communication
+Stable direct and relayed communication
 Controlled multi-hop routing
 Store-and-forward delivery
 Stationary and mobile relays
-Group membership and epoch-based rekeying
+Group membership and epoch-based rekeying where required
 Revocation across disconnected network segments
-Signed transferable procedures
-ARGUS operational integration
+Signed and bounded transferable procedures
+Open application transport
+Stable module and capability architecture
+ARGUS operational integration through documented interfaces
 Network-wide diagnostics
 Measured congestion and airtime behavior
 Documented partition and recovery behavior
-Stable routing, security, and procedure-package interfaces
+Stable routing, security, module, application-transport, and procedure-package interfaces
 ```
+
+v2.0.0 does not promise every possible module, application, sensor, workflow, or deployment profile. REDLINE remains the network and capability substrate; host applications and modules retain their own semantics and release lifecycles.
 
 ---
 
