@@ -155,14 +155,16 @@ test/
 ### Release gate
 
 ```text
-[ ] Hub and Node both build
-[ ] Existing TEST exchange still succeeds
-[ ] Existing addressing and retry behavior remain intact
-[ ] Core logic is no longer concentrated in main.cpp
-[ ] Native tests pass
-[ ] Physical two-board regression passes
-[ ] Firmware and wire-protocol versions are reported separately
+[x] Hub and Node both build
+[x] Existing TEST exchange still succeeds
+[x] Existing addressing and retry behavior remain intact
+[x] Core protocol, transaction, and runtime policy is extracted from main.cpp
+[x] Native tests pass
+[x] Physical two-board regression passes
+[x] Firmware and wire-protocol versions are reported separately
 ```
+
+The physical regression used the behavior-complete `0.2.0-dev` build before the final identifier-only change. Startup metadata lines were not retained after USB CDC re-enumeration, and physical duplicate injection was not performed; source/build validation and native tests provide that evidence. These recorded limitations did not block the released v0.2.0 milestone.
 
 ### Explicit non-goals
 
@@ -177,9 +179,10 @@ test/
 
 ## `v0.3.0` — Device Runtime, Screens, and Input — Complete
 
-**Status:** Completed release candidate; all core software and physical gates
-passed. Controlled physical duplicate reproduction was not completed, while
-duplicate behavior remains covered by native tests and source audit.
+**Status:** Completed and released. All core software and physical gates
+passed. Controlled physical duplicate reproduction and physical
+malformed/unsupported packet injection were not completed; those paths remain
+covered by native tests and source audit.
 
 ### Objective
 
@@ -306,7 +309,8 @@ Make REDLINE a reusable off-grid IoT platform without exposing unrestricted hard
 ### Scope
 
 - Define a capability descriptor.
-- Register approved sensors, inputs, outputs, and local procedures.
+- Define bounded class vocabulary for approved sensors, inputs, outputs, and local procedures, including classes reserved for later milestones.
+- Register only the explicitly approved low-risk v0.5.0 production subset defined by the implementation brief and hardware validation plan.
 - Address hardware through logical capability IDs.
 - Add capability discovery.
 - Add per-capability authorization and validation hooks.
@@ -314,6 +318,8 @@ Make REDLINE a reusable off-grid IoT platform without exposing unrestricted hard
 - Implement the first complete sensor/input/output vertical slice.
 
 ### Candidate capability classes
+
+This is model vocabulary, not the production registered-capability set. A class may be defined now and remain unregistered until a later milestone explicitly approves its behavior.
 
 ```text
 DIGITAL_INPUT
@@ -338,7 +344,9 @@ button or digital input
 + resistor or analog input
 ```
 
-A relay may be simulated before controlling external power.
+Relay-like behavior may appear only in a simulated development/test fixture used to validate capability semantics. v0.5.0 does not register production relay hardware, switch external power, or make relay control part of the release.
+
+`LOCAL_PROCEDURE` is reserved descriptor/class vocabulary in v0.5.0. The release does not require a registered production procedure or introduce policy automation, workflow execution, scripts, bytecode, transferred procedures, or remote procedure execution.
 
 ### Required behavior
 

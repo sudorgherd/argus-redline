@@ -110,24 +110,54 @@ Protocol definitions and encoding logic are located in [`include/protocol.h`](in
 Build both firmware environments:
 
 ```powershell
-pio run
+platformio run
 ```
 
 Build individually:
 
 ```powershell
-pio run -e tx
-pio run -e rx
+platformio run -e tx
+platformio run -e rx
 ```
 
 Upload individually:
 
 ```powershell
-pio run -e tx -t upload
-pio run -e rx -t upload
+platformio run -e tx -t upload
+platformio run -e rx -t upload
 ```
 
 Upload ports may need to be changed in `platformio.ini`.
+
+## Local validation
+
+Run the complete native Unity suite:
+
+```powershell
+platformio test -e native
+```
+
+Build the production Hub and Node firmware:
+
+```powershell
+platformio run -e tx
+platformio run -e rx
+```
+
+Build the two valid device-configuration fixtures:
+
+```powershell
+platformio run -e config_hub_valid
+platformio run -e config_node_valid
+```
+
+The three negative fixtures must fail compilation. A nonzero exit is the expected successful test result; verify the corresponding exact diagnostic shown below:
+
+```powershell
+platformio run -e config_missing_local # ARGUS_LOCAL_DEVICE_ID must be defined by the build environment
+platformio run -e config_missing_peer  # ARGUS_PEER_DEVICE_ID must be defined by the build environment
+platformio run -e config_equal_ids     # Local and peer device IDs must be different
+```
 
 ## Development history
 

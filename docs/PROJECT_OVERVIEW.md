@@ -1,6 +1,6 @@
 # ARGUS REDLINE — What It Is
 
-ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development.
+ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current firmware provides a validated direct radio and device foundation; cryptographic security is planned for later pre-v1 milestones and is not implemented in v0.4.0.
 
 It is intended to securely connect operators, sensors, mobile devices, and controlled trigger mechanisms over resilient low-bandwidth radio when cellular service, internet access, or ordinary communications infrastructure is unavailable, unreliable, overloaded, or inappropriate for the task.
 
@@ -8,7 +8,7 @@ At its core, REDLINE provides a controlled communications path between a compute
 
 It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** privacy-first communications and coordination ecosystem.
 
-> **Plain-language definition:** REDLINE is a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes.
+> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.4.0 packets are not cryptographically authenticated or encrypted.
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
