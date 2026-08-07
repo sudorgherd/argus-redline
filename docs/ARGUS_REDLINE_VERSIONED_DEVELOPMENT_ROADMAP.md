@@ -350,12 +350,14 @@ SET_INDICATOR
 TRIGGER_OUTPUT
 ```
 
+These names describe local semantic capability operations and validation behavior in v0.5.0. They are not Wire Protocol opcodes, packet schemas, or Host Protocol commands. v0.5.0 proves bounded local discovery, validation, authorization, safety checks, and invocation while preserving Wire Protocol `1`. v0.6.0 owns formal operation registration, radio-visible structured commands and responses, and Host Protocol behavior.
+
 ### Release gate
 
 ```text
-[ ] Node reports registered capabilities
+[ ] Node reports registered capabilities through a bounded local tested API
 [ ] Unsupported capabilities are rejected
-[ ] Commands use logical IDs rather than arbitrary GPIO numbers
+[ ] Local operations use logical IDs rather than arbitrary GPIO numbers
 [ ] Input or sensor data can be returned structurally
 [ ] Approved output can be controlled
 [ ] Local authorization and safety checks can deny an operation
