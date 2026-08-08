@@ -175,6 +175,8 @@ The history includes the original string-based exchange, binary protocol impleme
 
 ## Development direction
 
+Current firmware uses structured `COMMAND`/`ACK`-style operations. The future architecture adds an application-neutral Host/service boundary while keeping application meaning outside the embedded transport core. General opaque application payload transport is planned for v1.1 and is not implemented today. See [Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md) for the stable responsibility boundaries; it does not define a finished Host Protocol.
+
 ### V1 target
 
 - Reliable radio transport with structured responses and events, duplicate suppression, and per-device transaction statistics
