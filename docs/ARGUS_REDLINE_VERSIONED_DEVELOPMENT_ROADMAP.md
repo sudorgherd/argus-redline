@@ -386,7 +386,7 @@ These names describe local semantic capability operations and validation behavio
 
 ### Objective
 
-Move beyond `TEST` into a real application protocol and prove a complete computer-to-device transaction.
+Move beyond `TEST` by defining structured REDLINE operations, establishing a developmental Host Protocol `0.1`, and proving a complete computer-to-device transaction without making firmware the owner of host-application meaning.
 
 ### Scope
 
@@ -396,9 +396,13 @@ Move beyond `TEST` into a real application protocol and prove a complete compute
 - Explicit error model.
 - Add `RESPONSE` and, if required, reserved future packet types.
 - Capability-aware operation validation.
-- Define Host Protocol `0.1`.
+- Define developmental Host Protocol `0.1` with an extensible computer-to-Hub boundary.
+- Add explicit Host/device capability negotiation for the behavior implemented in this milestone.
+- Validate the initial Host Protocol codec and streaming parser, including bounded input and recovery after malformed data.
 - Add a simple USB/serial development console.
 - Add compiled local procedure invocation.
+
+Host Protocol `0.1` is an initial development interface, not the final stable Host Protocol. This milestone keeps Host Protocol framing, Wire Protocol packets, structured REDLINE operations, transport status, and host-application meaning as separate concerns. It does not add the general opaque application transport planned for v1.1 or the stable host-service lifecycle planned for v0.12. Its interfaces must avoid assumptions that would prevent those later milestones.
 
 ### Initial operations
 
@@ -435,6 +439,10 @@ PC command
 [ ] Unsupported operations fail predictably
 [ ] Malformed payloads cannot reach hardware handlers
 [ ] Host framing resynchronizes after bad input
+[ ] Host Protocol codec/parser validation covers malformed, truncated, oversized, and concatenated input
+[ ] Host/device capability negotiation reports supported behavior without relying only on firmware-version inference
+[ ] Host Protocol and Wire Protocol versions remain independently reported and documented
+[ ] REDLINE transport status is not represented as an application outcome
 [ ] Full PC-to-Node-to-PC transaction succeeds
 [ ] Existing Wire Protocol version is retained or deliberately incremented
 ```
@@ -669,12 +677,17 @@ Make field devices behave predictably under battery use, restart, radio loss, an
 
 ### Objective
 
-Provide a self-hosted computer-facing control plane without embedding ARGUS assumptions directly into firmware.
+Provide a stable, self-hosted, application-neutral REDLINE service/driver boundary without embedding ARGUS or other host-application assumptions directly into firmware.
 
 ### Scope
 
-- Reference Hub serial service.
-- Stable serial framing and reconnect behavior.
+- Reference REDLINE host service/driver; `redlined` may be used as a candidate implementation name but is not an interface requirement.
+- Stable Host Protocol/service boundary, serial framing, and reconnect behavior.
+- Host/device capability negotiation and compatibility reporting.
+- Host transaction tracking with bounded, documented retention behavior.
+- Authoritative reconciliation of accepted work after device reconnect.
+- Explicit handling of device-reset ambiguity without inventing success or failure.
+- Idempotent Host submission within a documented transaction scope so safe retries cannot create duplicate physical actions.
 - Device registry persistence.
 - Command submission.
 - Response and event ingestion.
@@ -682,26 +695,37 @@ Provide a self-hosted computer-facing control plane without embedding ARGUS assu
 - Capability visibility.
 - Presence and last-seen state.
 - Narrow local API.
+- Bounded support for multiple local clients where required by the narrow local API, without embedding client application schemas in REDLINE.
 - Host Protocol/API `1.0` candidate.
 - Documented ARGUS integration boundary.
+- Stateful Hub simulation for Host Protocol and transaction-lifecycle validation.
+- Virtual serial or equivalent fault injection for corruption, partial I/O, disconnect, reconnect, and device-reset scenarios.
+- Host Protocol/service conformance tests and hardware-in-the-loop validation of the implemented Host/service behavior.
 
 ### Possible service flow
 
 ```text
 ARGUS or local operator tool
 → REDLINE host API
-→ Hub serial service
+→ application-neutral REDLINE host service / driver
 → Hub radio
 → field Node
 ```
+
+The service boundary must remain capable of supporting the general opaque application transport planned for v1.1, but v0.12 does not introduce that complete transport, its fragmentation/reassembly system, or a stable third-party application-transport interface.
 
 ### Release gate
 
 ```text
 [ ] Service reconnects after Hub USB disconnect
 [ ] Serial corruption does not permanently desynchronize framing
+[ ] Reconnect reconciles accepted transactions against authoritative Hub state where that state remains available
+[ ] A Hub reset or lost authoritative record produces an explicit ambiguous/unknown outcome rather than assumed success or failure
 [ ] Commands and events have stable host-side identities
-[ ] Duplicate host submissions are handled safely
+[ ] Duplicate Host submissions are idempotent within the documented transaction scope and do not create duplicate physical actions
+[ ] Host/device capabilities are negotiated and exposed through the service boundary
+[ ] Simulator and virtual-serial fault scenarios cover connection loss, reconnect, reset, stale responses, and duplicate submissions
+[ ] The implemented Host Protocol/service behavior passes hardware-in-the-loop conformance validation
 [ ] Device registry persists across service restart
 [ ] API schemas are documented
 [ ] Firmware can operate without the full ARGUS platform
@@ -709,7 +733,7 @@ ARGUS or local operator tool
 
 ### Explicit non-goal
 
-Full production ARGUS workflow integration is not required for v1.
+Full production ARGUS workflow integration is not required for v1. General opaque application payload transport, substrate fragmentation/reassembly for that transport, and the stable third-party application interface remain v1.1 work.
 
 ---
 
