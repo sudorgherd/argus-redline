@@ -12,6 +12,8 @@ It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** priv
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
+The long-term host and transport boundary is defined in [ARGUS REDLINE — Host Transport Architecture](ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md). In short, applications own application meaning while REDLINE owns transport.
+
 ---
 
 ## The Three Core Functions
@@ -75,6 +77,20 @@ REPORT_EVENT
 ```
 
 Structured messages allow devices and operator software to validate, route, display, store, and act on information consistently.
+
+REDLINE's structured operations and future general application transport serve different purposes.
+
+**REDLINE-defined structured operations** cover device management, transport and system control, capability discovery, and safe execution of approved local hardware behavior. Their semantics are defined by REDLINE because firmware must validate and execute them predictably.
+
+**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.4.0` firmware and is not part of the earlier Host Protocol foundation milestones.
+
+Transport delivery also remains distinct from application outcome:
+
+```text
+application outcome != transport delivery status
+```
+
+REDLINE may be able to confirm that bytes reached a peer without knowing whether the receiving application accepted, displayed, persisted, or acted on them.
 
 ---
 
