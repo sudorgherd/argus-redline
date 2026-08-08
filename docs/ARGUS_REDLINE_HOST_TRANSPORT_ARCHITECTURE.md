@@ -1,7 +1,7 @@
 # ARGUS REDLINE — Host Transport Architecture
 
-**Status:** Stable architectural direction; not an implementation specification  
-**Current implementation baseline:** Firmware `v0.4.0`, Wire Protocol `1`  
+**Status:** Stable architectural direction; not an implementation specification
+**Current implementation baseline:** Firmware `v0.4.0`, Wire Protocol `1`
 **General opaque application transport:** Planned for `v1.1`, not implemented
 
 ## Purpose
