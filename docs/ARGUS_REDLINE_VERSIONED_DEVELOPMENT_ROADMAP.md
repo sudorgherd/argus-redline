@@ -883,8 +883,9 @@ Expand the stable computer-facing REDLINE interface into a general application t
 - Application namespaces or endpoints above the device transport.
 - Multiple local applications sharing one Hub through explicit endpoint registration.
 - Durable host-side queues and restart recovery.
-- Larger logical messages assembled outside embedded firmware.
-- Host-side segmentation and reassembly.
+- General opaque application payload submission without embedding application schemas in REDLINE firmware.
+- Optional host/application-level chunking or streaming when an application divides its own logical objects for application-level reasons.
+- REDLINE substrate-owned transport fragmentation/reassembly when physical packet geometry, MTU, or link constraints require a submitted payload to be divided.
 - Resumable transfers where message class, storage, and link behavior justify them.
 - Delivery classes with documented reliability semantics.
 - Priority, TTL, expiration, and bounded embedded queue behavior.
@@ -898,24 +899,29 @@ Expand the stable computer-facing REDLINE interface into a general application t
 ```text
 embedded REDLINE
   identity, authentication, radio scheduling, bounded queues,
-  retries, and transport state
+  retries, transport state, and physical-transport
+  fragmentation/reassembly
 
 host service
-  larger-message handling, durable queues, segmentation/reassembly,
-  endpoint registration, and local API
+  application-neutral payload submission, durable host queues,
+  endpoint registration, client multiplexing, and local API
 
 application
-  payload meaning, workflow, databases, automation,
+  payload meaning, optional application-object chunking/streaming,
+  workflow, databases, automation,
   permissions, and operator UI
 ```
 
 REDLINE must remain useful to applications other than ARGUS. Embedded firmware does not acquire application databases, workflow engines, human-facing schemas, or ARGUS-specific assumptions.
 
+Host/application contracts must not permanently encode assumptions tied to LoRa frame geometry. The host submits a logical application payload without managing LoRa fragments; REDLINE divides and reassembles it when required by the active physical transport. A future physical transport with different framing or MTU must not require application protocol redesign. Any application-level chunking remains distinct from this transport function.
+
 ### Directional release criteria
 
 - Multiple local applications can register and use isolated namespaces through the host service.
 - Host restart does not silently discard messages whose delivery class promises durability.
-- Large logical messages are segmented/reassembled outside constrained radio handlers.
+- Applications can submit logical payloads without understanding physical-transport fragment geometry.
+- Transport fragmentation/reassembly is bounded, substrate-owned, and validated without moving application meaning into firmware.
 - Transport completion and application acceptance remain distinguishable.
 - Existing direct-network security, bounded queues, and radio timing remain authoritative.
 
