@@ -12,6 +12,8 @@
 #include "heltec_display.h"
 #include "esp32_settings_storage.h"
 #include "hub_settings_integration.h"
+#include "heltec_v4_capabilities.h"
+#include "capability_role_integration.h"
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -47,6 +49,12 @@ DeviceSettings::SettingsManager settingsManager;
 DeviceSettings::Settings currentSettings = DeviceSettings::defaults();
 HubSettingsIntegration::ConfigurationState configurationState;
 HubSettingsIntegration::RequestQueue persistenceRequests;
+HeltecV4Capabilities::ProfileState capabilityState;
+HeltecV4Capabilities::HeltecV4CapabilityHandler capabilityHandler(
+    capabilityState
+);
+DeviceCapabilities::CapabilityDiagnostics capabilityDiagnostics;
+bool capabilityRegistryValid = false;
 
 bool renderingPresentation = false;
 bool radioLedActive = false;
@@ -148,8 +156,12 @@ void renderCurrentPresentation(uint32_t nowMs) {
 void updateLedOutput() {
     digitalWrite(
         LED_BUILTIN,
-        currentSettings.ledEnabled &&
-                (radioLedActive || feedbackLedActive)
+        CapabilityRoleIntegration::ledOutputRequested(
+            currentSettings.ledEnabled,
+            radioLedActive,
+            feedbackLedActive,
+            capabilityState.indicatorRequested
+        )
             ? HIGH
             : LOW
     );
@@ -194,6 +206,10 @@ void serviceButton(uint32_t nowMs) {
     const bool pressed = digitalRead(APPLICATION_BUTTON_PIN) == LOW;
     const DeviceInput::ButtonEvents events =
         applicationButton.update(pressed, nowMs);
+    const DeviceInput::ButtonSnapshot snapshot =
+        applicationButton.snapshot();
+    capabilityState.digitalInputAvailable = snapshot.available;
+    capabilityState.digitalInputActive = snapshot.pressed;
     uiController.handle(events.first, nowMs);
     requestButtonFeedback(events.first, nowMs);
     uiController.handle(events.second, nowMs);
@@ -299,6 +315,55 @@ bool persistenceSafe() {
         operationDone,
         renderingPresentation
     );
+}
+
+bool capabilitySafe(uint32_t nowMs) {
+    CapabilityRoleIntegration::HubSafePointState safePoint;
+    safePoint.runtimeReady = runtimeState.isReady();
+    safePoint.registryValid = capabilityRegistryValid;
+    safePoint.phase = runtimeState.phase();
+    safePoint.awaitingAcknowledgment =
+        transactionState.isAwaitingAcknowledgment();
+    safePoint.retryCount = transactionState.retryCount();
+    safePoint.radioEventPending = operationDone;
+    safePoint.rendering = renderingPresentation;
+    safePoint.persistencePending =
+        persistenceRequests.pending() !=
+        HubSettingsIntegration::Request::NONE;
+    safePoint.transmissionDue =
+        static_cast<int32_t>(nowMs - nextTransmitAt) >= 0;
+    return CapabilityRoleIntegration::hubSafe(safePoint);
+}
+
+DeviceCapabilities::OperationResult executeLocalCapabilityNow(
+    DeviceCapabilities::CapabilityId capabilityId,
+    DeviceCapabilities::Operation operation,
+    const DeviceCapabilities::CapabilityValue& input,
+    const DeviceCapabilities::CallerContext& caller,
+    DeviceCapabilities::InterlockState interlock
+) {
+    const DeviceCapabilities::OperationResult result =
+        CapabilityRoleIntegration::executeLocalCapabilityNow(
+            capabilityRegistryValid,
+            HeltecV4Capabilities::registryView(),
+            capabilityHandler,
+            capabilityId,
+            operation,
+            input,
+            caller,
+            interlock,
+            capabilityDiagnostics,
+            runtimeState
+        );
+    if (
+        result.status == DeviceCapabilities::OperationStatus::OK &&
+        capabilityId ==
+            HeltecV4Capabilities::APPLICATION_INDICATOR_ID &&
+        operation == DeviceCapabilities::Operation::SET
+    ) {
+        updateLedOutput();
+    }
+    return result;
 }
 
 void servicePersistence(uint32_t nowMs) {
@@ -659,7 +724,11 @@ void processAcknowledgment() {
         TransactionEngine::HubTransactionAction::TRANSACTION_SUCCEEDED
     ) {
         runtimeState.incrementSuccessfulTransactions();
-        setHealth(RuntimeState::Health::READY);
+        setHealth(
+            capabilityRegistryValid
+                ? RuntimeState::Health::READY
+                : RuntimeState::Health::DEGRADED
+        );
         recordError(RuntimeState::ErrorClass::NONE);
         setPeerState(DeviceUi::PeerState::REACHABLE);
         showStatus(
@@ -685,6 +754,12 @@ void processAcknowledgment() {
 
 void setup() {
     Serial.begin(115200);
+
+    HeltecV4Capabilities::initializeProfileState(capabilityState);
+    capabilityRegistryValid =
+        DeviceCapabilities::isValidCapabilityRegistry(
+            HeltecV4Capabilities::registryView()
+        );
 
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(Vext, OUTPUT);
@@ -724,7 +799,11 @@ void setup() {
     radio.setDio1Action(setRadioFlag);
 
     runtimeState.setReady(true);
-    setHealth(RuntimeState::Health::READY);
+    setHealth(
+        capabilityRegistryValid
+            ? RuntimeState::Health::READY
+            : RuntimeState::Health::DEGRADED
+    );
     markPresentationChanged();
     serviceUi(static_cast<uint32_t>(millis()));
     showStatus(

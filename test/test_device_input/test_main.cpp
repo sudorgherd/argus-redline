@@ -429,6 +429,69 @@ void testVeryLongThresholdWorksAcrossRollover() {
     );
 }
 
+void testSnapshotIsUnavailableBeforeFirstSampleAndReleasedStartupIsAvailable() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS);
+    DeviceInput::ButtonSnapshot snapshot = button.snapshot();
+    TEST_ASSERT_FALSE(snapshot.available);
+    TEST_ASSERT_FALSE(snapshot.pressed);
+
+    assertNoEvents(button.update(false, 0));
+    snapshot = button.snapshot();
+    TEST_ASSERT_TRUE(snapshot.available);
+    TEST_ASSERT_FALSE(snapshot.pressed);
+}
+
+void testSnapshotTracksOnlyDebouncedStableState() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS);
+    establishReleasedStartup(button);
+    assertNoEvents(button.update(true, 10));
+    TEST_ASSERT_FALSE(button.snapshot().pressed);
+    assertOneEvent(button.update(true, 40), DeviceInput::ButtonEvent::PRESS);
+    TEST_ASSERT_TRUE(button.snapshot().available);
+    TEST_ASSERT_TRUE(button.snapshot().pressed);
+    assertNoEvents(button.update(false, 100));
+    TEST_ASSERT_TRUE(button.snapshot().pressed);
+    assertTwoEvents(
+        button.update(false, 130),
+        DeviceInput::ButtonEvent::RELEASE,
+        DeviceInput::ButtonEvent::SHORT_PRESS
+    );
+    TEST_ASSERT_TRUE(button.snapshot().available);
+    TEST_ASSERT_FALSE(button.snapshot().pressed);
+}
+
+void testStartupHeldSnapshotRemainsUnavailableUntilStableRelease() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS);
+    assertNoEvents(button.update(true, 0));
+    TEST_ASSERT_FALSE(button.snapshot().available);
+    assertNoEvents(button.update(true, 1000));
+    TEST_ASSERT_FALSE(button.snapshot().available);
+    assertNoEvents(button.update(false, 1100));
+    TEST_ASSERT_FALSE(button.snapshot().available);
+    assertNoEvents(button.update(false, 1129));
+    TEST_ASSERT_FALSE(button.snapshot().available);
+    assertNoEvents(button.update(false, 1130));
+    TEST_ASSERT_TRUE(button.snapshot().available);
+    TEST_ASSERT_FALSE(button.snapshot().pressed);
+}
+
+void testSnapshotQueryDoesNotConsumeOrAlterSemanticEvents() {
+    DeviceInput::Button button(DEBOUNCE_MS, LONG_PRESS_MS);
+    establishReleasedStartup(button);
+    assertNoEvents(button.update(true, 10));
+    TEST_ASSERT_FALSE(button.snapshot().pressed);
+    TEST_ASSERT_FALSE(button.snapshot().pressed);
+    assertOneEvent(button.update(true, 40), DeviceInput::ButtonEvent::PRESS);
+    TEST_ASSERT_TRUE(button.snapshot().pressed);
+    assertNoEvents(button.update(false, 100));
+    TEST_ASSERT_TRUE(button.snapshot().pressed);
+    assertTwoEvents(
+        button.update(false, 130),
+        DeviceInput::ButtonEvent::RELEASE,
+        DeviceInput::ButtonEvent::SHORT_PRESS
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -468,5 +531,9 @@ int main(int, char**) {
     RUN_TEST(testStartupHeldSuppressesVeryLongPress);
     RUN_TEST(testReleaseAllowsSecondVeryLongHold);
     RUN_TEST(testVeryLongThresholdWorksAcrossRollover);
+    RUN_TEST(testSnapshotIsUnavailableBeforeFirstSampleAndReleasedStartupIsAvailable);
+    RUN_TEST(testSnapshotTracksOnlyDebouncedStableState);
+    RUN_TEST(testStartupHeldSnapshotRemainsUnavailableUntilStableRelease);
+    RUN_TEST(testSnapshotQueryDoesNotConsumeOrAlterSemanticEvents);
     return UNITY_END();
 }

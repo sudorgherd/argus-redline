@@ -20,6 +20,11 @@ struct ButtonEvents {
     ButtonEvent second = ButtonEvent::NONE;
 };
 
+struct ButtonSnapshot {
+    bool available = false;
+    bool pressed = false;
+};
+
 class Button {
 public:
     Button(
@@ -92,6 +97,13 @@ public:
         }
 
         return events;
+    }
+
+    ButtonSnapshot snapshot() const {
+        ButtonSnapshot result;
+        result.available = initialized_ && armed_;
+        result.pressed = result.available && stablePressed_;
+        return result;
     }
 
 private:
