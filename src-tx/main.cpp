@@ -14,6 +14,10 @@
 #include "hub_settings_integration.h"
 #include "heltec_v4_capabilities.h"
 #include "capability_role_integration.h"
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+#include "capability_characterization.h"
+#include "capability_characterization_arduino.h"
+#endif
 
 SSD1306Wire display(0x3C, SDA_OLED, SCL_OLED);
 
@@ -65,6 +69,17 @@ uint32_t feedbackLedUntilMs = 0;
 unsigned long nextTransmitAt = 0;
 
 TransactionEngine::HubTransactionState transactionState;
+
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+CapabilityCharacterization::AnalogAdapter characterizationAnalog;
+CapabilityCharacterization::Action pendingCharacterizationAction =
+    CapabilityCharacterization::Action::NONE;
+char characterizationCommand[
+    CapabilityCharacterization::COMMAND_BUFFER_CAPACITY
+] = {};
+uint8_t characterizationCommandLength = 0;
+bool characterizationCommandOverflow = false;
+#endif
 
 Protocol::Packet currentCommand = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -379,6 +394,207 @@ DeviceCapabilities::OperationResult executeLocalCapabilityNow(
     }
     return result;
 }
+
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+DeviceCapabilities::CapabilityValue characterizationValue(
+    DeviceCapabilities::ValueType type,
+    uint32_t bits
+) {
+    DeviceCapabilities::CapabilityValue value = {};
+    value.type = type;
+    value.bits = bits;
+    return value;
+}
+
+DeviceCapabilities::CallerContext characterizationCaller(
+    DeviceCapabilities::CallerClass callerClass
+) {
+    DeviceCapabilities::CallerContext caller = {};
+    caller.callerClass = callerClass;
+    return caller;
+}
+
+void printCharacterizationResult(
+    const char* action,
+    const DeviceCapabilities::OperationResult& result,
+    uint32_t durationUs
+) {
+    Serial.print("CAPVAL role=HUB action=");
+    Serial.print(action);
+    Serial.print(" status=");
+    Serial.print(CapabilityCharacterization::statusLabel(result.status));
+    Serial.print(" type=");
+    Serial.print(static_cast<uint8_t>(result.value.type));
+    Serial.print(" value=");
+    Serial.print(result.value.bits);
+    Serial.print(" us=");
+    Serial.println(durationUs);
+}
+
+void performCharacterizationAction(
+    CapabilityCharacterization::Action action
+) {
+    using CapabilityCharacterization::Action;
+    using namespace DeviceCapabilities;
+    if (action == Action::HELP) {
+        Serial.println(
+            "CAPVAL commands=help,caps,digital,indicator-on,indicator-off,analog,deny-remote,deny-interlock,status"
+        );
+        return;
+    }
+    if (action == Action::CAPS) {
+        const CapabilityRegistryView registry =
+            HeltecV4Capabilities::registryView();
+        Serial.print("CAPS count=");
+        Serial.print(capabilityCount(registry));
+        Serial.print(" valid=");
+        Serial.println(capabilityRegistryValid ? 1 : 0);
+        for (uint8_t index = 0; index < capabilityCount(registry); ++index) {
+            CapabilityDescriptor descriptor = {};
+            if (!getCapabilityByIndex(registry, index, descriptor)) continue;
+            Serial.print("CAP index="); Serial.print(index);
+            Serial.print(" id=0x"); Serial.print(descriptor.id, HEX);
+            Serial.print(" class=");
+            Serial.print(static_cast<uint8_t>(descriptor.capabilityClass));
+            Serial.print(" ops="); Serial.println(descriptor.operationFlags);
+        }
+        return;
+    }
+    if (action == Action::STATUS) {
+        Serial.print("CAPVAL role=HUB action=status registry=");
+        Serial.print(capabilityRegistryValid ? 1 : 0);
+        Serial.print(" indicator=");
+        Serial.print(capabilityState.indicatorRequested ? 1 : 0);
+        Serial.print(" digital_available=");
+        Serial.print(capabilityState.digitalInputAvailable ? 1 : 0);
+        Serial.print(" analog_available=");
+        Serial.println(capabilityState.analogInputAvailable ? 1 : 0);
+        return;
+    }
+
+    CapabilityId id = HeltecV4Capabilities::DIGITAL_INPUT_ID;
+    Operation operation = Operation::READ;
+    CapabilityValue input = characterizationValue(ValueType::NONE, 0);
+    CallerClass callerClass = CallerClass::TEST;
+    InterlockState interlock = InterlockState::CLEAR;
+    const char* name = "digital";
+    bool analogAction = false;
+    bool denialAction = false;
+    bool priorIndicator = capabilityState.indicatorRequested;
+
+    if (action == Action::INDICATOR_ON ||
+        action == Action::INDICATOR_OFF) {
+        id = HeltecV4Capabilities::APPLICATION_INDICATOR_ID;
+        operation = Operation::SET;
+        input = characterizationValue(
+            ValueType::BOOLEAN,
+            action == Action::INDICATOR_ON ? 1 : 0
+        );
+        name = action == Action::INDICATOR_ON
+            ? "indicator-on" : "indicator-off";
+    } else if (action == Action::ANALOG_INPUT) {
+        id = HeltecV4Capabilities::ANALOG_INPUT_0_ID;
+        name = "analog";
+        analogAction = true;
+    } else if (action == Action::DENY_REMOTE ||
+               action == Action::DENY_INTERLOCK) {
+        id = HeltecV4Capabilities::APPLICATION_INDICATOR_ID;
+        operation = Operation::SET;
+        input = characterizationValue(
+            ValueType::BOOLEAN,
+            priorIndicator ? 0 : 1
+        );
+        name = action == Action::DENY_REMOTE
+            ? "deny-remote" : "deny-interlock";
+        denialAction = true;
+        if (action == Action::DENY_REMOTE) {
+            callerClass = CallerClass::FUTURE_REMOTE;
+        } else {
+            interlock = InterlockState::ACTIVE;
+        }
+    }
+
+    const uint32_t startedUs = micros();
+    CapabilityCharacterization::AnalogSample sample;
+    if (analogAction) {
+        sample = characterizationAnalog.sampleOnce();
+        capabilityState.analogInputAvailable = sample.available;
+        capabilityState.analogInputNormalized = sample.normalized;
+    }
+    const OperationResult result = executeLocalCapabilityNow(
+        id,
+        operation,
+        input,
+        characterizationCaller(callerClass),
+        interlock
+    );
+    const uint32_t durationUs = micros() - startedUs;
+    if (analogAction) {
+        Serial.print("CAPVAL role=HUB action=analog raw=");
+        Serial.print(sample.raw);
+        Serial.print(" norm=");
+        Serial.print(sample.normalized);
+        Serial.println(" calibrated_mv=UNAVAILABLE");
+    }
+    printCharacterizationResult(name, result, durationUs);
+    if (denialAction) {
+        Serial.print("CAPVAL side_effect_unchanged=");
+        Serial.println(
+            capabilityState.indicatorRequested == priorIndicator ? 1 : 0
+        );
+    }
+}
+
+void serviceCharacterizationInput() {
+    while (Serial.available() > 0) {
+        const char next = static_cast<char>(Serial.read());
+        if (next == '\r') continue;
+        if (next != '\n') {
+            if (characterizationCommandLength + 1 <
+                sizeof(characterizationCommand)) {
+                characterizationCommand[characterizationCommandLength++] = next;
+            } else {
+                characterizationCommandOverflow = true;
+            }
+            continue;
+        }
+
+        characterizationCommand[characterizationCommandLength] = '\0';
+        const CapabilityCharacterization::Action action =
+            characterizationCommandOverflow
+                ? CapabilityCharacterization::Action::NONE
+                : CapabilityCharacterization::classifyCommand(
+                    characterizationCommand
+                );
+        if (action == CapabilityCharacterization::Action::NONE) {
+            Serial.println("CAPVAL command=INVALID");
+        } else if (
+            pendingCharacterizationAction !=
+            CapabilityCharacterization::Action::NONE
+        ) {
+            Serial.println("CAPVAL command=BUSY");
+        } else {
+            pendingCharacterizationAction = action;
+        }
+        characterizationCommandLength = 0;
+        characterizationCommandOverflow = false;
+    }
+}
+
+void serviceCharacterization(uint32_t nowMs) {
+    if (
+        pendingCharacterizationAction ==
+            CapabilityCharacterization::Action::NONE ||
+        !capabilitySafe(nowMs)
+    ) {
+        return;
+    }
+    const CapabilityCharacterization::Action action =
+        pendingCharacterizationAction;
+    pendingCharacterizationAction = CapabilityCharacterization::Action::NONE;
+    performCharacterizationAction(action);
+}
+#endif
 
 void servicePersistence(uint32_t nowMs) {
     if (
@@ -813,6 +1029,12 @@ void setup() {
 
     radio.setDio1Action(setRadioFlag);
 
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+    const bool adcReady = characterizationAnalog.begin();
+    Serial.print("CHARACTERIZATION BUILD role=HUB adc_ready=");
+    Serial.println(adcReady ? 1 : 0);
+#endif
+
     runtimeState.setReady(true);
     setHealth(
         capabilityRegistryValid
@@ -897,7 +1119,15 @@ void loop() {
     serviceButton(nowMs);
     serviceButtonFeedback(nowMs);
 
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+    serviceCharacterizationInput();
+#endif
+
     servicePersistence(nowMs);
+
+#if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+    serviceCharacterization(nowMs);
+#endif
 
     if (runtimeState.isReady()) {
         serviceHubTransport(nowMs);
