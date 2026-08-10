@@ -14,6 +14,22 @@ REDLINE is not a general-purpose chat application, arbitrary remote-control fram
 
 The long-term host and transport boundary is defined in [ARGUS REDLINE — Host Transport Architecture](ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md). In short, applications own application meaning while REDLINE owns transport.
 
+## Current development state
+
+The v0.5.0 capability architecture is implemented. The v0.5.x line remains in
+qualification for its documented validation and any bounded corrective patch
+work. Planning for `v0.6.0 — Structured Operations, Responses, and Host
+Protocol` is prepared, but v0.6.0 implementation has not started; its entry
+gate is successful completion of the required v0.5.x qualification.
+
+REDLINE remains a resilient field communications and capability substrate
+whose current physical transport is LoRa. Firmware owns identity, framing,
+radio mechanics, retries, duplicate handling, bounded hardware capabilities,
+and constrained host-interface validation. Host software owns application
+behavior, workflows, databases, rich UI, automation policy, third-party
+integration, and higher-level interpretation. Those application concerns do
+not move into the MCU as the Host Protocol is introduced.
+
 ---
 
 ## The Three Core Functions

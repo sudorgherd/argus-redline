@@ -6,6 +6,11 @@
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
+**Lifecycle state:** v0.5.0 implementation is complete; required v0.5.x
+qualification remains active. The v0.6.0 implementation brief is prepared,
+but implementation is not started. Begin v0.6.0 implementation only after the
+required v0.5.x qualification completes successfully.
+
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
 
 ---
@@ -314,6 +319,15 @@ GPIO4/ADC1_CH3 physical electrical characterization remains deferred to a
 v0.5.x patch. The registered analog capability remains
 `HARDWARE_UNAVAILABLE` in ordinary v0.5.0 production firmware.
 
+### v0.5.x qualification line
+
+The v0.5.x line remains available for qualification and bounded corrective
+patches before advancement to v0.6.0. Remaining documented qualification
+includes controlled GPIO4/ADC1_CH3 electrical characterization, a formal
+isolated post-action radio exchange qualification, physical startup-held
+reproduction, and extended endurance/fault testing. These items are pending;
+they are not architecture failures and are not represented as passed.
+
 ### Objective
 
 Make REDLINE a reusable off-grid IoT platform without exposing unrestricted hardware control.
@@ -397,6 +411,12 @@ These names describe local semantic capability operations and validation behavio
 
 ## `v0.6.0` — Structured Operations, Responses, and Host Protocol
 
+**Planning status:** Prepared.
+
+**Implementation status:** Not started. Entry requires successful completion
+of the required v0.5.x qualification. The implementation brief assumes that
+gate has been met before its Step 1 begins.
+
 ### Objective
 
 Move beyond `TEST` by defining structured REDLINE operations, establishing a developmental Host Protocol `0.1`, and proving a complete computer-to-device transaction without making firmware the owner of host-application meaning.
@@ -412,7 +432,9 @@ Move beyond `TEST` by defining structured REDLINE operations, establishing a dev
 - Define developmental Host Protocol `0.1` with an extensible computer-to-Hub boundary.
 - Add explicit Host/device capability negotiation for the behavior implemented in this milestone.
 - Validate the initial Host Protocol codec and streaming parser, including bounded input and recovery after malformed data.
-- Add a simple USB/serial development console.
+- Add a bounded machine-readable USB/serial Host Protocol endpoint and a
+  separate minimal reference/test utility; do not turn the firmware endpoint
+  into a human-oriented command shell.
 - Add compiled local procedure invocation.
 
 Host Protocol `0.1` is an initial development interface, not the final stable Host Protocol. This milestone keeps Host Protocol framing, Wire Protocol packets, structured REDLINE operations, transport status, and host-application meaning as separate concerns. It does not add the general opaque application transport planned for v1.1 or the stable host-service lifecycle planned for v0.12. Its interfaces must avoid assumptions that would prevent those later milestones.

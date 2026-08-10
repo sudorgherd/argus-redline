@@ -10,6 +10,12 @@ ARGUS REDLINE is an experimental embedded communications and device-control proj
 
 > **Firmware identifier:** v0.5.0 — bounded capability registry and safe local hardware abstraction, preserving Wire Protocol 1.
 
+**Development status:** the v0.5.0 implementation is complete and the v0.5.x
+line is in qualification. The v0.6.0 implementation plan is prepared, but
+implementation has not started and begins only after required v0.5.x
+qualification completes successfully. Configuration Schema remains `1` and
+the hardware profile remains `HELTEC_V4`.
+
 ## What is ARGUS REDLINE?
 
 ARGUS REDLINE is intended to become a secure, configurable, off-grid platform connecting operators, sensors, mobile devices, and controlled trigger mechanisms through a computer-facing Hub and independently provisioned field Nodes.
@@ -176,6 +182,11 @@ The history includes the original string-based exchange, binary protocol impleme
 ## Development direction
 
 Current firmware uses structured `COMMAND`/`ACK`-style operations. The future architecture adds an application-neutral Host/service boundary while keeping application meaning outside the embedded transport core. General opaque application payload transport is planned for v1.1 and is not implemented today. See [Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md) for the stable responsibility boundaries; it does not define a finished Host Protocol.
+
+The next planned milestone is `v0.6.0 — Structured Operations, Responses, and
+Host Protocol`. Its [implementation brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)
+is planning, not active firmware work. Entry remains gated on successful
+completion of the required v0.5.x qualification.
 
 ### V1 target
 
