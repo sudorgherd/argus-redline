@@ -8,7 +8,7 @@
 
 ARGUS REDLINE is an experimental embedded communications and device-control project developed by **RaveGoat Labs** for the wider **RG Herd** coordination stack.
 
-> **Firmware identifier:** v0.4.0 — persistent validated settings and local configuration recovery, preserving the Protocol v0.1 wire format.
+> **Firmware identifier:** v0.5.0 — bounded capability registry and safe local hardware abstraction, preserving Wire Protocol 1.
 
 ## What is ARGUS REDLINE?
 
@@ -22,11 +22,11 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
 
-The **[v0.4.0 Release Notes](docs/V0.4.0_RELEASE_NOTES.md)** summarize this milestone's changes, compatibility, validation, and known limitations. The [v0.4.0 storage characterization](docs/V0.4.0_STORAGE_CHARACTERIZATION.md) records the dedicated persistence evidence.
+The **[v0.5.0 Development Handoff](docs/ARGUS_REDLINE_v0.5.0_Development_Handoff.md)** summarizes this milestone's changes, compatibility, validation, and known limitations.
 
 ## Implemented now
 
-Firmware v0.4.0 was validated on two physical Heltec WiFi LoRa 32 V4.3 boards before the final identity-only version change from `v0.3.0` to `v0.4.0`.
+Firmware v0.5.0 adds three immutable HELTEC_V4 logical capabilities: application indicator `0x0101`, digital input `0x0201`, and analog input `0x0301`. Digital input and indicator/arbitration behavior were physically validated. Analog sampling remains disabled and reports `HARDWARE_UNAVAILABLE` pending GPIO4/ADC1_CH3 electrical characterization in a v0.5.x patch.
 
 Verified behavior includes:
 
@@ -81,7 +81,7 @@ Current logical device roles:
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies wire-format compatibility. Firmware v0.4.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
+Protocol v0.1 identifies wire-format compatibility. Firmware v0.5.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field |
 |---:|---|
@@ -169,7 +169,7 @@ The first published radio protocol release remains:
 
 - [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.4.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
+The firmware identifier in the source is v0.5.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
 
 The history includes the original string-based exchange, binary protocol implementation, reliability testing, and Protocol v0.1 merge.
 
@@ -188,7 +188,7 @@ Current firmware uses structured `COMMAND`/`ACK`-style operations. The future ar
 
 These bullets describe complete v1 targets. Some radio-transport foundations are implemented now, but the listed v1 capabilities are not complete.
 
-Persistent ordinary device settings are implemented in v0.4.0. Persistent identity, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented.
+Persistent ordinary device settings and the bounded local capability foundation are implemented through v0.5.0. Persistent identity, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented.
 
 ### Exploratory and later concepts
 

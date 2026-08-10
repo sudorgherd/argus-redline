@@ -1,6 +1,6 @@
 # ARGUS REDLINE — What It Is
 
-ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current firmware provides a validated direct radio and device foundation; cryptographic security is planned for later pre-v1 milestones and is not implemented in v0.4.0.
+ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current v0.5.0 firmware provides a validated direct radio/device foundation and bounded local capability abstraction; cryptographic security is planned for later pre-v1 milestones and is not implemented.
 
 It is intended to securely connect operators, sensors, mobile devices, and controlled trigger mechanisms over resilient low-bandwidth radio when cellular service, internet access, or ordinary communications infrastructure is unavailable, unreliable, overloaded, or inappropriate for the task.
 
@@ -8,7 +8,7 @@ At its core, REDLINE provides a controlled communications path between a compute
 
 It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** privacy-first communications and coordination ecosystem.
 
-> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.4.0 packets are not cryptographically authenticated or encrypted.
+> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.5.0 packets are not cryptographically authenticated or encrypted.
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
@@ -82,7 +82,7 @@ REDLINE's structured operations and future general application transport serve d
 
 **REDLINE-defined structured operations** cover device management, transport and system control, capability discovery, and safe execution of approved local hardware behavior. Their semantics are defined by REDLINE because firmware must validate and execute them predictably.
 
-**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.4.0` firmware and is not part of the earlier Host Protocol foundation milestones.
+**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.5.0` firmware and is not part of the earlier Host Protocol foundation milestones.
 
 Transport delivery also remains distinct from application outcome:
 
@@ -376,7 +376,7 @@ Target capabilities:
 
 ## Implemented Now
 
-The current v0.4.0 firmware foundation already provides:
+The current v0.5.0 firmware foundation already provides:
 
 - Two independently buildable Heltec firmware targets
 - Bidirectional LoRa communication at 915 MHz
@@ -398,6 +398,15 @@ The current v0.4.0 firmware foundation already provides:
 - Validated Schema 1 local settings with dual-slot generation selection, fallback repair, and prepared-state-tested factory-reset recovery
 - A bounded nine-item settings editor with role-safe persistence integration on both Hub and Node
 - Physical two-board validation on two Heltec WiFi LoRa 32 V4.3 boards
+- A fixed 20-byte capability descriptor, bounded 16-entry immutable registry,
+  typed local values/results, authorization/interlock gates, and synchronous
+  safe dispatch
+- Three HELTEC_V4 logical capabilities: indicator `0x0101`, digital input
+  `0x0201`, and analog input `0x0301`
+- Role-safe capability diagnostics and a bounded DEVICE-screen CAPS summary
+- Physical digital-input and indicator/arbitration validation; ordinary
+  production analog sampling remains disabled and returns
+  `HARDWARE_UNAVAILABLE` pending GPIO4/ADC1_CH3 characterization in v0.5.x
 
 The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
 

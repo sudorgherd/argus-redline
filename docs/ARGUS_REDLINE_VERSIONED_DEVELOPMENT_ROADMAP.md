@@ -1,8 +1,8 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current completed release:** `v0.4.0`
-**Immediate next release:** `v0.5.0` — Capability Registry and Safe Hardware Abstraction
+**Current completed release:** `v0.5.0`
+**Immediate next release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -300,7 +300,19 @@ Raw GPIO assignments
 
 ## `v0.5.0` — Capability Registry and Safe Hardware Abstraction
 
-**Preparation status:** Implementation brief, proposed capability model, and hardware validation plan prepared; implementation has not started.
+**Status:** Complete.
+
+Completed foundation: fixed pointer-free descriptors, a bounded immutable
+registry, opaque logical IDs, typed values/results, authorization and
+interlock gates, simulated vertical slice, Heltec V4 profile, role-safe
+production integration, capability-owned diagnostics, DeviceInput snapshot and
+LED-arbitration adapters, minimal DEVICE-screen summary, and retained
+characterization tooling. Physical digital input and indicator/arbitration
+behavior were validated on the V4.3 boards.
+
+GPIO4/ADC1_CH3 physical electrical characterization remains deferred to a
+v0.5.x patch. The registered analog capability remains
+`HARDWARE_UNAVAILABLE` in ordinary v0.5.0 production firmware.
 
 ### Objective
 
@@ -363,13 +375,14 @@ These names describe local semantic capability operations and validation behavio
 ### Release gate
 
 ```text
-[ ] Node reports registered capabilities through a bounded local tested API
-[ ] Unsupported capabilities are rejected
-[ ] Local operations use logical IDs rather than arbitrary GPIO numbers
-[ ] Input or sensor data can be returned structurally
-[ ] Approved output can be controlled
-[ ] Local authorization and safety checks can deny an operation
-[ ] Radio and UI remain responsive during hardware operations
+[x] Node reports registered capabilities through a bounded local tested API
+[x] Unsupported capabilities are rejected
+[x] Local operations use logical IDs rather than arbitrary GPIO numbers
+[x] Input or sensor data can be returned structurally
+[x] Approved output can be controlled
+[x] Local authorization and safety checks can deny an operation
+[x] Radio and UI remain responsive during observed hardware operations
+[~] GPIO4 ADC electrical characterization deferred to v0.5.x; production remains fail-closed
 ```
 
 ### Explicit non-goals
