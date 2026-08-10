@@ -2,6 +2,7 @@
 #include <unity.h>
 
 #include "device_capabilities.h"
+#include "simulated_capabilities.h"
 
 namespace {
 
@@ -160,6 +161,45 @@ void assertCanonicalFailure(
     TEST_ASSERT_TRUE(isValidOperationResult(result));
     TEST_ASSERT_TRUE(isCanonicalNoneValue(result.value));
 }
+
+OperationResult dispatchSimulated(
+    SimulatedCapabilities::Handler& handler,
+    CapabilityId id,
+    Operation operation,
+    const CapabilityValue& input,
+    CallerClass callerClass = CallerClass::FIRMWARE_LOCAL,
+    InterlockState interlock = InterlockState::CLEAR
+) {
+    return dispatchCapabilityOperation(
+        SimulatedCapabilities::registryView(),
+        handler,
+        id,
+        operation,
+        input,
+        makeCaller(callerClass),
+        interlock
+    );
+}
+
+struct CountingForwarder : public LocalCapabilityHandler {
+    explicit CountingForwarder(SimulatedCapabilities::Handler& handler)
+        : handler_(handler) {}
+    ~CountingForwarder() = default;
+
+    uint8_t callCount = 0;
+
+    OperationResult execute(
+        const CapabilityDescriptor& descriptor,
+        Operation operation,
+        const CapabilityValue& input
+    ) override {
+        ++callCount;
+        return handler_.execute(descriptor, operation, input);
+    }
+
+private:
+    SimulatedCapabilities::Handler& handler_;
+};
 
 void testCapabilityIdContract() {
     TEST_ASSERT_EQUAL_UINT32(2, sizeof(CapabilityId));
@@ -1688,6 +1728,319 @@ void testDispatchNormalizesNonNoneSuccessfulMutationOutput() {
     assertCanonicalFailure(OperationStatus::OPERATION_FAILED, result);
 }
 
+void testSimulatedRegistryHasExactValidatedDescriptors() {
+    using namespace SimulatedCapabilities;
+    const CapabilityRegistryView registry = registryView();
+    TEST_ASSERT_TRUE(isValidCapabilityRegistry(registry));
+    TEST_ASSERT_EQUAL_UINT8(3, capabilityCount(registry));
+
+    const CapabilityId ids[] = {
+        APPLICATION_INDICATOR_ID,
+        DIGITAL_INPUT_ID,
+        ANALOG_INPUT_0_ID
+    };
+    const CapabilityClass classes[] = {
+        CapabilityClass::INDICATOR_OUTPUT,
+        CapabilityClass::DIGITAL_INPUT,
+        CapabilityClass::ANALOG_INPUT
+    };
+    const uint8_t operationFlags[] = {
+        static_cast<uint8_t>(
+            OPERATION_FLAG_DESCRIBE |
+            OPERATION_FLAG_READ |
+            OPERATION_FLAG_SET
+        ),
+        static_cast<uint8_t>(OPERATION_FLAG_DESCRIBE | OPERATION_FLAG_READ),
+        static_cast<uint8_t>(OPERATION_FLAG_DESCRIBE | OPERATION_FLAG_READ)
+    };
+    const ValueType valueTypes[] = {
+        ValueType::BOOLEAN,
+        ValueType::BOOLEAN,
+        ValueType::NORMALIZED_U16
+    };
+    const UnitCode units[] = {
+        UnitCode::BOOLEAN,
+        UnitCode::BOOLEAN,
+        UnitCode::NORMALIZED
+    };
+    const uint8_t safetyPolicies[] = {
+        MUTATING_INTERLOCK_SAFETY_POLICY_ID,
+        NO_ADDITIONAL_SAFETY_POLICY_ID,
+        NO_ADDITIONAL_SAFETY_POLICY_ID
+    };
+    const uint32_t maximums[] = {1, 1, 0xFFFF};
+
+    for (uint8_t index = 0; index < CAPABILITY_COUNT; ++index) {
+        const CapabilityDescriptor& descriptor = DESCRIPTORS[index];
+        TEST_ASSERT_TRUE(isValidCapabilityDescriptor(descriptor));
+        TEST_ASSERT_EQUAL_HEX16(ids[index], descriptor.id);
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(classes[index]),
+            static_cast<uint8_t>(descriptor.capabilityClass)
+        );
+        TEST_ASSERT_EQUAL_HEX8(operationFlags[index], descriptor.operationFlags);
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(valueTypes[index]),
+            static_cast<uint8_t>(descriptor.valueType)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(units[index]),
+            descriptor.unitCode
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            LOCAL_ONLY_AUTHORIZATION_POLICY_ID,
+            descriptor.authorizationPolicyId
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            safetyPolicies[index],
+            descriptor.safetyPolicyId
+        );
+        TEST_ASSERT_EQUAL_HEX16(METADATA_SIMULATED, descriptor.metadataFlags);
+        TEST_ASSERT_TRUE((descriptor.metadataFlags & METADATA_SIMULATED) != 0);
+        TEST_ASSERT_EQUAL_UINT16(0, descriptor.reserved);
+        TEST_ASSERT_EQUAL_UINT32(0, descriptor.minimumBits);
+        TEST_ASSERT_EQUAL_UINT32(maximums[index], descriptor.maximumBits);
+    }
+}
+
+void testSimulatedEnumerationAndLookupPreserveExactOrder() {
+    using namespace SimulatedCapabilities;
+    const CapabilityRegistryView registry = registryView();
+    const CapabilityId expected[] = {
+        APPLICATION_INDICATOR_ID,
+        DIGITAL_INPUT_ID,
+        ANALOG_INPUT_0_ID
+    };
+    for (uint8_t index = 0; index < CAPABILITY_COUNT; ++index) {
+        CapabilityDescriptor enumerated = {};
+        CapabilityDescriptor found = {};
+        TEST_ASSERT_TRUE(getCapabilityByIndex(registry, index, enumerated));
+        TEST_ASSERT_EQUAL_HEX16(expected[index], enumerated.id);
+        TEST_ASSERT_TRUE(findCapability(registry, expected[index], found));
+        TEST_ASSERT_TRUE(descriptorsEqual(enumerated, found));
+    }
+}
+
+void testSimulatedIndicatorInitialReadUsesFullDispatchOnce() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler simulatedHandler(state);
+    CountingForwarder handler(simulatedHandler);
+    const OperationResult result = dispatchCapabilityOperation(
+        registryView(),
+        handler,
+        APPLICATION_INDICATOR_ID,
+        Operation::READ,
+        makeValue(ValueType::NONE, 0),
+        makeCaller(CallerClass::FIRMWARE_LOCAL),
+        InterlockState::CLEAR
+    );
+    TEST_ASSERT_EQUAL_UINT8(1, handler.callCount);
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(OperationStatus::OK),
+        static_cast<uint8_t>(result.status)
+    );
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(ValueType::BOOLEAN),
+        static_cast<uint8_t>(result.value.type)
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, result.value.bits);
+}
+
+void testSimulatedIndicatorSetAndIndependentReadback() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler handler(state);
+    const uint32_t values[] = {1, 0};
+    for (uint32_t value : values) {
+        OperationResult result = dispatchSimulated(
+            handler,
+            APPLICATION_INDICATOR_ID,
+            Operation::SET,
+            makeValue(ValueType::BOOLEAN, value),
+            CallerClass::UI_LOCAL
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(OperationStatus::OK),
+            static_cast<uint8_t>(result.status)
+        );
+        TEST_ASSERT_TRUE(isCanonicalNoneValue(result.value));
+        TEST_ASSERT_EQUAL(value == 1, state.indicator);
+
+        result = dispatchSimulated(
+            handler,
+            APPLICATION_INDICATOR_ID,
+            Operation::READ,
+            makeValue(ValueType::NONE, 0)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(OperationStatus::OK),
+            static_cast<uint8_t>(result.status)
+        );
+        TEST_ASSERT_EQUAL_UINT32(value, result.value.bits);
+    }
+}
+
+void testSimulatedIndicatorDenialsHaveNoSideEffects() {
+    using namespace SimulatedCapabilities;
+    State state = {true, false, 0};
+    Handler handler(state);
+
+    OperationResult result = dispatchSimulated(
+        handler,
+        APPLICATION_INDICATOR_ID,
+        Operation::SET,
+        makeValue(ValueType::BOOLEAN, 0),
+        CallerClass::FUTURE_REMOTE
+    );
+    assertCanonicalFailure(OperationStatus::UNAUTHORIZED, result);
+    TEST_ASSERT_TRUE(state.indicator);
+
+    result = dispatchSimulated(
+        handler,
+        APPLICATION_INDICATOR_ID,
+        Operation::SET,
+        makeValue(ValueType::BOOLEAN, 0),
+        CallerClass::FIRMWARE_LOCAL,
+        InterlockState::ACTIVE
+    );
+    assertCanonicalFailure(OperationStatus::INTERLOCK_ACTIVE, result);
+    TEST_ASSERT_TRUE(state.indicator);
+
+    result = dispatchSimulated(
+        handler,
+        APPLICATION_INDICATOR_ID,
+        Operation::READ,
+        makeValue(ValueType::NONE, 0),
+        CallerClass::FIRMWARE_LOCAL,
+        InterlockState::ACTIVE
+    );
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(OperationStatus::OK),
+        static_cast<uint8_t>(result.status)
+    );
+    TEST_ASSERT_EQUAL_UINT32(1, result.value.bits);
+}
+
+void testSimulatedDigitalInputReadsProfileOwnedState() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler handler(state);
+    const bool values[] = {false, true};
+    for (bool value : values) {
+        state.digitalInput = value;
+        const OperationResult result = dispatchSimulated(
+            handler,
+            DIGITAL_INPUT_ID,
+            Operation::READ,
+            makeValue(ValueType::NONE, 0)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(OperationStatus::OK),
+            static_cast<uint8_t>(result.status)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(ValueType::BOOLEAN),
+            static_cast<uint8_t>(result.value.type)
+        );
+        TEST_ASSERT_EQUAL_UINT32(value ? 1 : 0, result.value.bits);
+    }
+}
+
+void testSimulatedDigitalInputSetIsUnsupportedAndSideEffectFree() {
+    using namespace SimulatedCapabilities;
+    State state = {false, true, 0};
+    Handler handler(state);
+    const OperationResult result = dispatchSimulated(
+        handler,
+        DIGITAL_INPUT_ID,
+        Operation::SET,
+        makeValue(ValueType::BOOLEAN, 0)
+    );
+    assertCanonicalFailure(OperationStatus::UNSUPPORTED_OPERATION, result);
+    TEST_ASSERT_TRUE(state.digitalInput);
+}
+
+void testSimulatedAnalogInputReturnsExactNormalizedValues() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler handler(state);
+    const uint16_t values[] = {0, 1, 32768, 65535};
+    for (uint16_t value : values) {
+        state.analogInput = value;
+        const OperationResult result = dispatchSimulated(
+            handler,
+            ANALOG_INPUT_0_ID,
+            Operation::READ,
+            makeValue(ValueType::NONE, 0)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(OperationStatus::OK),
+            static_cast<uint8_t>(result.status)
+        );
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(ValueType::NORMALIZED_U16),
+            static_cast<uint8_t>(result.value.type)
+        );
+        TEST_ASSERT_EQUAL_UINT32(value, result.value.bits);
+    }
+}
+
+void testSimulatedIndicatorValidationDenialsPreserveState() {
+    using namespace SimulatedCapabilities;
+    State state = {true, false, 0};
+    Handler handler(state);
+    CapabilityValue malformed = makeValue(ValueType::BOOLEAN, 0);
+    malformed.reserved[0] = 1;
+    const CapabilityValue invalidInputs[] = {
+        makeValue(ValueType::UNSIGNED_32, 0),
+        makeValue(ValueType::BOOLEAN, 2),
+        malformed
+    };
+    for (const CapabilityValue& input : invalidInputs) {
+        const OperationResult result = dispatchSimulated(
+            handler,
+            APPLICATION_INDICATOR_ID,
+            Operation::SET,
+            input
+        );
+        assertCanonicalFailure(OperationStatus::INVALID_VALUE_TYPE, result);
+        TEST_ASSERT_TRUE(state.indicator);
+    }
+
+    OperationResult result = dispatchSimulated(
+        handler,
+        APPLICATION_INDICATOR_ID,
+        Operation::TRIGGER,
+        makeValue(ValueType::NONE, 0)
+    );
+    assertCanonicalFailure(OperationStatus::UNSUPPORTED_OPERATION, result);
+    TEST_ASSERT_TRUE(state.indicator);
+
+    result = dispatchSimulated(
+        handler,
+        0xFFFF,
+        Operation::SET,
+        makeValue(ValueType::BOOLEAN, 0)
+    );
+    assertCanonicalFailure(OperationStatus::CAPABILITY_NOT_FOUND, result);
+    TEST_ASSERT_TRUE(state.indicator);
+}
+
+void testSimulatedHandlerFailsClosedForUnexpectedBinding() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler handler(state);
+    CapabilityDescriptor descriptor = DESCRIPTORS[0];
+    descriptor.id = 0xFFFF;
+    const OperationResult result = handler.execute(
+        descriptor,
+        Operation::READ,
+        makeValue(ValueType::NONE, 0)
+    );
+    assertCanonicalFailure(OperationStatus::OPERATION_FAILED, result);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -1787,5 +2140,15 @@ int main(int, char**) {
     RUN_TEST(testDispatchNormalizesHandlerOwnedBoundaryViolations);
     RUN_TEST(testDispatchNormalizesInvalidSuccessfulReadOutput);
     RUN_TEST(testDispatchNormalizesNonNoneSuccessfulMutationOutput);
+    RUN_TEST(testSimulatedRegistryHasExactValidatedDescriptors);
+    RUN_TEST(testSimulatedEnumerationAndLookupPreserveExactOrder);
+    RUN_TEST(testSimulatedIndicatorInitialReadUsesFullDispatchOnce);
+    RUN_TEST(testSimulatedIndicatorSetAndIndependentReadback);
+    RUN_TEST(testSimulatedIndicatorDenialsHaveNoSideEffects);
+    RUN_TEST(testSimulatedDigitalInputReadsProfileOwnedState);
+    RUN_TEST(testSimulatedDigitalInputSetIsUnsupportedAndSideEffectFree);
+    RUN_TEST(testSimulatedAnalogInputReturnsExactNormalizedValues);
+    RUN_TEST(testSimulatedIndicatorValidationDenialsPreserveState);
+    RUN_TEST(testSimulatedHandlerFailsClosedForUnexpectedBinding);
     return UNITY_END();
 }
