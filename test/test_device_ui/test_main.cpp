@@ -1,4 +1,5 @@
 #include <unity.h>
+#include <string.h>
 
 #include "device_ui.h"
 
@@ -1279,7 +1280,7 @@ void testPeerStateMappingIsRoleConstrained() {
     );
 }
 
-void testDeviceShowsIdentityReadinessHealthAndProfile() {
+void testDeviceRetainsIdentityAndUsesUnavailableCapabilitySummary() {
     DeviceUi::PresentationInput input = makePresentationInput();
     const DeviceUi::PresentationSnapshot ready =
         DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
@@ -1287,13 +1288,128 @@ void testDeviceShowsIdentityReadinessHealthAndProfile() {
     assertRow(ready, 1, "LOCAL", "0x01");
     assertRow(ready, 2, "PEER", "0x10");
     assertRow(ready, 3, "STATUS", "READY");
-    assertRow(ready, 4, "HW", "HELTEC_V4");
+    TEST_ASSERT_EQUAL_UINT8(5, ready.rowCount);
+    assertRow(ready, 4, "CAPS", "--");
     input.ready = false;
     assertRow(
         DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input),
         3,
         "STATUS",
         "NOT READY"
+    );
+}
+
+void testDeviceCapabilitySummaryAvailabilityValidityAndStatusPrecedence() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.capabilitySummaryAvailable = true;
+    input.capabilityRegistryValid = true;
+    input.registeredCapabilityCount = 3;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input),
+        4,
+        "CAPS",
+        "3 READY"
+    );
+
+    input.capabilityLastStatusAvailable = true;
+    input.capabilityLastStatus = DeviceCapabilities::OperationStatus::OK;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input),
+        4,
+        "CAPS",
+        "3 OK"
+    );
+
+    input.capabilityRegistryValid = false;
+    input.capabilityLastStatus = DeviceCapabilities::OperationStatus::BUSY;
+    assertRow(
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input),
+        4,
+        "CAPS",
+        "3 INVALID"
+    );
+}
+
+void testEveryCapabilityStatusUsesApprovedBoundedLabel() {
+    const DeviceCapabilities::OperationStatus statuses[] = {
+        DeviceCapabilities::OperationStatus::OK,
+        DeviceCapabilities::OperationStatus::CAPABILITY_NOT_FOUND,
+        DeviceCapabilities::OperationStatus::UNSUPPORTED_OPERATION,
+        DeviceCapabilities::OperationStatus::INVALID_VALUE_TYPE,
+        DeviceCapabilities::OperationStatus::VALUE_OUT_OF_RANGE,
+        DeviceCapabilities::OperationStatus::UNAUTHORIZED,
+        DeviceCapabilities::OperationStatus::INTERLOCK_ACTIVE,
+        DeviceCapabilities::OperationStatus::HARDWARE_UNAVAILABLE,
+        DeviceCapabilities::OperationStatus::OPERATION_FAILED,
+        DeviceCapabilities::OperationStatus::BUSY,
+        DeviceCapabilities::OperationStatus::INVALID_DESCRIPTOR,
+        static_cast<DeviceCapabilities::OperationStatus>(0xFF)
+    };
+    const char* values[] = {
+        "3 OK",
+        "3 NOT FOUND",
+        "3 UNSUPPORTED",
+        "3 BAD TYPE",
+        "3 OUT RANGE",
+        "3 DENIED",
+        "3 INTERLOCK",
+        "3 HW UNAVAIL",
+        "3 FAILED",
+        "3 BUSY",
+        "3 BAD DESC",
+        "3 UNKNOWN"
+    };
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.capabilitySummaryAvailable = true;
+    input.capabilityRegistryValid = true;
+    input.registeredCapabilityCount = 3;
+    input.capabilityLastStatusAvailable = true;
+
+    for (uint8_t index = 0; index < 12; ++index) {
+        input.capabilityLastStatus = statuses[index];
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+        assertRow(snapshot, 4, "CAPS", values[index]);
+        TEST_ASSERT_LESS_THAN(
+            DeviceUi::PRESENTATION_VALUE_CAPACITY,
+            strlen(snapshot.rows[4].value)
+        );
+        TEST_ASSERT_EQUAL_CHAR(
+            '\0',
+            snapshot.rows[4].value[
+                DeviceUi::PRESENTATION_VALUE_CAPACITY - 1
+            ]
+        );
+    }
+}
+
+void testCapabilitySummaryCountExtremesFitWithoutTruncation() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.capabilitySummaryAvailable = true;
+    input.capabilityRegistryValid = true;
+    const uint8_t counts[] = {0, 3, 16};
+    const char* readyValues[] = {"0 READY", "3 READY", "16 READY"};
+    for (uint8_t index = 0; index < 3; ++index) {
+        input.registeredCapabilityCount = counts[index];
+        const DeviceUi::PresentationSnapshot snapshot =
+            DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+        assertRow(snapshot, 4, "CAPS", readyValues[index]);
+    }
+
+    input.registeredCapabilityCount = 16;
+    input.capabilityLastStatusAvailable = true;
+    input.capabilityLastStatus =
+        DeviceCapabilities::OperationStatus::INTERLOCK_ACTIVE;
+    DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+    assertRow(snapshot, 4, "CAPS", "16 INTERLOCK");
+    input.capabilityLastStatus =
+        DeviceCapabilities::OperationStatus::UNSUPPORTED_OPERATION;
+    snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::DEVICE, input);
+    assertRow(snapshot, 4, "CAPS", "16 UNSUPPORTED");
+    TEST_ASSERT_LESS_THAN(
+        DeviceUi::PRESENTATION_VALUE_CAPACITY,
+        strlen(snapshot.rows[4].value)
     );
 }
 
@@ -1608,7 +1724,10 @@ int main(int, char**) {
     RUN_TEST(testRadioUnavailableMetricsAreExplicit);
     RUN_TEST(testAllRuntimePhasesAndUnknownFallbackMapDeterministically);
     RUN_TEST(testPeerStateMappingIsRoleConstrained);
-    RUN_TEST(testDeviceShowsIdentityReadinessHealthAndProfile);
+    RUN_TEST(testDeviceRetainsIdentityAndUsesUnavailableCapabilitySummary);
+    RUN_TEST(testDeviceCapabilitySummaryAvailabilityValidityAndStatusPrecedence);
+    RUN_TEST(testEveryCapabilityStatusUsesApprovedBoundedLabel);
+    RUN_TEST(testCapabilitySummaryCountExtremesFitWithoutTruncation);
     RUN_TEST(testUnavailableLastPacketShowsNoPacketOnly);
     RUN_TEST(testHubAckLastPacketRetainsAllFieldsAndStatus);
     RUN_TEST(testNodeCommandLastPacketUsesUnavailableAckStatus);

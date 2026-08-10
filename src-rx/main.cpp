@@ -52,6 +52,7 @@ HeltecV4Capabilities::HeltecV4CapabilityHandler capabilityHandler(
 );
 DeviceCapabilities::CapabilityDiagnostics capabilityDiagnostics;
 bool capabilityRegistryValid = false;
+bool capabilitySummaryAvailable = false;
 
 bool renderingPresentation = false;
 bool radioLedActive = false;
@@ -130,6 +131,18 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.configurationRepairPending = configurationState.repairPending;
     input.unsupportedConfigurationPreserved =
         configurationState.unsupportedPreserved;
+    input.capabilitySummaryAvailable = capabilitySummaryAvailable;
+    input.capabilityRegistryValid = capabilityRegistryValid;
+    input.registeredCapabilityCount = DeviceCapabilities::capabilityCount(
+        HeltecV4Capabilities::registryView()
+    );
+    if (runtimeState.hasCapabilityDiagnostics()) {
+        const DeviceCapabilities::CapabilityDiagnosticsSnapshot& diagnostics =
+            runtimeState.capabilityDiagnostics();
+        input.capabilityLastStatusAvailable =
+            diagnostics.lastStatusAvailable == 1;
+        input.capabilityLastStatus = diagnostics.lastStatus;
+    }
     return input;
 }
 
@@ -254,6 +267,7 @@ DeviceCapabilities::OperationResult executeLocalCapabilityNow(
             capabilityDiagnostics,
             runtimeState
         );
+    markPresentationChanged();
     if (
         result.status == DeviceCapabilities::OperationStatus::OK &&
         capabilityId ==
@@ -743,6 +757,7 @@ void setup() {
         DeviceCapabilities::isValidCapabilityRegistry(
             HeltecV4Capabilities::registryView()
         );
+    capabilitySummaryAvailable = true;
 
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(Vext, OUTPUT);

@@ -127,6 +127,12 @@ struct PresentationInput {
     uint32_t configurationGeneration = 0;
     bool configurationRepairPending = false;
     bool unsupportedConfigurationPreserved = false;
+    bool capabilitySummaryAvailable = false;
+    bool capabilityRegistryValid = false;
+    uint8_t registeredCapabilityCount = 0;
+    bool capabilityLastStatusAvailable = false;
+    DeviceCapabilities::OperationStatus capabilityLastStatus =
+        DeviceCapabilities::OperationStatus::OK;
 };
 
 struct EditorPresentationInput {
@@ -414,6 +420,50 @@ inline void formatPair(
     );
 }
 
+inline const char* capabilityStatusLabel(
+    DeviceCapabilities::OperationStatus status
+) {
+    using DeviceCapabilities::OperationStatus;
+    switch (status) {
+        case OperationStatus::OK: return "OK";
+        case OperationStatus::CAPABILITY_NOT_FOUND: return "NOT FOUND";
+        case OperationStatus::UNSUPPORTED_OPERATION: return "UNSUPPORTED";
+        case OperationStatus::INVALID_VALUE_TYPE: return "BAD TYPE";
+        case OperationStatus::VALUE_OUT_OF_RANGE: return "OUT RANGE";
+        case OperationStatus::UNAUTHORIZED: return "DENIED";
+        case OperationStatus::INTERLOCK_ACTIVE: return "INTERLOCK";
+        case OperationStatus::HARDWARE_UNAVAILABLE: return "HW UNAVAIL";
+        case OperationStatus::OPERATION_FAILED: return "FAILED";
+        case OperationStatus::BUSY: return "BUSY";
+        case OperationStatus::INVALID_DESCRIPTOR: return "BAD DESC";
+    }
+    return "UNKNOWN";
+}
+
+inline void formatCapabilitySummary(
+    char* output,
+    size_t capacity,
+    const PresentationInput& input
+) {
+    if (!input.capabilitySummaryAvailable) {
+        snprintf(output, capacity, "--");
+        return;
+    }
+
+    const char* label = !input.capabilityRegistryValid
+        ? "INVALID"
+        : input.capabilityLastStatusAvailable
+            ? capabilityStatusLabel(input.capabilityLastStatus)
+            : "READY";
+    snprintf(
+        output,
+        capacity,
+        "%u %s",
+        input.registeredCapabilityCount,
+        label
+    );
+}
+
 }  // namespace PresentationDetail
 
 inline PresentationSnapshot buildPresentation(
@@ -460,7 +510,8 @@ inline PresentationSnapshot buildPresentation(
                 "STATUS",
                 input.ready ? healthLabel(input.health) : "NOT READY"
             );
-            addRow(snapshot, "HW", input.hardwareProfile);
+            formatCapabilitySummary(value, sizeof(value), input);
+            addRow(snapshot, "CAPS", value);
             break;
 
         case Screen::LAST_PACKET: {
