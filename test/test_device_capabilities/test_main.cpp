@@ -2041,6 +2041,303 @@ void testSimulatedHandlerFailsClosedForUnexpectedBinding() {
     assertCanonicalFailure(OperationStatus::OPERATION_FAILED, result);
 }
 
+void assertDiagnosticCountersAreZero(
+    const CapabilityDiagnosticCounters& counters
+) {
+    TEST_ASSERT_EQUAL_UINT32(0, counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.acceptedOperations);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.authorizationDenials);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.unsupportedOperations);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.validationFailures);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.interlockDenials);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.busyOutcomes);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.hardwareFailures);
+}
+
+void testCapabilityDiagnosticsLayoutAndCanonicalSnapshot() {
+    TEST_ASSERT_EQUAL_UINT32(32, sizeof(CapabilityDiagnosticCounters));
+    TEST_ASSERT_EQUAL_UINT32(36, sizeof(CapabilityDiagnosticsSnapshot));
+    CapabilityDiagnostics diagnostics;
+    const CapabilityDiagnosticsSnapshot snapshot = diagnostics.snapshot();
+    assertDiagnosticCountersAreZero(snapshot.counters);
+    TEST_ASSERT_EQUAL_UINT8(0, snapshot.lastStatusAvailable);
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(OperationStatus::OK),
+        static_cast<uint8_t>(snapshot.lastStatus)
+    );
+    TEST_ASSERT_EQUAL_UINT8(0, snapshot.reserved[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, snapshot.reserved[1]);
+    TEST_ASSERT_TRUE(isValidCapabilityDiagnosticsSnapshot(snapshot));
+
+    TEST_ASSERT_TRUE(diagnostics.recordOutcome(OperationStatus::OK));
+    TEST_ASSERT_EQUAL_UINT32(0, snapshot.counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT8(0, snapshot.lastStatusAvailable);
+}
+
+void testCapabilityDiagnosticsSnapshotValidationAndNoOpRecording() {
+    CapabilityDiagnostics diagnostics;
+    const CapabilityDiagnosticsSnapshot original = diagnostics.snapshot();
+    TEST_ASSERT_TRUE(diagnostics.recordOutcome(OperationStatus::BUSY, 0));
+    TEST_ASSERT_FALSE(diagnostics.recordOutcome(
+        static_cast<OperationStatus>(0xFF)
+    ));
+    const CapabilityDiagnosticsSnapshot unchanged = diagnostics.snapshot();
+    TEST_ASSERT_EQUAL_UINT32(0, unchanged.counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT8(0, unchanged.lastStatusAvailable);
+
+    CapabilityDiagnosticsSnapshot invalid = original;
+    invalid.lastStatusAvailable = 2;
+    TEST_ASSERT_FALSE(isValidCapabilityDiagnosticsSnapshot(invalid));
+    invalid = original;
+    invalid.lastStatus = OperationStatus::BUSY;
+    TEST_ASSERT_FALSE(isValidCapabilityDiagnosticsSnapshot(invalid));
+    invalid = original;
+    invalid.lastStatusAvailable = 1;
+    invalid.lastStatus = static_cast<OperationStatus>(0xFF);
+    TEST_ASSERT_FALSE(isValidCapabilityDiagnosticsSnapshot(invalid));
+    invalid = original;
+    invalid.reserved[0] = 1;
+    TEST_ASSERT_FALSE(isValidCapabilityDiagnosticsSnapshot(invalid));
+    invalid = original;
+    invalid.reserved[1] = 1;
+    TEST_ASSERT_FALSE(isValidCapabilityDiagnosticsSnapshot(invalid));
+    invalid = original;
+    invalid.counters.hardwareFailures = UINT32_MAX;
+    TEST_ASSERT_TRUE(isValidCapabilityDiagnosticsSnapshot(invalid));
+}
+
+void testCapabilityDiagnosticsOutcomeMapping() {
+    struct Expected {
+        OperationStatus status;
+        uint32_t lookup;
+        uint32_t accepted;
+        uint32_t authorization;
+        uint32_t unsupported;
+        uint32_t validation;
+        uint32_t interlock;
+        uint32_t busy;
+        uint32_t hardware;
+    };
+    const Expected cases[] = {
+        {OperationStatus::OK, 1, 1, 0, 0, 0, 0, 0, 0},
+        {OperationStatus::CAPABILITY_NOT_FOUND, 1, 0, 0, 0, 0, 0, 0, 0},
+        {OperationStatus::UNSUPPORTED_OPERATION, 1, 0, 0, 1, 0, 0, 0, 0},
+        {OperationStatus::INVALID_VALUE_TYPE, 1, 0, 0, 0, 1, 0, 0, 0},
+        {OperationStatus::VALUE_OUT_OF_RANGE, 1, 0, 0, 0, 1, 0, 0, 0},
+        {OperationStatus::UNAUTHORIZED, 1, 0, 1, 0, 0, 0, 0, 0},
+        {OperationStatus::INTERLOCK_ACTIVE, 1, 0, 0, 0, 0, 1, 0, 0},
+        {OperationStatus::HARDWARE_UNAVAILABLE, 1, 1, 0, 0, 0, 0, 0, 1},
+        {OperationStatus::OPERATION_FAILED, 1, 1, 0, 0, 0, 0, 0, 1},
+        {OperationStatus::BUSY, 1, 1, 0, 0, 0, 0, 1, 0},
+        {OperationStatus::INVALID_DESCRIPTOR, 0, 0, 0, 0, 1, 0, 0, 0}
+    };
+    for (const Expected& expected : cases) {
+        CapabilityDiagnostics diagnostics;
+        TEST_ASSERT_TRUE(diagnostics.recordOutcome(expected.status));
+        const CapabilityDiagnosticsSnapshot snapshot = diagnostics.snapshot();
+        TEST_ASSERT_EQUAL_UINT32(expected.lookup, snapshot.counters.lookupAttempts);
+        TEST_ASSERT_EQUAL_UINT32(expected.accepted, snapshot.counters.acceptedOperations);
+        TEST_ASSERT_EQUAL_UINT32(expected.authorization, snapshot.counters.authorizationDenials);
+        TEST_ASSERT_EQUAL_UINT32(expected.unsupported, snapshot.counters.unsupportedOperations);
+        TEST_ASSERT_EQUAL_UINT32(expected.validation, snapshot.counters.validationFailures);
+        TEST_ASSERT_EQUAL_UINT32(expected.interlock, snapshot.counters.interlockDenials);
+        TEST_ASSERT_EQUAL_UINT32(expected.busy, snapshot.counters.busyOutcomes);
+        TEST_ASSERT_EQUAL_UINT32(expected.hardware, snapshot.counters.hardwareFailures);
+        TEST_ASSERT_EQUAL_UINT8(1, snapshot.lastStatusAvailable);
+        TEST_ASSERT_EQUAL_HEX8(
+            static_cast<uint8_t>(expected.status),
+            static_cast<uint8_t>(snapshot.lastStatus)
+        );
+    }
+}
+
+void testCapabilityDiagnosticsEveryCounterSaturates() {
+    const OperationStatus statuses[] = {
+        OperationStatus::OK,
+        OperationStatus::UNAUTHORIZED,
+        OperationStatus::UNSUPPORTED_OPERATION,
+        OperationStatus::INVALID_VALUE_TYPE,
+        OperationStatus::INTERLOCK_ACTIVE,
+        OperationStatus::BUSY,
+        OperationStatus::HARDWARE_UNAVAILABLE
+    };
+    for (OperationStatus status : statuses) {
+        CapabilityDiagnostics diagnostics;
+        TEST_ASSERT_TRUE(diagnostics.recordOutcome(status, UINT32_MAX - 1));
+        TEST_ASSERT_TRUE(diagnostics.recordOutcome(status, 2));
+        TEST_ASSERT_TRUE(diagnostics.recordOutcome(status));
+        const CapabilityDiagnosticCounters& counters = diagnostics.snapshot().counters;
+        TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.lookupAttempts);
+        switch (status) {
+            case OperationStatus::OK:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.acceptedOperations);
+                break;
+            case OperationStatus::UNAUTHORIZED:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.authorizationDenials);
+                break;
+            case OperationStatus::UNSUPPORTED_OPERATION:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.unsupportedOperations);
+                break;
+            case OperationStatus::INVALID_VALUE_TYPE:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.validationFailures);
+                break;
+            case OperationStatus::INTERLOCK_ACTIVE:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.interlockDenials);
+                break;
+            case OperationStatus::BUSY:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.acceptedOperations);
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.busyOutcomes);
+                break;
+            case OperationStatus::HARDWARE_UNAVAILABLE:
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.acceptedOperations);
+                TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, counters.hardwareFailures);
+                break;
+            default:
+                TEST_FAIL_MESSAGE("unexpected saturation test status");
+        }
+    }
+}
+
+OperationResult dispatchObservedSimulated(
+    SimulatedCapabilities::Handler& handler,
+    CapabilityDiagnostics& diagnostics,
+    CapabilityId id,
+    Operation operation,
+    const CapabilityValue& input,
+    CallerClass callerClass = CallerClass::FIRMWARE_LOCAL,
+    InterlockState interlock = InterlockState::CLEAR
+) {
+    return dispatchCapabilityOperationObserved(
+        SimulatedCapabilities::registryView(), handler, id, operation, input,
+        makeCaller(callerClass), interlock, diagnostics
+    );
+}
+
+void testObservedDispatchClassifiesSimulatedOutcomes() {
+    using namespace SimulatedCapabilities;
+    State state = {};
+    Handler handler(state);
+    CapabilityDiagnostics diagnostics;
+
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::OK),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            APPLICATION_INDICATOR_ID, Operation::READ,
+            makeValue(ValueType::NONE, 0)).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::OK),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            APPLICATION_INDICATOR_ID, Operation::SET,
+            makeValue(ValueType::BOOLEAN, 1)).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::CAPABILITY_NOT_FOUND),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            0xFFFF, Operation::READ, makeValue(ValueType::NONE, 0)).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::UNSUPPORTED_OPERATION),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            DIGITAL_INPUT_ID, Operation::SET,
+            makeValue(ValueType::BOOLEAN, 1)).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::INVALID_VALUE_TYPE),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            APPLICATION_INDICATOR_ID, Operation::SET,
+            makeValue(ValueType::UNSIGNED_32, 1)).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::UNAUTHORIZED),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            APPLICATION_INDICATOR_ID, Operation::SET,
+            makeValue(ValueType::BOOLEAN, 0), CallerClass::FUTURE_REMOTE).status));
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::INTERLOCK_ACTIVE),
+        static_cast<uint8_t>(dispatchObservedSimulated(handler, diagnostics,
+            APPLICATION_INDICATOR_ID, Operation::SET,
+            makeValue(ValueType::BOOLEAN, 0), CallerClass::FIRMWARE_LOCAL,
+            InterlockState::ACTIVE).status));
+
+    const CapabilityDiagnosticsSnapshot snapshot = diagnostics.snapshot();
+    TEST_ASSERT_EQUAL_UINT32(7, snapshot.counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT32(2, snapshot.counters.acceptedOperations);
+    TEST_ASSERT_EQUAL_UINT32(1, snapshot.counters.authorizationDenials);
+    TEST_ASSERT_EQUAL_UINT32(1, snapshot.counters.unsupportedOperations);
+    TEST_ASSERT_EQUAL_UINT32(1, snapshot.counters.validationFailures);
+    TEST_ASSERT_EQUAL_UINT32(1, snapshot.counters.interlockDenials);
+    TEST_ASSERT_EQUAL_UINT32(0, snapshot.counters.busyOutcomes);
+    TEST_ASSERT_EQUAL_UINT32(0, snapshot.counters.hardwareFailures);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(OperationStatus::INTERLOCK_ACTIVE),
+        static_cast<uint8_t>(snapshot.lastStatus));
+}
+
+void testObservedDispatchRuntimeOutcomesAndInvalidRegistry() {
+    CapabilityDescriptor descriptor = makeIndicatorDescriptor(true);
+    CapabilityRegistryView registry = {&descriptor, 1};
+    RecordingHandler handler;
+    CapabilityDiagnostics diagnostics;
+    const OperationStatus statuses[] = {
+        OperationStatus::BUSY,
+        OperationStatus::HARDWARE_UNAVAILABLE,
+        OperationStatus::OPERATION_FAILED
+    };
+    for (OperationStatus status : statuses) {
+        handler.configuredResult = makeResult(status, makeValue(ValueType::NONE, 0));
+        const OperationResult result = dispatchCapabilityOperationObserved(
+            registry, handler, descriptor.id, Operation::READ,
+            makeValue(ValueType::NONE, 0), makeCaller(CallerClass::TEST),
+            InterlockState::CLEAR, diagnostics
+        );
+        TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(status),
+            static_cast<uint8_t>(result.status));
+    }
+    CapabilityRegistryView invalidRegistry = {nullptr, 1};
+    const OperationResult invalid = dispatchCapabilityOperationObserved(
+        invalidRegistry, handler, descriptor.id, Operation::READ,
+        makeValue(ValueType::NONE, 0), makeCaller(CallerClass::TEST),
+        InterlockState::CLEAR, diagnostics
+    );
+    assertCanonicalFailure(OperationStatus::INVALID_DESCRIPTOR, invalid);
+    TEST_ASSERT_EQUAL_UINT8(3, handler.callCount);
+    const CapabilityDiagnosticCounters& counters = diagnostics.snapshot().counters;
+    TEST_ASSERT_EQUAL_UINT32(3, counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT32(3, counters.acceptedOperations);
+    TEST_ASSERT_EQUAL_UINT32(1, counters.busyOutcomes);
+    TEST_ASSERT_EQUAL_UINT32(2, counters.hardwareFailures);
+    TEST_ASSERT_EQUAL_UINT32(1, counters.validationFailures);
+}
+
+void testObservedDispatchReturnsExactPureDispatchResult() {
+    using namespace SimulatedCapabilities;
+    State pureState = {};
+    State observedState = {};
+    Handler pureHandler(pureState);
+    Handler observedHandler(observedState);
+    CapabilityDiagnostics diagnostics;
+    const CapabilityValue input = makeValue(ValueType::BOOLEAN, 1);
+    const CallerContext caller = makeCaller(CallerClass::UI_LOCAL);
+
+    const OperationResult pure = dispatchCapabilityOperation(
+        registryView(), pureHandler, APPLICATION_INDICATOR_ID, Operation::SET,
+        input, caller, InterlockState::CLEAR
+    );
+    const OperationResult observed = dispatchCapabilityOperationObserved(
+        registryView(), observedHandler, APPLICATION_INDICATOR_ID,
+        Operation::SET, input, caller, InterlockState::CLEAR, diagnostics
+    );
+
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(pure.status),
+        static_cast<uint8_t>(observed.status)
+    );
+    TEST_ASSERT_EQUAL_UINT8(pure.reserved[0], observed.reserved[0]);
+    TEST_ASSERT_EQUAL_UINT8(pure.reserved[1], observed.reserved[1]);
+    TEST_ASSERT_EQUAL_UINT8(pure.reserved[2], observed.reserved[2]);
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(pure.value.type),
+        static_cast<uint8_t>(observed.value.type)
+    );
+    TEST_ASSERT_EQUAL_UINT32(pure.value.bits, observed.value.bits);
+    TEST_ASSERT_EQUAL_UINT8(pure.value.reserved[0], observed.value.reserved[0]);
+    TEST_ASSERT_EQUAL_UINT8(pure.value.reserved[1], observed.value.reserved[1]);
+    TEST_ASSERT_EQUAL_UINT8(pure.value.reserved[2], observed.value.reserved[2]);
+    TEST_ASSERT_EQUAL(pureState.indicator, observedState.indicator);
+    TEST_ASSERT_EQUAL_UINT32(
+        1,
+        diagnostics.snapshot().counters.acceptedOperations
+    );
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -2150,5 +2447,12 @@ int main(int, char**) {
     RUN_TEST(testSimulatedAnalogInputReturnsExactNormalizedValues);
     RUN_TEST(testSimulatedIndicatorValidationDenialsPreserveState);
     RUN_TEST(testSimulatedHandlerFailsClosedForUnexpectedBinding);
+    RUN_TEST(testCapabilityDiagnosticsLayoutAndCanonicalSnapshot);
+    RUN_TEST(testCapabilityDiagnosticsSnapshotValidationAndNoOpRecording);
+    RUN_TEST(testCapabilityDiagnosticsOutcomeMapping);
+    RUN_TEST(testCapabilityDiagnosticsEveryCounterSaturates);
+    RUN_TEST(testObservedDispatchClassifiesSimulatedOutcomes);
+    RUN_TEST(testObservedDispatchRuntimeOutcomesAndInvalidRegistry);
+    RUN_TEST(testObservedDispatchReturnsExactPureDispatchResult);
     return UNITY_END();
 }

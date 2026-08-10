@@ -483,6 +483,191 @@ void testRuntimeDiagnosticsDoNotModifyTransactionAuthorities() {
     TEST_ASSERT_FALSE(duplicateTracker.isDuplicate(command));
 }
 
+void testCapabilitySummaryStartsCanonicalAndUnavailable() {
+    const RuntimeState::State state(
+        RuntimeState::DeviceRole::HUB,
+        HUB_ID,
+        NODE_ID
+    );
+    TEST_ASSERT_FALSE(state.hasCapabilityDiagnostics());
+    const DeviceCapabilities::CapabilityDiagnosticsSnapshot& snapshot =
+        state.capabilityDiagnostics();
+    TEST_ASSERT_TRUE(
+        DeviceCapabilities::isValidCapabilityDiagnosticsSnapshot(snapshot)
+    );
+    TEST_ASSERT_EQUAL_UINT32(0, snapshot.counters.lookupAttempts);
+    TEST_ASSERT_EQUAL_UINT32(0, snapshot.counters.acceptedOperations);
+    TEST_ASSERT_EQUAL_UINT8(0, snapshot.lastStatusAvailable);
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(DeviceCapabilities::OperationStatus::OK),
+        static_cast<uint8_t>(snapshot.lastStatus)
+    );
+}
+
+void testCapabilitySummaryCopiesAndReplacesExplicitly() {
+    RuntimeState::State state(
+        RuntimeState::DeviceRole::HUB,
+        HUB_ID,
+        NODE_ID
+    );
+    DeviceCapabilities::CapabilityDiagnostics source;
+    TEST_ASSERT_TRUE(source.recordOutcome(
+        DeviceCapabilities::OperationStatus::OK
+    ));
+    const DeviceCapabilities::CapabilityDiagnosticsSnapshot first =
+        source.snapshot();
+    TEST_ASSERT_TRUE(state.updateCapabilityDiagnostics(first));
+    TEST_ASSERT_TRUE(state.hasCapabilityDiagnostics());
+    TEST_ASSERT_EQUAL_UINT32(
+        1,
+        state.capabilityDiagnostics().counters.acceptedOperations
+    );
+
+    TEST_ASSERT_TRUE(source.recordOutcome(
+        DeviceCapabilities::OperationStatus::UNAUTHORIZED
+    ));
+    TEST_ASSERT_EQUAL_UINT32(
+        1,
+        state.capabilityDiagnostics().counters.lookupAttempts
+    );
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(DeviceCapabilities::OperationStatus::OK),
+        static_cast<uint8_t>(state.capabilityDiagnostics().lastStatus)
+    );
+
+    const DeviceCapabilities::CapabilityDiagnosticsSnapshot second =
+        source.snapshot();
+    TEST_ASSERT_TRUE(state.updateCapabilityDiagnostics(second));
+    TEST_ASSERT_EQUAL_UINT32(
+        2,
+        state.capabilityDiagnostics().counters.lookupAttempts
+    );
+    TEST_ASSERT_EQUAL_UINT32(
+        1,
+        state.capabilityDiagnostics().counters.authorizationDenials
+    );
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(DeviceCapabilities::OperationStatus::UNAUTHORIZED),
+        static_cast<uint8_t>(state.capabilityDiagnostics().lastStatus)
+    );
+}
+
+void testInvalidCapabilitySummaryPreservesPriorCopy() {
+    RuntimeState::State state(
+        RuntimeState::DeviceRole::NODE,
+        NODE_ID,
+        HUB_ID
+    );
+    DeviceCapabilities::CapabilityDiagnostics source;
+    DeviceCapabilities::CapabilityDiagnosticsSnapshot initiallyInvalid =
+        source.snapshot();
+    initiallyInvalid.lastStatusAvailable = 2;
+    TEST_ASSERT_FALSE(state.updateCapabilityDiagnostics(initiallyInvalid));
+    TEST_ASSERT_FALSE(state.hasCapabilityDiagnostics());
+    TEST_ASSERT_EQUAL_UINT8(
+        0,
+        state.capabilityDiagnostics().lastStatusAvailable
+    );
+
+    TEST_ASSERT_TRUE(source.recordOutcome(
+        DeviceCapabilities::OperationStatus::BUSY
+    ));
+    TEST_ASSERT_TRUE(state.updateCapabilityDiagnostics(source.snapshot()));
+    const DeviceCapabilities::CapabilityDiagnosticsSnapshot before =
+        state.capabilityDiagnostics();
+
+    DeviceCapabilities::CapabilityDiagnosticsSnapshot invalid = before;
+    invalid.reserved[1] = 1;
+    TEST_ASSERT_FALSE(state.updateCapabilityDiagnostics(invalid));
+    TEST_ASSERT_TRUE(state.hasCapabilityDiagnostics());
+    TEST_ASSERT_EQUAL_UINT32(
+        before.counters.lookupAttempts,
+        state.capabilityDiagnostics().counters.lookupAttempts
+    );
+    TEST_ASSERT_EQUAL_UINT32(
+        before.counters.busyOutcomes,
+        state.capabilityDiagnostics().counters.busyOutcomes
+    );
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<uint8_t>(before.lastStatus),
+        static_cast<uint8_t>(state.capabilityDiagnostics().lastStatus)
+    );
+    TEST_ASSERT_EQUAL_UINT8(0, state.capabilityDiagnostics().reserved[1]);
+}
+
+void testCapabilitySummaryPreservesRuntimeAndTransportState() {
+    RuntimeState::State state(
+        RuntimeState::DeviceRole::NODE,
+        NODE_ID,
+        HUB_ID
+    );
+    state.setReady(true);
+    state.setPhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
+    state.setHealth(RuntimeState::Health::DEGRADED);
+    state.recordError(RuntimeState::ErrorClass::REMOTE_ACK);
+    state.updateRadioMetrics(-61.5F, 6.25F);
+    state.recordInboundPacket(1, 1, 12, 7, 100, 0, false, 0, 200);
+    state.recordActivity(300);
+    state.incrementTransmissionsCompleted();
+    state.incrementDecodedPacketsReceived();
+    state.incrementSuccessfulTransactions();
+    state.incrementAcceptedCommands();
+    state.incrementRetransmissions();
+    state.incrementAcknowledgmentTimeouts();
+    state.incrementDuplicates();
+    state.incrementMalformedPackets();
+    state.incrementIgnoredPackets();
+    state.incrementRadioErrors();
+    const RuntimeState::DiagnosticCounters transportBefore = state.counters();
+
+    DeviceCapabilities::CapabilityDiagnostics source;
+    TEST_ASSERT_TRUE(source.recordOutcome(
+        DeviceCapabilities::OperationStatus::HARDWARE_UNAVAILABLE
+    ));
+    TEST_ASSERT_TRUE(state.updateCapabilityDiagnostics(source.snapshot()));
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RuntimeState::DeviceRole::NODE),
+        static_cast<uint8_t>(state.role())
+    );
+    TEST_ASSERT_EQUAL_UINT8(NODE_ID, state.localId());
+    TEST_ASSERT_EQUAL_UINT8(HUB_ID, state.peerId());
+    TEST_ASSERT_TRUE(state.isReady());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RuntimeState::RuntimePhase::TRANSMITTING_ACK),
+        static_cast<uint8_t>(state.phase())
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RuntimeState::Health::DEGRADED),
+        static_cast<uint8_t>(state.health())
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RuntimeState::ErrorClass::REMOTE_ACK),
+        static_cast<uint8_t>(state.lastError())
+    );
+    TEST_ASSERT_TRUE(state.hasRadioMetrics());
+    TEST_ASSERT_FLOAT_WITHIN(0.001F, -61.5F, state.latestRssi());
+    TEST_ASSERT_FLOAT_WITHIN(0.001F, 6.25F, state.latestSnr());
+    TEST_ASSERT_TRUE(state.lastInboundPacket().available);
+    TEST_ASSERT_EQUAL_UINT8(7, state.lastInboundPacket().sequence);
+    TEST_ASSERT_TRUE(state.hasLastActivity());
+    TEST_ASSERT_EQUAL_UINT32(300, state.lastActivityAtMs());
+
+#define ASSERT_TRANSPORT_UNCHANGED(field) \
+    TEST_ASSERT_EQUAL_UINT32(transportBefore.field, state.counters().field)
+    ASSERT_TRANSPORT_UNCHANGED(transmissionsCompleted);
+    ASSERT_TRANSPORT_UNCHANGED(decodedPacketsReceived);
+    ASSERT_TRANSPORT_UNCHANGED(successfulTransactions);
+    ASSERT_TRANSPORT_UNCHANGED(acceptedCommands);
+    ASSERT_TRANSPORT_UNCHANGED(retransmissions);
+    ASSERT_TRANSPORT_UNCHANGED(acknowledgmentTimeouts);
+    ASSERT_TRANSPORT_UNCHANGED(duplicates);
+    ASSERT_TRANSPORT_UNCHANGED(malformedPackets);
+    ASSERT_TRANSPORT_UNCHANGED(ignoredPackets);
+    ASSERT_TRANSPORT_UNCHANGED(radioErrors);
+#undef ASSERT_TRANSPORT_UNCHANGED
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -507,5 +692,9 @@ int main(int, char**) {
     RUN_TEST(testCounterUpdatesDoNotAlterUnrelatedState);
     RUN_TEST(testExpandedHubAndNodeStateRemainIndependent);
     RUN_TEST(testRuntimeDiagnosticsDoNotModifyTransactionAuthorities);
+    RUN_TEST(testCapabilitySummaryStartsCanonicalAndUnavailable);
+    RUN_TEST(testCapabilitySummaryCopiesAndReplacesExplicitly);
+    RUN_TEST(testInvalidCapabilitySummaryPreservesPriorCopy);
+    RUN_TEST(testCapabilitySummaryPreservesRuntimeAndTransportState);
     return UNITY_END();
 }

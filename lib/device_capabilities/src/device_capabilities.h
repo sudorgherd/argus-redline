@@ -120,6 +120,24 @@ struct OperationResult {
     CapabilityValue value;
 };
 
+struct CapabilityDiagnosticCounters {
+    uint32_t lookupAttempts;
+    uint32_t acceptedOperations;
+    uint32_t authorizationDenials;
+    uint32_t unsupportedOperations;
+    uint32_t validationFailures;
+    uint32_t interlockDenials;
+    uint32_t busyOutcomes;
+    uint32_t hardwareFailures;
+};
+
+struct CapabilityDiagnosticsSnapshot {
+    CapabilityDiagnosticCounters counters;
+    uint8_t lastStatusAvailable;
+    OperationStatus lastStatus;
+    uint8_t reserved[2];
+};
+
 constexpr uint8_t LOCAL_ONLY_AUTHORIZATION_POLICY_ID = 0x00;
 constexpr uint8_t DEFAULT_AUTHORIZATION_POLICY_ID =
     LOCAL_ONLY_AUTHORIZATION_POLICY_ID;
@@ -160,6 +178,10 @@ static_assert(sizeof(OperationStatus) == 1,
     "OperationStatus must be 8 bits");
 static_assert(sizeof(OperationResult) == 12,
     "OperationResult must be exactly 12 bytes");
+static_assert(sizeof(CapabilityDiagnosticCounters) == 32,
+    "CapabilityDiagnosticCounters must be exactly 32 bytes");
+static_assert(sizeof(CapabilityDiagnosticsSnapshot) == 36,
+    "CapabilityDiagnosticsSnapshot must be exactly 36 bytes");
 static_assert(sizeof(CapabilityDescriptor) == 20,
     "CapabilityDescriptor must be exactly 20 bytes");
 
@@ -264,6 +286,117 @@ inline bool isKnownOperationStatus(OperationStatus status) {
 
     return false;
 }
+
+inline bool isValidCapabilityDiagnosticsSnapshot(
+    const CapabilityDiagnosticsSnapshot& snapshot
+) {
+    if (snapshot.lastStatusAvailable > 1 ||
+        snapshot.reserved[0] != 0 ||
+        snapshot.reserved[1] != 0) {
+        return false;
+    }
+
+    if (snapshot.lastStatusAvailable == 0) {
+        return snapshot.lastStatus == OperationStatus::OK;
+    }
+
+    return isKnownOperationStatus(snapshot.lastStatus);
+}
+
+class CapabilityDiagnostics {
+public:
+    bool recordOutcome(OperationStatus status, uint32_t amount = 1) {
+        if (!isKnownOperationStatus(status)) {
+            return false;
+        }
+        if (amount == 0) {
+            return true;
+        }
+
+        if (status != OperationStatus::INVALID_DESCRIPTOR) {
+            saturatingIncrement(snapshot_.counters.lookupAttempts, amount);
+        }
+
+        switch (status) {
+            case OperationStatus::OK:
+                saturatingIncrement(
+                    snapshot_.counters.acceptedOperations,
+                    amount
+                );
+                break;
+
+            case OperationStatus::CAPABILITY_NOT_FOUND:
+                break;
+
+            case OperationStatus::UNSUPPORTED_OPERATION:
+                saturatingIncrement(
+                    snapshot_.counters.unsupportedOperations,
+                    amount
+                );
+                break;
+
+            case OperationStatus::INVALID_DESCRIPTOR:
+            case OperationStatus::INVALID_VALUE_TYPE:
+            case OperationStatus::VALUE_OUT_OF_RANGE:
+                saturatingIncrement(
+                    snapshot_.counters.validationFailures,
+                    amount
+                );
+                break;
+
+            case OperationStatus::UNAUTHORIZED:
+                saturatingIncrement(
+                    snapshot_.counters.authorizationDenials,
+                    amount
+                );
+                break;
+
+            case OperationStatus::INTERLOCK_ACTIVE:
+                saturatingIncrement(
+                    snapshot_.counters.interlockDenials,
+                    amount
+                );
+                break;
+
+            case OperationStatus::BUSY:
+                saturatingIncrement(
+                    snapshot_.counters.acceptedOperations,
+                    amount
+                );
+                saturatingIncrement(snapshot_.counters.busyOutcomes, amount);
+                break;
+
+            case OperationStatus::HARDWARE_UNAVAILABLE:
+            case OperationStatus::OPERATION_FAILED:
+                saturatingIncrement(
+                    snapshot_.counters.acceptedOperations,
+                    amount
+                );
+                saturatingIncrement(
+                    snapshot_.counters.hardwareFailures,
+                    amount
+                );
+                break;
+        }
+
+        snapshot_.lastStatusAvailable = 1;
+        snapshot_.lastStatus = status;
+        return true;
+    }
+
+    CapabilityDiagnosticsSnapshot snapshot() const {
+        return snapshot_;
+    }
+
+private:
+    static void saturatingIncrement(uint32_t& value, uint32_t amount) {
+        value = amount > UINT32_MAX - value
+            ? UINT32_MAX
+            : value + amount;
+    }
+
+    CapabilityDiagnosticsSnapshot snapshot_ = {};
+};
 
 inline bool isKnownUnitCode(uint8_t unitCode) {
     switch (static_cast<UnitCode>(unitCode)) {
@@ -757,6 +890,29 @@ inline OperationResult dispatchCapabilityOperation(
     }
 
     return handlerResult;
+}
+
+inline OperationResult dispatchCapabilityOperationObserved(
+    const CapabilityRegistryView& registry,
+    LocalCapabilityHandler& handler,
+    CapabilityId capabilityId,
+    Operation operation,
+    const CapabilityValue& input,
+    const CallerContext& caller,
+    InterlockState interlock,
+    CapabilityDiagnostics& diagnostics
+) {
+    const OperationResult result = dispatchCapabilityOperation(
+        registry,
+        handler,
+        capabilityId,
+        operation,
+        input,
+        caller,
+        interlock
+    );
+    diagnostics.recordOutcome(result.status);
+    return result;
 }
 
 }  // namespace DeviceCapabilities

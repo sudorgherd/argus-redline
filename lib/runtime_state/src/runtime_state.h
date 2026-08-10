@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "device_capabilities.h"
+
 namespace RuntimeState {
 
 enum class DeviceRole : uint8_t {
@@ -185,6 +187,29 @@ public:
         return counters_;
     }
 
+    bool hasCapabilityDiagnostics() const {
+        return capabilityDiagnosticsAvailable_;
+    }
+
+    const DeviceCapabilities::CapabilityDiagnosticsSnapshot&
+    capabilityDiagnostics() const {
+        return capabilityDiagnostics_;
+    }
+
+    bool updateCapabilityDiagnostics(
+        const DeviceCapabilities::CapabilityDiagnosticsSnapshot& snapshot
+    ) {
+        if (!DeviceCapabilities::isValidCapabilityDiagnosticsSnapshot(
+                snapshot
+            )) {
+            return false;
+        }
+
+        capabilityDiagnostics_ = snapshot;
+        capabilityDiagnosticsAvailable_ = true;
+        return true;
+    }
+
     void incrementTransmissionsCompleted(uint32_t amount = 1) {
         saturatingIncrement(counters_.transmissionsCompleted, amount);
     }
@@ -246,6 +271,9 @@ private:
     bool lastActivityAvailable_ = false;
     uint32_t lastActivityAtMs_ = 0;
     DiagnosticCounters counters_;
+    bool capabilityDiagnosticsAvailable_ = false;
+    DeviceCapabilities::CapabilityDiagnosticsSnapshot
+        capabilityDiagnostics_ = {};
 };
 
 }  // namespace RuntimeState
