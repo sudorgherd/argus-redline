@@ -90,6 +90,8 @@ Verified behavior includes:
 
 Developed by [RaveGoat Labs](https://ravegoat.com/) as part of the [RG Herd](https://rgherd.com/) privacy-first communications and coordination ecosystem.
 
+Learn more about the ARGUS coordination platform at [argus.rgherd.com](https://argus.rgherd.com/).
+
 Related public projects:
 
 * [ARGUS](https://github.com/sudorgherd/rgherd-argus) — self-hosted dispatcher and operator coordination platform
