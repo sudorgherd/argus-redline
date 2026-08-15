@@ -6,7 +6,7 @@
 namespace {
 
 void testReleaseFirmwareIdentifier() {
-    TEST_ASSERT_EQUAL_STRING("v0.5.0", RedlineVersion::FIRMWARE);
+    TEST_ASSERT_EQUAL_STRING("v0.5.1", RedlineVersion::FIRMWARE);
 }
 
 void testWireProtocolVersion() {

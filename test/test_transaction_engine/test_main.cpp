@@ -37,7 +37,7 @@ void testFirstCommandIsNotDuplicate() {
     TEST_ASSERT_FALSE(tracker.isDuplicate(command));
 }
 
-void testSameSourceSequenceAndOpcodeIsDuplicate() {
+void testExactCanonicalRequestIsDuplicate() {
     TransactionEngine::NodeDuplicateTracker tracker;
     const Protocol::Packet command = makeCommand();
     tracker.remember(command, Protocol::AckStatus::SUCCESS);
@@ -72,6 +72,57 @@ void testDifferentOpcodeIsNotDuplicate() {
     Protocol::Packet different = command;
     different.opcode++;
     TEST_ASSERT_FALSE(tracker.isDuplicate(different));
+}
+
+void testDifferentPayloadLengthIsNotDuplicate() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    const Protocol::Packet command = makeCommand();
+    tracker.remember(command, Protocol::AckStatus::SUCCESS);
+
+    Protocol::Packet different = command;
+    different.payloadLength = 1;
+    different.payload[0] = 0xA5;
+    TEST_ASSERT_FALSE(tracker.isDuplicate(different));
+}
+
+void testDifferentPayloadContentIsNotDuplicate() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    Protocol::Packet command = makeCommand();
+    command.payloadLength = 2;
+    command.payload[0] = 0x12;
+    command.payload[1] = 0x34;
+    tracker.remember(command, Protocol::AckStatus::SUCCESS);
+
+    Protocol::Packet different = command;
+    different.payload[1] = 0x35;
+    TEST_ASSERT_FALSE(tracker.isDuplicate(different));
+}
+
+void testUnusedPayloadBytesDoNotAffectDuplicateIdentity() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    Protocol::Packet command = makeCommand();
+    command.payloadLength = 1;
+    command.payload[0] = 0x5A;
+    command.payload[1] = 0x11;
+    tracker.remember(command, Protocol::AckStatus::SUCCESS);
+
+    Protocol::Packet equivalent = command;
+    equivalent.payload[1] = 0xEE;
+    TEST_ASSERT_TRUE(tracker.isDuplicate(equivalent));
+}
+
+void testMaximumPayloadComparisonIsBoundedAndExact() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    Protocol::Packet command = makeCommand();
+    command.payloadLength = Protocol::MAX_PAYLOAD_SIZE;
+    for (size_t index = 0; index < command.payloadLength; ++index) {
+        command.payload[index] = static_cast<uint8_t>(index);
+    }
+    tracker.remember(command, Protocol::AckStatus::SUCCESS);
+
+    TEST_ASSERT_TRUE(tracker.isDuplicate(command));
+    command.payload[Protocol::MAX_PAYLOAD_SIZE - 1] ^= 0xFF;
+    TEST_ASSERT_FALSE(tracker.isDuplicate(command));
 }
 
 void testRememberedStatusIsReused() {
@@ -323,21 +374,31 @@ void testDuplicateReturnsRememberedStatus() {
     );
 }
 
-void testIgnoredPacketDoesNotMutateDuplicateState() {
+void testMalformedThenValidSameTupleDoesNotPoisonCache() {
     TransactionEngine::NodeDuplicateTracker tracker;
-    Protocol::Packet ignored = makeCommand();
-    ignored.destination++;
-    TransactionEngine::evaluateNodeCommand(
-        ignored,
-        NODE_ID,
-        HUB_ID,
-        tracker
-    );
+    Protocol::Packet malformed = makeCommand();
+    malformed.payloadLength = 1;
+    malformed.payload[0] = 0xA5;
 
-    TEST_ASSERT_FALSE(tracker.isDuplicate(ignored));
-    const TransactionEngine::NodeCommandEvaluation evaluation =
+    const TransactionEngine::NodeCommandEvaluation malformedEvaluation =
         TransactionEngine::evaluateNodeCommand(
-            makeCommand(),
+            malformed,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::ACK_MALFORMED_PACKET
+        ),
+        static_cast<uint8_t>(malformedEvaluation.outcome)
+    );
+    TEST_ASSERT_FALSE(tracker.isDuplicate(malformed));
+
+    const Protocol::Packet valid = makeCommand();
+    const TransactionEngine::NodeCommandEvaluation validEvaluation =
+        TransactionEngine::evaluateNodeCommand(
+            valid,
             NODE_ID,
             HUB_ID,
             tracker
@@ -346,52 +407,223 @@ void testIgnoredPacketDoesNotMutateDuplicateState() {
         static_cast<uint8_t>(
             TransactionEngine::NodeCommandOutcome::ACK_SUCCESS
         ),
-        static_cast<uint8_t>(evaluation.outcome)
+        static_cast<uint8_t>(validEvaluation.outcome)
     );
+    TEST_ASSERT_TRUE(tracker.isDuplicate(valid));
 }
 
-void testDuplicatePacketDoesNotReplaceRememberedState() {
+void testValidThenPayloadDistinctSameTupleIsMalformedNotDuplicate() {
     TransactionEngine::NodeDuplicateTracker tracker;
-    Protocol::Packet command = makeCommand();
-    tracker.remember(
-        command,
-        Protocol::AckStatus::UNSUPPORTED_OPCODE
-    );
+    const Protocol::Packet valid = makeCommand();
+    TransactionEngine::evaluateNodeCommand(valid, NODE_ID, HUB_ID, tracker);
 
-    Protocol::Packet duplicate = command;
-    duplicate.payloadLength = 1;
-    TransactionEngine::evaluateNodeCommand(
-        duplicate,
-        NODE_ID,
-        HUB_ID,
-        tracker
-    );
+    Protocol::Packet payloadDistinct = valid;
+    payloadDistinct.payloadLength = 1;
+    payloadDistinct.payload[0] = 0x7E;
+    const TransactionEngine::NodeCommandEvaluation evaluation =
+        TransactionEngine::evaluateNodeCommand(
+            payloadDistinct,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
 
-    TEST_ASSERT_TRUE(tracker.isDuplicate(command));
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<uint8_t>(
-            Protocol::AckStatus::UNSUPPORTED_OPCODE
+            TransactionEngine::NodeCommandOutcome::ACK_MALFORMED_PACKET
         ),
-        static_cast<uint8_t>(tracker.rememberedStatus())
+        static_cast<uint8_t>(evaluation.outcome)
     );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(Protocol::AckStatus::MALFORMED_PACKET),
+        static_cast<uint8_t>(evaluation.status)
+    );
+    TEST_ASSERT_TRUE(tracker.isDuplicate(valid));
+    TEST_ASSERT_FALSE(tracker.isDuplicate(payloadDistinct));
 }
 
-void testNewCommandIsRememberedWithSelectedStatus() {
+void testMalformedRequestCannotOverwriteValidCache() {
     TransactionEngine::NodeDuplicateTracker tracker;
-    Protocol::Packet command = makeCommand();
-    command.payloadLength = 1;
+    const Protocol::Packet valid = makeCommand();
+    TransactionEngine::evaluateNodeCommand(valid, NODE_ID, HUB_ID, tracker);
+
+    Protocol::Packet malformed = valid;
+    malformed.payloadLength = 1;
+    malformed.payload[0] = 0x44;
     TransactionEngine::evaluateNodeCommand(
-        command,
+        malformed,
         NODE_ID,
         HUB_ID,
         tracker
     );
 
-    TEST_ASSERT_TRUE(tracker.isDuplicate(command));
+    const TransactionEngine::NodeCommandEvaluation evaluation =
+        TransactionEngine::evaluateNodeCommand(
+            valid,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
     TEST_ASSERT_EQUAL_UINT8(
-        static_cast<uint8_t>(Protocol::AckStatus::MALFORMED_PACKET),
-        static_cast<uint8_t>(tracker.rememberedStatus())
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::DUPLICATE
+        ),
+        static_cast<uint8_t>(evaluation.outcome)
     );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(Protocol::AckStatus::SUCCESS),
+        static_cast<uint8_t>(evaluation.status)
+    );
+}
+
+void testExactRetransmissionReturnsCachedResultWithoutExecutionOutcome() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    const Protocol::Packet command = makeCommand();
+
+    const TransactionEngine::NodeCommandEvaluation first =
+        TransactionEngine::evaluateNodeCommand(
+            command,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+    const TransactionEngine::NodeCommandEvaluation retransmission =
+        TransactionEngine::evaluateNodeCommand(
+            command,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::ACK_SUCCESS
+        ),
+        static_cast<uint8_t>(first.outcome)
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::DUPLICATE
+        ),
+        static_cast<uint8_t>(retransmission.outcome)
+    );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(Protocol::AckStatus::SUCCESS),
+        static_cast<uint8_t>(retransmission.status)
+    );
+}
+
+void testIgnoredRequestsCannotAlterValidCache() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    const Protocol::Packet valid = makeCommand();
+    TransactionEngine::evaluateNodeCommand(valid, NODE_ID, HUB_ID, tracker);
+
+    Protocol::Packet wrongDestination = valid;
+    wrongDestination.destination++;
+    Protocol::Packet wrongSender = valid;
+    wrongSender.source++;
+    Protocol::Packet wrongType = valid;
+    wrongType.type = Protocol::PacketType::ACK;
+
+    TransactionEngine::evaluateNodeCommand(
+        wrongDestination,
+        NODE_ID,
+        HUB_ID,
+        tracker
+    );
+    TransactionEngine::evaluateNodeCommand(
+        wrongSender,
+        NODE_ID,
+        HUB_ID,
+        tracker
+    );
+    TransactionEngine::evaluateNodeCommand(
+        wrongType,
+        NODE_ID,
+        HUB_ID,
+        tracker
+    );
+
+    const TransactionEngine::NodeCommandEvaluation retransmission =
+        TransactionEngine::evaluateNodeCommand(
+            valid,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::DUPLICATE
+        ),
+        static_cast<uint8_t>(retransmission.outcome)
+    );
+}
+
+void testUnsupportedOpcodeCannotCreateOrOverwriteValidCache() {
+    TransactionEngine::NodeDuplicateTracker tracker;
+    const Protocol::Packet valid = makeCommand();
+    TransactionEngine::evaluateNodeCommand(valid, NODE_ID, HUB_ID, tracker);
+
+    Protocol::Packet unsupported = valid;
+    unsupported.opcode = 0x20;
+    TransactionEngine::evaluateNodeCommand(
+        unsupported,
+        NODE_ID,
+        HUB_ID,
+        tracker
+    );
+
+    TEST_ASSERT_FALSE(tracker.isDuplicate(unsupported));
+    const TransactionEngine::NodeCommandEvaluation retransmission =
+        TransactionEngine::evaluateNodeCommand(
+            valid,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::DUPLICATE
+        ),
+        static_cast<uint8_t>(retransmission.outcome)
+    );
+}
+
+void testSequenceRolloverUsesCompleteCanonicalIdentity() {
+    TransactionEngine::HubTransactionState hubState(0xFF);
+    hubState.completeTransaction();
+    TEST_ASSERT_EQUAL_UINT8(0, hubState.currentSequence());
+
+    TransactionEngine::NodeDuplicateTracker tracker;
+    Protocol::Packet wrapped = makeCommand();
+    wrapped.sequence = hubState.currentSequence();
+    TransactionEngine::evaluateNodeCommand(
+        wrapped,
+        NODE_ID,
+        HUB_ID,
+        tracker
+    );
+    TEST_ASSERT_TRUE(tracker.isDuplicate(wrapped));
+
+    Protocol::Packet payloadDistinct = wrapped;
+    payloadDistinct.payloadLength = 1;
+    payloadDistinct.payload[0] = 0x99;
+    TEST_ASSERT_FALSE(tracker.isDuplicate(payloadDistinct));
+
+    const TransactionEngine::NodeCommandEvaluation malformed =
+        TransactionEngine::evaluateNodeCommand(
+            payloadDistinct,
+            NODE_ID,
+            HUB_ID,
+            tracker
+        );
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(
+            TransactionEngine::NodeCommandOutcome::ACK_MALFORMED_PACKET
+        ),
+        static_cast<uint8_t>(malformed.outcome)
+    );
+    TEST_ASSERT_TRUE(tracker.isDuplicate(wrapped));
 }
 
 void testEvaluationOrderMatchesCurrentFirmware() {
@@ -956,10 +1188,14 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(testDuplicateStateBeginsEmpty);
     RUN_TEST(testFirstCommandIsNotDuplicate);
-    RUN_TEST(testSameSourceSequenceAndOpcodeIsDuplicate);
+    RUN_TEST(testExactCanonicalRequestIsDuplicate);
     RUN_TEST(testDifferentSourceIsNotDuplicate);
     RUN_TEST(testDifferentSequenceIsNotDuplicate);
     RUN_TEST(testDifferentOpcodeIsNotDuplicate);
+    RUN_TEST(testDifferentPayloadLengthIsNotDuplicate);
+    RUN_TEST(testDifferentPayloadContentIsNotDuplicate);
+    RUN_TEST(testUnusedPayloadBytesDoNotAffectDuplicateIdentity);
+    RUN_TEST(testMaximumPayloadComparisonIsBoundedAndExact);
     RUN_TEST(testRememberedStatusIsReused);
     RUN_TEST(testAcknowledgmentReversesEndpoints);
     RUN_TEST(testAcknowledgmentMatchesSequenceAndOpcode);
@@ -972,9 +1208,13 @@ int main(int, char**) {
     RUN_TEST(testUnsupportedOpcodeProducesUnsupportedStatus);
     RUN_TEST(testInvalidTestPayloadProducesMalformedStatus);
     RUN_TEST(testDuplicateReturnsRememberedStatus);
-    RUN_TEST(testIgnoredPacketDoesNotMutateDuplicateState);
-    RUN_TEST(testDuplicatePacketDoesNotReplaceRememberedState);
-    RUN_TEST(testNewCommandIsRememberedWithSelectedStatus);
+    RUN_TEST(testMalformedThenValidSameTupleDoesNotPoisonCache);
+    RUN_TEST(testValidThenPayloadDistinctSameTupleIsMalformedNotDuplicate);
+    RUN_TEST(testMalformedRequestCannotOverwriteValidCache);
+    RUN_TEST(testExactRetransmissionReturnsCachedResultWithoutExecutionOutcome);
+    RUN_TEST(testIgnoredRequestsCannotAlterValidCache);
+    RUN_TEST(testUnsupportedOpcodeCannotCreateOrOverwriteValidCache);
+    RUN_TEST(testSequenceRolloverUsesCompleteCanonicalIdentity);
     RUN_TEST(testEvaluationOrderMatchesCurrentFirmware);
     RUN_TEST(testHubIgnoresWrongDestination);
     RUN_TEST(testHubIgnoresWrongSender);

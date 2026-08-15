@@ -6,23 +6,43 @@ namespace TransactionEngine {
 
 class NodeDuplicateTracker {
 public:
+    // Compare only after command admission and opcode-specific validation.
     bool isDuplicate(const Protocol::Packet& command) const {
-        return (
-            hasRememberedCommand_ &&
-            command.source == source_ &&
-            command.sequence == sequence_ &&
-            command.opcode == opcode_
-        );
+        if (
+            !hasRememberedCommand_ ||
+            command.source != source_ ||
+            command.sequence != sequence_ ||
+            command.opcode != opcode_ ||
+            command.payloadLength != payloadLength_ ||
+            command.payloadLength > Protocol::MAX_PAYLOAD_SIZE
+        ) {
+            return false;
+        }
+
+        for (size_t index = 0; index < command.payloadLength; ++index) {
+            if (command.payload[index] != payload_[index]) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     void remember(
         const Protocol::Packet& command,
         Protocol::AckStatus status
     ) {
+        // Precondition: command is admissible and its payload is validated.
         hasRememberedCommand_ = true;
         source_ = command.source;
         sequence_ = command.sequence;
         opcode_ = command.opcode;
+        payloadLength_ = command.payloadLength;
+        for (size_t index = 0; index < Protocol::MAX_PAYLOAD_SIZE; ++index) {
+            payload_[index] = index < command.payloadLength
+                ? command.payload[index]
+                : 0;
+        }
         status_ = status;
     }
 
@@ -36,6 +56,8 @@ private:
     uint8_t source_ = 0;
     uint8_t sequence_ = 0;
     uint8_t opcode_ = 0;
+    uint8_t payloadLength_ = 0;
+    uint8_t payload_[Protocol::MAX_PAYLOAD_SIZE] = {};
     Protocol::AckStatus status_ = Protocol::AckStatus::SUCCESS;
 };
 
@@ -82,6 +104,25 @@ inline NodeCommandEvaluation evaluateNodeCommand(
         };
     }
 
+    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
+        return {
+            NodeCommandOutcome::ACK_UNSUPPORTED_OPCODE,
+            Protocol::AckStatus::UNSUPPORTED_OPCODE
+        };
+    }
+
+    if (
+        !Protocol::isValidCommandPayload(
+            command.opcode,
+            command.payloadLength
+        )
+    ) {
+        return {
+            NodeCommandOutcome::ACK_MALFORMED_PACKET,
+            Protocol::AckStatus::MALFORMED_PACKET
+        };
+    }
+
     if (duplicateTracker.isDuplicate(command)) {
         return {
             NodeCommandOutcome::DUPLICATE,
@@ -89,27 +130,11 @@ inline NodeCommandEvaluation evaluateNodeCommand(
         };
     }
 
-    Protocol::AckStatus status;
-    NodeCommandOutcome outcome;
-
-    if (!Protocol::isSupportedCommandOpcode(command.opcode)) {
-        status = Protocol::AckStatus::UNSUPPORTED_OPCODE;
-        outcome = NodeCommandOutcome::ACK_UNSUPPORTED_OPCODE;
-    } else if (
-        !Protocol::isValidCommandPayload(
-            command.opcode,
-            command.payloadLength
-        )
-    ) {
-        status = Protocol::AckStatus::MALFORMED_PACKET;
-        outcome = NodeCommandOutcome::ACK_MALFORMED_PACKET;
-    } else {
-        status = Protocol::AckStatus::SUCCESS;
-        outcome = NodeCommandOutcome::ACK_SUCCESS;
-    }
-
-    duplicateTracker.remember(command, status);
-    return {outcome, status};
+    duplicateTracker.remember(command, Protocol::AckStatus::SUCCESS);
+    return {
+        NodeCommandOutcome::ACK_SUCCESS,
+        Protocol::AckStatus::SUCCESS
+    };
 }
 
 enum class HubAckOutcome : uint8_t {
