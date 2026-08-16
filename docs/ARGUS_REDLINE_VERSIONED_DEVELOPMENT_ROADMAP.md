@@ -1,15 +1,16 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current completed release:** `v0.5.0`
-**Immediate next release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
+**Current release candidate:** `v0.5.1` — F-01 Duplicate-Cache Remediation
+**Next planned milestone after v0.5.1:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
-**Lifecycle state:** v0.5.0 implementation is complete; required v0.5.x
-qualification remains active. The v0.6.0 implementation brief is prepared,
-but implementation is not started. Begin v0.6.0 implementation only after the
-required v0.5.x qualification completes successfully.
+**Lifecycle state:** v0.5.1 is a qualified local release candidate correcting
+F-01 while preserving the v0.5.0 capability milestone and Wire Protocol 1.
+Broader deferred v0.5.x electrical, startup, and endurance work remains
+outstanding. F-02 through F-04 remain authenticated-transport requirements.
+The v0.6.0 implementation brief is prepared, but implementation has not started.
 
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
 
@@ -322,11 +323,20 @@ v0.5.x patch. The registered analog capability remains
 ### v0.5.x qualification line
 
 The v0.5.x line remains available for qualification and bounded corrective
-patches before advancement to v0.6.0. Remaining documented qualification
-includes controlled GPIO4/ADC1_CH3 electrical characterization, a formal
-isolated post-action radio exchange qualification, physical startup-held
+patches before advancement to v0.6.0. The formal isolated radio exchange gate
+passed during v0.5.1 qualification. Remaining documented broader work includes
+controlled GPIO4/ADC1_CH3 electrical characterization, physical startup-held
 reproduction, and extended endurance/fault testing. These items are pending;
 they are not architecture failures and are not represented as passed.
+
+`v0.5.1` is the focused F-01 duplicate-cache security/correctness patch. It
+uses exact canonical request identity (source, sequence, opcode, payload length,
+and meaningful payload bytes) only after complete command admission. Native,
+production-build, fixture, and two-board F-01 qualification passed without a
+Wire Protocol version change. F-02 peer authentication, F-03
+authentication-first discard/response governance, and F-04 authenticated
+persistent freshness/replay protection remain deferred requirements; they are
+not patched piecemeal into Wire Protocol 1.
 
 ### Objective
 
@@ -1286,19 +1296,17 @@ v2.0.0 does not promise every possible module, application, sensor, workflow, or
 
 ## 4. Immediate Next Release
 
-The next planned release is:
+After publishing the qualified v0.5.1 patch, the next planned milestone is:
 
 ```text
-v0.5.0
-Capability Registry and Safe Hardware Abstraction
+v0.6.0
+Structured Operations, Responses, and Host Protocol
 ```
 
 Immediate work:
 
 ```text
-[ ] Define a bounded capability descriptor and logical capability IDs
-[ ] Add capability discovery without unrestricted hardware access
-[ ] Add per-capability authorization, validation, safety, and interlock hooks
-[ ] Implement the first complete sensor/input/output vertical slice
-[ ] Preserve protocol, radio, and role ownership while capabilities are introduced
+[ ] Complete remaining explicitly deferred v0.5.x electrical, startup, and endurance evidence as scheduled
+[ ] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
+[ ] Begin v0.6.0 only through its prepared implementation brief and entry gates
 ```

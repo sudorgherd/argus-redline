@@ -16,9 +16,9 @@ ARGUS REDLINE is an experimental embedded communications and device-control plat
 
 REDLINE is designed around a strict architectural boundary: host computers and applications decide what information means and what workflows should happen; REDLINE handles constrained radio transport, device behavior, and safe access to approved physical capabilities.
 
-> **Firmware identifier:** v0.5.0 — bounded capability registry and safe local hardware abstraction, preserving Wire Protocol 1.
+> **Firmware identifier:** v0.5.1 — focused duplicate-cache security/correctness patch over the v0.5.0 capability substrate, preserving Wire Protocol 1.
 
-**Development status:** the v0.5.0 implementation is complete and the v0.5.x line is in qualification. The v0.6.0 implementation plan is prepared, but implementation has not started and begins only after required v0.5.x qualification completes successfully. Configuration Schema remains `1` and the hardware profile remains `HELTEC_V4`.
+**Development status:** the v0.5.1 F-01 remediation is implemented and qualified as a local release candidate. Broader deferred v0.5.x electrical, startup, and endurance work remains outstanding. The v0.6.0 implementation plan is prepared, but implementation has not started. Configuration Schema remains `1` and the hardware profile remains `HELTEC_V4`.
 
 ## What is ARGUS REDLINE?
 
@@ -50,11 +50,15 @@ The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_R
 
 The **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** defines the responsibility boundary between host applications, future host-side services, the Hub firmware, and the radio transport.
 
-The **[v0.5.0 Development Handoff](docs/ARGUS_REDLINE_v0.5.0_Development_Handoff.md)** summarizes this milestone's changes, compatibility, validation, and known limitations.
+The **[August 14 Security Review](docs/ARGUS_REDLINE_SECURITY_REVIEW_2026-08-14.md)** and its dated v0.5.1 follow-up preserve the security findings and current dispositions.
+
+The **[v0.5.1 Implementation and Qualification Brief](docs/V0.5.1_IMPLEMENTATION_AND_QUALIFICATION_BRIEF.md)** defines the F-01 correction and acceptance gates. The **[qualification results](docs/V0.5.1_QUALIFICATION_RESULTS.md)** and **[dependency/source audit](docs/V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md)** preserve the resulting evidence.
+
+The **[v0.5.1 Development Handoff](docs/ARGUS_REDLINE_v0.5.1_Development_Handoff.md)** summarizes the patch, compatibility, validation, and remaining limitations.
 
 ## Implemented now
 
-Firmware v0.5.0 adds three immutable `HELTEC_V4` logical capabilities:
+The underlying v0.5.0 capability milestone adds three immutable `HELTEC_V4` logical capabilities; v0.5.1 does not change that registry behavior:
 
 * Application indicator `0x0101`
 * Digital input `0x0201`
@@ -69,7 +73,8 @@ Verified behavior includes:
 * Versioned binary packet format
 * Sequence-matched acknowledgments
 * Bounded retransmission attempts
-* Single-entry, in-memory duplicate detection based on the most recently received source, sequence, and opcode; this state is volatile across restart
+* Single-entry, in-memory duplicate detection using exact canonical identity: source, sequence, opcode, payload length, and meaningful payload bytes; this state is volatile across restart
+* Complete command admission before semantic duplicate lookup or mutation, so invalid or inadmissible requests cannot influence cached duplicate state
 * Duplicate ACK regeneration from cached transaction metadata and status
 * Recovery after temporary node loss
 * Packet-length and packet-type validation
@@ -122,7 +127,7 @@ The current Heltec development hardware is the reference platform, not the inten
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies wire-format compatibility. Firmware v0.5.0 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
+Protocol v0.1 identifies wire-format compatibility. Firmware v0.5.1 remains on Wire Protocol version 1. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field                            |
 | ---: | -------------------------------- |
@@ -210,9 +215,9 @@ The first published radio protocol release remains:
 
 * [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.5.0. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
+The firmware identifier in the source is v0.5.1. The historical v0.1.03 tag is preserved, and both versions use the Protocol v0.1 wire format.
 
-The history includes the original string-based exchange, binary protocol implementation, reliability testing, device runtime and UI work, persistent settings, and the bounded capability abstraction introduced through v0.5.0.
+The history includes the original string-based exchange, binary protocol implementation, reliability testing, device runtime and UI work, persistent settings, the bounded capability abstraction introduced through v0.5.0, and the focused v0.5.1 duplicate-cache correction.
 
 ## Development direction
 

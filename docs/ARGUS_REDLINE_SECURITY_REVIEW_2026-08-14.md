@@ -11,6 +11,89 @@
 
 ---
 
+## August 16, 2026 Remediation Follow-Up
+
+This follow-up records the state of the `v0.5.1` candidate after the original
+August 14 review. The original review, scope, findings, severity, confidence,
+and conclusions below remain a historical assessment of revision
+`61b7a218aa11456d4d7b07e510e27f73a0bd947b`; they are not rewritten as though
+that review examined the later candidate.
+
+### Candidate finding status
+
+| Finding | v0.5.1 candidate disposition |
+|---|---|
+| F-01 — Duplicate-cache poisoning | **Remediated and qualified.** |
+| F-02 — Forgeable radio metadata treated as peer identity | **Open.** Deferred to authenticated packet integrity and cryptographic peer identity. |
+| F-03 — Repeated RF commands force ACK work | **Open.** Deferred to authentication-first silent discard followed by response budgets and rate governance. |
+| F-04 — Captured ACKs become valid after sequence reuse | **Open.** Deferred to authenticated persistent freshness, replay windows, and defined reboot/storage-loss behavior. |
+
+F-01 was implemented in
+`d8c92fc9e88c833113102c6b1060c43bf2a3edad`. The Node now admits a command
+before consulting or mutating semantic duplicate state. Admission completes
+framing/bounds, version, packet type, destination, configured sender, opcode,
+payload-length, and opcode-specific payload validation. Malformed,
+unsupported, ignored, wrongly addressed, and otherwise inadmissible requests
+therefore cannot poison, replace, clear, or consult the semantic cache.
+
+The canonical duplicate identity is the exact combination of source, sequence,
+opcode, payload length, and meaningful payload bytes. The implementation
+preserves the fixed-size, single-entry, volatile, allocation-free cache.
+Only an exact legitimate retransmission regenerates the cached result without
+re-execution. Wire Protocol remains version 1.
+
+Qualification evidence is preserved in
+[`V0.5.1_QUALIFICATION_RESULTS.md`](V0.5.1_QUALIFICATION_RESULTS.md):
+
+- focused transaction-engine tests passed `59/59`;
+- the complete native suite passed `469/469` across 13 test programs;
+- Hub and Node production builds passed;
+- both valid configuration fixtures passed;
+- all three negative fixtures failed with their intended configuration
+  diagnostics;
+- physical TEST/ACK, retry behavior, terminal timeout, and receive restoration
+  passed;
+- the isolated exchange test passed `30/30` for sequences 90 through 119; and
+- physical cached-ACK regeneration passed for the exact request identity source
+  1, destination 16, sequence 1, opcode 100, payload length 0, and no payload.
+
+During the cached-ACK exercise the Node remained continuously powered. Its
+accepted-command counter remained 1, duplicate advanced from 0 to 1, and ACK
+transmissions advanced from 1 to 2. The Hub accepted the regenerated SUCCESS
+ACK, both radios returned to receive operation, and fresh sequence 2 then
+passed. Selective first-ACK-loss isolation remains unexecuted because no
+deterministic production-only isolation method exists; native tests separately
+establish exact live-retransmission behavior.
+
+The controlled Hub-reset exercise is not replay protection. It also physically
+demonstrates the known F-04 limitation: volatile sequence reuse can make an old
+canonical request identity current again. F-04 therefore remains open.
+
+### Dependency and corpus follow-up
+
+[`V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md`](V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md)
+and the machine-readable
+[`platformio-resolved-dependencies.json`](evidence/v0.5.1/platformio-resolved-dependencies.json)
+preserve 40 unique resolved components and the exact qualified toolchain. No
+advisory was found applicable to the compiled firmware or qualified build
+execution. Affected-but-unreached matches and incomplete embedded advisory
+coverage are explicitly documented; this is not an absolute claim that the
+dependency set contains no vulnerabilities.
+
+The follow-up completed line-by-line coverage of 76/76 current tracked text
+files and explicitly disposed the overall 77/77 tracked-file inventory. It
+identified no new vulnerability. F-02 through F-04 remain deferred exactly as
+described above.
+
+One unresolved non-blocking observation remains: a matching ACK with an invalid
+status terminates the Hub transaction. This does not add meaningful attacker
+capability beyond unauthenticated forged-ACK acceptance already captured by
+F-02, is not part of F-01, and does not justify expanding v0.5.1 firmware scope.
+It should be revisited with structured response validation and authenticated
+transport.
+
+---
+
 ## 1. Executive Summary
 
 A static security review of the ARGUS REDLINE repository identified **four reportable findings**:
