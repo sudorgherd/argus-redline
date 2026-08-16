@@ -1,16 +1,17 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current release candidate:** `v0.5.1` — F-01 Duplicate-Cache Remediation
+**Current published baseline:** `v0.5.1` — F-01 Duplicate-Cache Remediation
 **Next planned milestone after v0.5.1:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
-**Lifecycle state:** v0.5.1 is a qualified local release candidate correcting
-F-01 while preserving the v0.5.0 capability milestone and Wire Protocol 1.
-Broader deferred v0.5.x electrical, startup, and endurance work remains
-outstanding. F-02 through F-04 remain authenticated-transport requirements.
-The v0.6.0 implementation brief is prepared, but implementation has not started.
+**Lifecycle state:** v0.5.1 is published; its F-01 remediation and focused
+qualification are complete while preserving the v0.5.0 capability milestone
+and Wire Protocol 1. Remaining required electrical, startup, and endurance
+qualification is pending. v0.6.0 documentation/design may proceed, but v0.6.0
+implementation has not started and remains gated on that hardware work. F-02
+through F-04 remain deferred security requirements.
 
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
 
@@ -421,11 +422,19 @@ These names describe local semantic capability operations and validation behavio
 
 ## `v0.6.0` — Structured Operations, Responses, and Host Protocol
 
-**Planning status:** Prepared.
+**Documentation/design status:** Active; principal specifications prepared.
 
 **Implementation status:** Not started. Entry requires successful completion
-of the required v0.5.x qualification. The implementation brief assumes that
-gate has been met before its Step 1 begins.
+of the remaining required hardware qualification. Documentation work is not
+blocked by that gate; the implementation brief assumes it has been met before
+implementation Step 1 begins.
+
+The normative design package is the
+[v0.6.0 Architecture Baseline](V0.6.0_ARCHITECTURE_BASELINE.md),
+[Host Protocol 0.1](HOST_PROTOCOL_0.1.md), and
+[v0.6.0 Wire Operation and Response Design](V0.6.0_WIRE_OPERATION_RESPONSE_DESIGN.md).
+The [implementation brief](V0.6.0_IMPLEMENTATION_BRIEF.md) retains the
+implementation sequence and acceptance gates.
 
 ### Objective
 
@@ -446,6 +455,14 @@ Move beyond `TEST` by defining structured REDLINE operations, establishing a dev
   separate minimal reference/test utility; do not turn the firmware endpoint
   into a human-oriented command shell.
 - Add compiled local procedure invocation.
+
+Wire Protocol 1 remains unauthenticated at the v0.6 entry baseline. Initial
+production radio authority is therefore read-only/non-side-effecting. General
+remote `SET_INDICATOR` and `RUN_PROCEDURE` authority remains disabled. A
+separately reviewed compile-time laboratory build may enable one explicitly
+bounded qualification path; such enablement is unauthenticated and is not
+production authenticated authority. Authenticated side-effect authority remains
+a later security concern.
 
 Host Protocol `0.1` is an initial development interface, not the final stable Host Protocol. This milestone keeps Host Protocol framing, Wire Protocol packets, structured REDLINE operations, transport status, and host-application meaning as separate concerns. It does not add the general opaque application transport planned for v1.1 or the stable host-service lifecycle planned for v0.12. Its interfaces must avoid assumptions that would prevent those later milestones.
 
@@ -1308,5 +1325,6 @@ Immediate work:
 ```text
 [ ] Complete remaining explicitly deferred v0.5.x electrical, startup, and endurance evidence as scheduled
 [ ] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
-[ ] Begin v0.6.0 only through its prepared implementation brief and entry gates
+[x] Prepare the principal v0.6.0 architecture, Host Protocol, and Wire operation designs
+[ ] Begin v0.6.0 implementation only after its hardware entry gate is satisfied
 ```

@@ -1,8 +1,9 @@
 # ARGUS REDLINE — Host Transport Architecture
 
-**Status:** Stable architectural direction; not an implementation specification
-**Current implementation baseline:** Firmware line `v0.5.x`, Wire Protocol `1`, Configuration Schema `1`, hardware profile `HELTEC_V4`
-**Next planned layer:** v0.6.0 planning prepared; implementation not started and gated on successful v0.5.x qualification
+**Status:** Stable architectural direction; not a framing specification
+**Current implementation baseline:** published firmware `v0.5.1`, Wire Protocol `1`, Configuration Schema `1`, hardware profile `HELTEC_V4`
+**Next planned layer:** v0.6.0 documentation/design active; implementation not started and gated on remaining required hardware qualification
+**Developmental framing authority:** [Host Protocol 0.1](HOST_PROTOCOL_0.1.md)
 **General opaque application transport:** Planned for `v1.1`, not implemented
 
 ## Purpose
@@ -117,19 +118,21 @@ When a logical payload must be divided because of a physical transport MTU or pa
 
 Host and application contracts must remain neutral to the physical transport. Adding a future physical transport should not require redesigning application payload schemas or application-facing lifecycle semantics merely because its MTU, framing, or retry behavior differs from LoRa.
 
-## Deferred implementation decisions
+## Specification boundary
 
-This document does **not** freeze:
+For v0.6 development, [Host Protocol 0.1](HOST_PROTOCOL_0.1.md) freezes the
+computer-to-device framing, CRC, numeric assignments, byte ordering, bounds,
+and parser behavior. [v0.6.0 Wire Operation and Response Design](V0.6.0_WIRE_OPERATION_RESPONSE_DESIGN.md)
+owns radio operation and RESPONSE semantics. Those developmental specifications
+do not turn this architectural direction into a stable host API or service.
 
-- COBS or any other framing method;
-- CRC32C or any other integrity check;
-- exact Host Protocol frame layouts;
-- exact opcode or flag assignments;
+This architecture document does **not** freeze:
+
 - transaction-, session-, boot-, or peer-ID widths;
 - host-service implementation language or process name;
 - Unix sockets, named pipes, localhost APIs, or other local IPC technology;
 - fragmentation packet format or recovery algorithm;
-- maximum payloads, queue depths, cache sizes, or reassembly limits.
+- future stable Host Protocol/API versions, queue depths, or reassembly limits.
 
 Those decisions require explicit design, resource analysis, compatibility review, and validation in the milestones that implement them.
 

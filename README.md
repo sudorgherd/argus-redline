@@ -18,7 +18,7 @@ REDLINE is designed around a strict architectural boundary: host computers and a
 
 > **Firmware identifier:** v0.5.1 — focused duplicate-cache security/correctness patch over the v0.5.0 capability substrate, preserving Wire Protocol 1.
 
-**Development status:** the v0.5.1 F-01 remediation is implemented and qualified as a local release candidate. Broader deferred v0.5.x electrical, startup, and endurance work remains outstanding. The v0.6.0 implementation plan is prepared, but implementation has not started. Configuration Schema remains `1` and the hardware profile remains `HELTEC_V4`.
+**Development status:** v0.5.1 is the current published baseline. Its F-01 remediation and focused qualification are complete. Broader required electrical, startup, and endurance qualification remains pending and gates v0.6.0 implementation, but does not gate v0.6.0 documentation/design work. v0.6.0 implementation has not started. Configuration Schema remains `1` and the hardware profile remains `HELTEC_V4`.
 
 ## What is ARGUS REDLINE?
 
@@ -249,11 +249,11 @@ Current firmware uses structured `COMMAND`/`ACK`-style operations. The future ar
 
 General opaque application payload transport is planned for v1.1 and is not implemented today.
 
-See **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** for the stable responsibility boundaries; it does not define a finished Host Protocol.
+See **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** for the stable responsibility boundaries and **[Host Protocol 0.1](docs/HOST_PROTOCOL_0.1.md)** for the developmental v0.6 framing specification.
 
 The next planned milestone is **`v0.6.0 — Structured Operations, Responses, and Host Protocol`**.
 
-Its **[implementation brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)** is planning, not active firmware work. Entry remains gated on successful completion of the required v0.5.x qualification.
+Its **[implementation brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)** is planning, not active firmware work. Documentation/design is active; implementation entry remains gated on successful completion of the remaining required hardware qualification.
 
 ### V1 target
 
@@ -292,7 +292,7 @@ Network keys, enrollment secrets, signing keys, access tokens, device certificat
 
 REDLINE is not intended to provide arbitrary remote code execution or unrestricted GPIO access.
 
-Remote behavior must remain limited to authenticated operations, installed procedures, and approved device capabilities.
+Remote embedded device operations must remain limited to operations authorized for the current trust context and approved device capabilities. Wire Protocol 1 radio peers are not authenticated; the v0.6 production design therefore permits only documented read-only/non-side-effecting REMOTE operations according to policy and does not grant general remote `SET_INDICATOR` or `RUN_PROCEDURE` authority. This device-execution restriction does not prohibit the future application-neutral opaque transport layer.
 
 The current firmware does not yet implement the authenticated encrypted transport planned for the v1 development path.
 
