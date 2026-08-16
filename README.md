@@ -4,39 +4,82 @@
        width="100%">
 </p>
 
+# ARGUS REDLINE
+
 **Open-source off-grid IoT, system security, and structured communications over resilient low-bandwidth radio.**
 
-**REDLINE is an open, off-grid network interface for physical systems.**
+## Connected Devices When the Grid Goes Down
 
-Connect computers to remote sensors, devices and field infrastructure over resilient radio without putting application logic on the microcontroller.
+ARGUS REDLINE is an open-source, off-grid network platform designed to connect computers, smartphones, sensors, devices, and field infrastructure when Wi-Fi, cellular service, and the internet aren't available.
 
-**One substrate. Many applications.**
+Small, inexpensive radio nodes carry alerts, sensor readings, status updates, commands, and application data across resilient, long-range links without depending on commercial infrastructure.
+
+Think remote property, farms, disaster response, community networks, field research, expeditions, events, mobile operations, or anywhere devices need to communicate beyond normal network coverage.
+
+**One radio network. Whatever application you want to build on top of it.**
+
+## The Architecture
+
+REDLINE is built around a single, clean rule:
+
+**The radio layer moves information reliably and safely. The application decides what that information means.**
+
+```text
+   [ Your Application ]
+            |
+            v
+  [ Host Computer / Phone ]
+            |
+            v
+     [ REDLINE Hub ]
+            |
+            v
+ [ Off-Grid Radio Network ]
+            |
+            v
+    [ REDLINE Node ]
+            |
+            v
+[ Sensors / Field Devices ]
+```
+
+* **The Application Layer:** Your computer or smartphone handles the intelligence — user interfaces, mapping, databases, analytics, automation, operator interfaces, and business logic — without putting application-specific logic on the radio microcontroller.
+* **The Infrastructure Layer:** REDLINE provides the physical bridge and owns constrained communications, device identity, bounded transactions, local runtime behavior, and radio transport between the host and field hardware. It packages data into small, efficient radio messages designed for long-range, low-bandwidth links where conventional network coverage may not exist.
+* **The Field Layer:** Remote Nodes connect to independently provisioned field hardware and expose approved logical capabilities representing sensors, indicators, controls, storage, location providers, local procedures, and other physical interfaces rather than unrestricted raw GPIO or hardware-specific implementation details.
+
+## What You Can Build On Top of It
+
+Because REDLINE provides a shared off-grid network, completely different software systems can use the same underlying infrastructure.
+
+* **Private Off-Grid Messaging:** Build encrypted local communications networks for families, neighborhood groups, or field teams to text and coordinate during emergencies.
+* **Remote Sensor Networks:** Track environmental conditions, soil moisture, water levels, weather, solar systems, or equipment diagnostics across large areas.
+* **Equipment Telemetry & Control:** Monitor distributed machinery, activate indicators, trigger equipment, or manage localized automation without cellular subscriptions.
+* **Field Logistics & Operations:** Build location tracking, team check-ins, status reporting, panic/duress signaling, and coordination tools for expeditions, events, and remote operations.
+* **Resilient Routing:** Extend coverage through repeaters, store-and-forward networking, and distributed routing to work around distance, terrain, and infrastructure gaps.
+
+## One Substrate. Many Applications.
+
+Most radio systems are built around one specific job. ARGUS REDLINE takes a different approach.
+
+The network provides a common connection between computers and the physical world while applications decide what that connection is used for.
+
+A REDLINE network can carry a weather reading, a check-in message, a location update, an equipment alert, a sensor measurement, a remote command, or data for an application that hasn't been invented yet.
+
+The same underlying network can support entirely different tools without rebuilding the radio infrastructure for every new idea — and without turning the microcontroller firmware into a collection of application-specific features.
+
+The goal is simple:
+
+**You build the application. REDLINE provides the network.**
+
+## Development Status
 
 ARGUS REDLINE is an experimental embedded communications and device-control platform developed by **RaveGoat Labs** for the wider **RG Herd** coordination ecosystem.
 
-REDLINE is designed around a strict architectural boundary: host computers and applications decide what information means and what workflows should happen; REDLINE handles constrained radio transport, device behavior, and safe access to approved physical capabilities.
-
 > **Firmware identifier:** v0.5.1 — focused duplicate-cache security/correctness patch over the v0.5.0 capability substrate, preserving Wire Protocol 1.
 
-**Development status:** v0.5.1 is the current published baseline. Its F-01 remediation and focused qualification are complete. Broader required electrical, startup, and endurance qualification remains pending and gates v0.6.0 implementation, but does not gate v0.6.0 documentation/design work. v0.6.0 implementation has not started. Configuration Schema remains `1` and the hardware profile remains `HELTEC_V4`.
+**Current published baseline:** v0.5.1. Its F-01 remediation and focused qualification are complete. Remaining electrical, startup, and endurance qualification gates v0.6.0 implementation, while v0.6.0 architecture and protocol design work is active.
 
-## What is ARGUS REDLINE?
-
-ARGUS REDLINE is being developed as an application-neutral communications and capability substrate between computing systems and independently provisioned field hardware.
-
-A computer-connected Hub communicates with remote Nodes over resilient low-bandwidth radio. Those Nodes can expose approved logical capabilities representing sensors, indicators, controls, storage, location providers, local procedures, or other physical interfaces without requiring host applications to understand raw GPIO assignments or hardware-specific implementation details.
-
-The architectural split is intentional:
-
-* **Host applications own application meaning, workflows, databases, analytics, and operator interfaces.**
-* **REDLINE owns constrained communications, device identity, bounded transactions, local runtime behavior, and safe hardware capability access.**
-* **Field Nodes expose approved capabilities rather than unrestricted hardware access.**
-
-This allows the same REDLINE substrate to support very different applications without turning the microcontroller firmware into a collection of application-specific features.
-
-A monitoring application might read environmental telemetry. A coordination application might exchange field status. A vehicle or infrastructure application might expose approved equipment state. ARGUS or another host application can interpret those operations differently while REDLINE continues performing the same underlying job.
-
-**One substrate. Many applications.**
+Configuration Schema remains `1` and the current hardware profile remains `HELTEC_V4`.
 
 Current firmware uses small structured packets to invoke, configure, or coordinate substantially more complex behavior already available on each device. The packet is the instruction layer; the Node's firmware, stored state, attached hardware, authorization, and capability profile determine what the instruction can safely do.
 
@@ -44,17 +87,20 @@ The v1 target includes multiple directly reachable Nodes, reliable commands and 
 
 Mesh routing, repeaters, GNSS, final enclosures, general opaque application transport, and full ARGUS integration are later development layers rather than current operational features.
 
-**[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** defines the system purpose and broad capability direction.
+### Project Documentation
 
-The **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** defines the authoritative release order, milestone scope, and release gates.
-
-The **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** defines the responsibility boundary between host applications, future host-side services, the Hub firmware, and the radio transport.
-
-The **[August 14 Security Review](docs/ARGUS_REDLINE_SECURITY_REVIEW_2026-08-14.md)** and its dated v0.5.1 follow-up preserve the security findings and current dispositions.
-
-The **[v0.5.1 Implementation and Qualification Brief](docs/V0.5.1_IMPLEMENTATION_AND_QUALIFICATION_BRIEF.md)** defines the F-01 correction and acceptance gates. The **[qualification results](docs/V0.5.1_QUALIFICATION_RESULTS.md)** and **[dependency/source audit](docs/V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md)** preserve the resulting evidence.
-
-The **[v0.5.1 Development Handoff](docs/ARGUS_REDLINE_v0.5.1_Development_Handoff.md)** summarizes the patch, compatibility, validation, and remaining limitations.
+* **[ARGUS REDLINE — What It Is](docs/PROJECT_OVERVIEW.md)** — system purpose and broad development direction
+* **[Versioned Development Roadmap](docs/ARGUS_REDLINE_VERSIONED_DEVELOPMENT_ROADMAP.md)** — authoritative release order, milestone scope, and release gates
+* **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** — responsibility boundaries between applications, host services, Hub firmware, and radio transport
+* **[v0.6.0 Architecture Baseline](docs/V0.6.0_ARCHITECTURE_BASELINE.md)** — pre-implementation architectural baseline
+* **[Host Protocol 0.1](docs/HOST_PROTOCOL_0.1.md)** — developmental computer-to-device protocol
+* **[v0.6.0 Wire Operation and Response Design](docs/V0.6.0_WIRE_OPERATION_RESPONSE_DESIGN.md)** — structured radio operations and response semantics
+* **[v0.6.0 Implementation Brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)** — implementation sequence and acceptance gates
+* **[August 14 Security Review](docs/ARGUS_REDLINE_SECURITY_REVIEW_2026-08-14.md)** — security findings and current dispositions
+* **[v0.5.1 Implementation and Qualification Brief](docs/V0.5.1_IMPLEMENTATION_AND_QUALIFICATION_BRIEF.md)** — F-01 correction and acceptance gates
+* **[v0.5.1 Qualification Results](docs/V0.5.1_QUALIFICATION_RESULTS.md)** — physical qualification evidence
+* **[v0.5.1 Dependency and Source Audit](docs/V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md)** — dependency and source verification
+* **[v0.5.1 Development Handoff](docs/ARGUS_REDLINE_v0.5.1_Development_Handoff.md)** — patch, compatibility, validation, and remaining limitations
 
 ## Implemented now
 
@@ -221,9 +267,9 @@ The history includes the original string-based exchange, binary protocol impleme
 
 ## Development direction
 
-REDLINE is moving toward a layered architecture in which applications interact with a stable, application-neutral host boundary rather than directly managing embedded transport details.
+The product architecture described above is being implemented as a layered system in which applications interact with a stable, application-neutral host boundary rather than directly managing embedded transport details.
 
-The intended direction is:
+At the technical level, the intended direction is:
 
 ```text
 Host applications
