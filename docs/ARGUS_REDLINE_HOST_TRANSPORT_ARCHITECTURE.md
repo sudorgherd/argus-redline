@@ -2,7 +2,7 @@
 
 **Status:** Stable architectural direction; not a framing specification
 **Current implementation baseline:** published firmware `v0.5.1`, Wire Protocol `1`, Configuration Schema `1`, hardware profile `HELTEC_V4`
-**Next planned layer:** v0.6.0 documentation/design active; implementation not started and gated on remaining required hardware qualification
+**Next planned layer:** v0.6.0 documentation/design active; the v0.5.x required hardware qualification gate is satisfied, so implementation is hardware-unblocked but **NOT STARTED**
 **Developmental framing authority:** [Host Protocol 0.1](HOST_PROTOCOL_0.1.md)
 **General opaque application transport:** Planned for `v1.1`, not implemented
 

@@ -1,6 +1,6 @@
 # ARGUS REDLINE — What It Is
 
-ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current v0.5.0 firmware provides a validated direct radio/device foundation and bounded local capability abstraction; cryptographic security is planned for later pre-v1 milestones and is not implemented.
+ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current published v0.5.1 firmware provides a validated direct radio/device foundation and bounded local capability abstraction; cryptographic security is planned for later pre-v1 milestones and is not implemented.
 
 It is intended to securely connect operators, sensors, mobile devices, and controlled trigger mechanisms over resilient low-bandwidth radio when cellular service, internet access, or ordinary communications infrastructure is unavailable, unreliable, overloaded, or inappropriate for the task.
 
@@ -8,7 +8,7 @@ At its core, REDLINE provides a controlled communications path between a compute
 
 It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** privacy-first communications and coordination ecosystem.
 
-> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.5.0 packets are not cryptographically authenticated or encrypted.
+> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.5.1 packets are not cryptographically authenticated or encrypted.
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
@@ -16,11 +16,11 @@ The long-term host and transport boundary is defined in [ARGUS REDLINE — Host 
 
 ## Current development state
 
-The v0.5.0 capability architecture is implemented. The v0.5.x line remains in
-qualification for its documented validation and any bounded corrective patch
-work. Planning for `v0.6.0 — Structured Operations, Responses, and Host
-Protocol` is prepared, but v0.6.0 implementation has not started; its entry
-gate is successful completion of the required v0.5.x qualification.
+The current published firmware baseline is v0.5.1. The v0.5.x required hardware
+qualification is complete. Documentation and design for `v0.6.0 — Structured
+Operations, Responses, and Host Protocol` are active, and implementation is
+unblocked from the hardware-qualification perspective, but v0.6.0 implementation
+has **NOT STARTED**.
 
 REDLINE remains a resilient field communications and capability substrate
 whose current physical transport is LoRa. Firmware owns identity, framing,
@@ -98,7 +98,7 @@ REDLINE's structured operations and future general application transport serve d
 
 **REDLINE-defined structured operations** cover device management, transport and system control, capability discovery, and safe execution of approved local hardware behavior. Their semantics are defined by REDLINE because firmware must validate and execute them predictably.
 
-**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.5.0` firmware and is not part of the earlier Host Protocol foundation milestones.
+**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.5.1` firmware and is not part of the earlier Host Protocol foundation milestones.
 
 Transport delivery also remains distinct from application outcome:
 
@@ -392,7 +392,7 @@ Target capabilities:
 
 ## Implemented Now
 
-The current v0.5.0 firmware foundation already provides:
+The current v0.5.1 firmware foundation already provides:
 
 - Two independently buildable Heltec firmware targets
 - Bidirectional LoRa communication at 915 MHz
@@ -401,7 +401,7 @@ The current v0.5.0 firmware foundation already provides:
 - Explicit device addressing
 - Sequence-matched acknowledgments
 - Bounded retransmission
-- Single-entry, in-memory duplicate detection based on the most recently received source, sequence, and opcode; this state is volatile across restart
+- Single-entry, in-memory duplicate detection based on the most recently received canonical request; this state is volatile across restart
 - Duplicate ACK regeneration from cached transaction metadata and status
 - Opcode and payload validation
 - Configurable compile-time device identities
@@ -420,9 +420,9 @@ The current v0.5.0 firmware foundation already provides:
 - Three HELTEC_V4 logical capabilities: indicator `0x0101`, digital input
   `0x0201`, and analog input `0x0301`
 - Role-safe capability diagnostics and a bounded DEVICE-screen CAPS summary
-- Physical digital-input and indicator/arbitration validation; ordinary
-  production analog sampling remains disabled and returns
-  `HARDWARE_UNAVAILABLE` pending GPIO4/ADC1_CH3 characterization in v0.5.x
+- Physical digital-input, indicator/arbitration, and GPIO4/ADC1_CH3 electrical
+  characterization completed; ordinary production analog sampling remains
+  disabled and returns `HARDWARE_UNAVAILABLE`
 
 The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
 
