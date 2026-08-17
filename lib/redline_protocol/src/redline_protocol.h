@@ -21,6 +21,15 @@ constexpr uint8_t OPCODE_RESERVED_MIN = 0x80;
 constexpr uint8_t OPCODE_RESERVED_MAX = 0xFF;
 
 enum class Opcode : uint8_t {
+    PING = 0x20,
+    GET_DEVICE_INFO = 0x21,
+    GET_STATUS = 0x22,
+    GET_CAPABILITIES = 0x23,
+    DESCRIBE_CAPABILITY = 0x24,
+    READ_CAPABILITY = 0x25,
+    SET_INDICATOR = 0x26,
+    RUN_PROCEDURE = 0x27,
+    GET_DIAGNOSTICS = 0x28,
     TEST = 0x64
 };
 
@@ -30,7 +39,8 @@ constexpr uint8_t OPCODE_TEST =
 enum class PacketType : uint8_t {
     COMMAND = 0x01,
     ACK = 0x02,
-    ERROR = 0x03
+    ERROR = 0x03,
+    RESPONSE = 0x04
 };
 
 enum class AckStatus : uint8_t {
@@ -169,7 +179,8 @@ inline bool decode(
     if (
         type != PacketType::COMMAND &&
         type != PacketType::ACK &&
-        type != PacketType::ERROR
+        type != PacketType::ERROR &&
+        type != PacketType::RESPONSE
     ) {
         return false;
     }

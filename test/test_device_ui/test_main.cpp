@@ -1237,12 +1237,15 @@ void testAllRuntimePhasesAndUnknownFallbackMapDeterministically() {
         RuntimeState::RuntimePhase::WAITING_FOR_ACK,
         RuntimeState::RuntimePhase::LISTENING,
         RuntimeState::RuntimePhase::TRANSMITTING_ACK,
+        RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE,
+        RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE,
         static_cast<RuntimeState::RuntimePhase>(0xFF)
     };
     const char* labels[] = {
-        "IDLE", "TX", "WAIT ACK", "LISTEN", "TX ACK", "UNKNOWN"
+        "IDLE", "TX", "WAIT ACK", "LISTEN", "TX ACK", "WAIT RESPONSE",
+        "TX RESPONSE", "UNKNOWN"
     };
-    for (uint8_t index = 0; index < 6; ++index) {
+    for (uint8_t index = 0; index < 8; ++index) {
         input.phase = phases[index];
         assertRow(
             DeviceUi::buildPresentation(DeviceUi::Screen::RADIO, input),

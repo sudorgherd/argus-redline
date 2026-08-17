@@ -81,7 +81,8 @@ enum class CallerClass : uint8_t {
     FIRMWARE_LOCAL = 0x01,
     UI_LOCAL = 0x02,
     TEST = 0x03,
-    FUTURE_REMOTE = 0x04
+    FUTURE_REMOTE = 0x04,
+    HOST_LOCAL = 0x05
 };
 
 struct CallerContext {
@@ -547,6 +548,7 @@ inline bool isValidCallerContext(const CallerContext& caller) {
         case CallerClass::UI_LOCAL:
         case CallerClass::TEST:
         case CallerClass::FUTURE_REMOTE:
+        case CallerClass::HOST_LOCAL:
             return true;
 
         case CallerClass::INVALID:
@@ -613,7 +615,8 @@ inline bool isOperationAuthorized(
 
     return caller.callerClass == CallerClass::FIRMWARE_LOCAL ||
         caller.callerClass == CallerClass::UI_LOCAL ||
-        caller.callerClass == CallerClass::TEST;
+        caller.callerClass == CallerClass::TEST ||
+        caller.callerClass == CallerClass::HOST_LOCAL;
 }
 
 inline bool isOperationSafe(

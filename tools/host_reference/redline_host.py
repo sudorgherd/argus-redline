@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Developmental Host Protocol 0.1 reference/qualification utility.
+
+This is deliberately a small protocol tool, not an SDK or application API.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import secrets
+import struct
+import sys
+import time
+from dataclasses import dataclass
+from typing import Callable, Iterable, Optional
+
+MAJOR, MINOR = 0, 1
+MAX_PAYLOAD = 128
+MAX_DECODED = 138
+MAX_CANDIDATE = 139
+MAX_ENCODED = 140
+
+MESSAGE_TYPES = {1: "HELLO_REQUEST", 2: "HELLO_RESPONSE", 0x10: "OPERATION_REQUEST", 0x11: "OPERATION_RESPONSE", 0x7F: "PROTOCOL_ERROR"}
+CATEGORIES = {1: "DEVICE", 2: "CAPABILITY", 3: "PROCEDURE", 4: "DIAGNOSTIC"}
+OPERATIONS = {0x20: "PING", 0x21: "GET_DEVICE_INFO", 0x22: "GET_STATUS", 0x23: "GET_CAPABILITIES", 0x24: "DESCRIBE_CAPABILITY", 0x25: "READ_CAPABILITY", 0x26: "SET_INDICATOR", 0x27: "RUN_PROCEDURE", 0x28: "GET_DIAGNOSTICS"}
+VALUE_TYPES = {0: "NONE", 1: "BOOLEAN", 2: "UNSIGNED_32", 3: "SIGNED_32", 4: "NORMALIZED_U16", 5: "FIXED_Q16_16", 6: "ENUM_U16", 0x7F: "STRUCTURE"}
+RESULT_CLASSES = {0: "SUCCESS", 1: "REQUEST_REJECTED", 2: "OPERATION_RESULT", 3: "RADIO_RESULT", 4: "LOCAL_RUNTIME_RESULT"}
+RESULT_CODES = {
+    0: {0: "OK"},
+    1: {1: "MALFORMED_REQUEST", 2: "UNSUPPORTED_OPERATION", 3: "BAD_TARGET", 4: "BUSY", 8: "MISMATCH"},
+    2: {0: "OK", 1: "CAPABILITY_NOT_FOUND", 2: "UNSUPPORTED_OPERATION", 3: "INVALID_VALUE_TYPE", 4: "VALUE_OUT_OF_RANGE", 5: "UNAUTHORIZED", 6: "INTERLOCK_ACTIVE", 7: "HARDWARE_UNAVAILABLE", 8: "OPERATION_FAILED", 9: "BUSY", 10: "INVALID_DESCRIPTOR"},
+    3: {6: "TIMEOUT", 7: "REMOTE_REJECTED", 8: "MISMATCH"},
+    4: {4: "BUSY", 10: "OPERATION_FAILED"},
+}
+PROTOCOL_ERRORS = {1: "UNSUPPORTED_MAJOR", 2: "UNSUPPORTED_MINOR", 3: "UNSUPPORTED_MESSAGE_TYPE", 4: "UNSUPPORTED_FLAGS", 5: "MALFORMED_PAYLOAD", 6: "INVALID_REQUEST_ID"}
+METRICS = {1: "transmissionsCompleted", 2: "decodedPacketsReceived", 3: "successfulTransactions", 4: "acceptedCommands", 5: "retransmissions", 6: "acknowledgmentTimeouts", 7: "duplicates", 8: "malformedPackets", 9: "ignoredPackets", 10: "radioErrors"}
+STATUS_FLAGS = {1: "READY", 2: "RADIO_OPERATIONAL", 4: "TRANSACTION_ACTIVE", 8: "DEGRADED", 16: "ERROR"}
+
+EXIT_OK, EXIT_DEVICE_RESULT, EXIT_TIMEOUT, EXIT_MALFORMED, EXIT_LOCAL = 0, 2, 3, 4, 5
+
+class ProtocolFailure(ValueError): pass
+class HostTimeout(TimeoutError): pass
+
+@dataclass(frozen=True)
+class Frame:
+    major: int
+    minor: int
+    message_type: int
+    flags: int
+    request_id: int
+    payload: bytes
+    decoded: bytes = b""
+    encoded: bytes = b""
+
+def crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for value in data:
+        crc ^= value << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+def cobs_encode(data: bytes) -> bytes:
+    if len(data) > MAX_DECODED: raise ProtocolFailure("decoded frame too large")
+    out = bytearray([0]); code_index = 0; code = 1
+    for value in data:
+        if value == 0:
+            out[code_index] = code; code_index = len(out); out.append(0); code = 1
+        else:
+            out.append(value); code += 1
+            if code == 0xFF:
+                out[code_index] = code; code_index = len(out); out.append(0); code = 1
+    out[code_index] = code
+    return bytes(out)
+
+def cobs_decode(data: bytes) -> bytes:
+    if not data or len(data) > MAX_CANDIDATE: raise ProtocolFailure("malformed/oversized COBS candidate")
+    out = bytearray(); index = 0
+    while index < len(data):
+        code = data[index]; index += 1
+        if code == 0 or index + code - 1 > len(data): raise ProtocolFailure("malformed COBS")
+        out.extend(data[index:index + code - 1]); index += code - 1
+        if code != 0xFF and index < len(data): out.append(0)
+    return bytes(out)
+
+def build_frame(message_type: int, request_id: int, payload: bytes, *, major: int = MAJOR, minor: int = MINOR, flags: int = 0, validate=True) -> tuple[bytes, bytes]:
+    if len(payload) > MAX_PAYLOAD: raise ProtocolFailure("payload exceeds 128 bytes")
+    if validate and request_id == 0: raise ProtocolFailure("request ID zero is reserved")
+    head = struct.pack("<BBBBHH", major, minor, message_type, flags, request_id, len(payload)) + payload
+    decoded = head + struct.pack("<H", crc16(head))
+    encoded = cobs_encode(decoded) + b"\0"
+    if len(decoded) > MAX_DECODED or len(encoded) > MAX_ENCODED: raise ProtocolFailure("frame bound exceeded")
+    return decoded, encoded
+
+def decode_frame(encoded: bytes, *, require_supported=True) -> Frame:
+    if not encoded or encoded[-1:] != b"\0" or len(encoded) > MAX_ENCODED: raise ProtocolFailure("missing delimiter or encoded frame bound exceeded")
+    decoded = cobs_decode(encoded[:-1])
+    if not 10 <= len(decoded) <= MAX_DECODED: raise ProtocolFailure("decoded length invalid")
+    major, minor, msg, flags, request_id, length = struct.unpack_from("<BBBBHH", decoded)
+    if length > MAX_PAYLOAD or len(decoded) != 10 + length: raise ProtocolFailure("declared payload length mismatch")
+    if crc16(decoded[:-2]) != struct.unpack_from("<H", decoded, len(decoded)-2)[0]: raise ProtocolFailure("CRC mismatch")
+    if require_supported:
+        if (major, minor) != (MAJOR, MINOR): raise ProtocolFailure("unsupported Host Protocol version")
+        if msg not in MESSAGE_TYPES: raise ProtocolFailure("unsupported message type")
+        if flags: raise ProtocolFailure("unsupported flags")
+        if request_id == 0 and msg != 0x7F: raise ProtocolFailure("invalid request ID")
+    return Frame(major, minor, msg, flags, request_id, decoded[8:-2], decoded, encoded)
+
+def typed_value(kind: int, value=None) -> bytes:
+    if kind == 0: raw = b""
+    elif kind == 1:
+        if value not in (False, True, 0, 1): raise ProtocolFailure("BOOLEAN must be 0 or 1")
+        raw = bytes([int(value)])
+    elif kind in (4, 6): raw = struct.pack("<H", int(value))
+    elif kind == 2: raw = struct.pack("<I", int(value))
+    elif kind in (3, 5): raw = struct.pack("<i", int(value))
+    else: raise ProtocolFailure("unknown/request-prohibited value type")
+    return bytes([kind, len(raw)]) + raw
+
+def operation_payload(category: int, operation: int, target_device: int, target_id: int, value_type=0, value=None) -> bytes:
+    pairs = {1:{0x20,0x21,0x22}, 2:{0x23,0x24,0x25,0x26}, 3:{0x27}, 4:{0x28}}
+    if operation not in pairs.get(category, set()): raise ProtocolFailure("invalid category/operation pair")
+    if (category in (1,4) or operation == 0x23) and target_id != 0: raise ProtocolFailure("operation requires target ID zero")
+    if operation in (0x24,0x25,0x26,0x27) and target_id == 0: raise ProtocolFailure("operation requires nonzero target ID")
+    allowed = {0x20:{0},0x21:{0},0x22:{0},0x23:{0,2},0x24:{0},0x25:{0},0x26:{1},0x27:{0,1,2,3,4,5,6},0x28:{0,2}}
+    if value_type not in allowed[operation]: raise ProtocolFailure("value type invalid for operation")
+    return struct.pack("<BBBH", category, operation, target_device, target_id) + typed_value(value_type, value)
+
+def decode_typed(kind: int, raw: bytes):
+    widths = {0:0,1:1,2:4,3:4,4:2,5:4,6:2}
+    if kind in widths:
+        if len(raw) != widths[kind] or (kind == 1 and raw[0] not in (0,1)): raise ProtocolFailure("invalid scalar geometry")
+        if kind == 0: return None
+        if kind == 1: return bool(raw[0])
+        if kind in (2,): return struct.unpack("<I", raw)[0]
+        if kind in (3,5): return struct.unpack("<i", raw)[0]
+        return struct.unpack("<H", raw)[0]
+    if kind == 0x7F: return raw
+    raise ProtocolFailure("unknown value type")
+
+def decode_record(operation: int, raw: bytes):
+    if operation == 0x21:
+        if len(raw) != 8 or raw[5] != 1 or raw[6] not in (1,2): raise ProtocolFailure("invalid DEVICE_INFO")
+        return dict(zip(("firmware_major","firmware_minor","firmware_patch","wire_protocol","configuration_schema","hardware_profile","role","device_id"), raw))
+    if operation == 0x22:
+        if len(raw) != 10: raise ProtocolFailure("invalid STATUS")
+        flags, uptime, retry, timeout = struct.unpack("<HIHH", raw)
+        if flags & 0xFFE0: raise ProtocolFailure("reserved STATUS flags")
+        return {"status_flags":flags,"status_labels":[name for bit,name in STATUS_FLAGS.items() if flags&bit],"uptime_seconds":uptime,"retry_count":retry,"timeout_count":timeout}
+    if operation == 0x23:
+        if len(raw) < 3: raise ProtocolFailure("invalid CAPABILITY_PAGE")
+        cursor, count = struct.unpack_from("<HB", raw)
+        if count > 9 or len(raw) != 3 + 2*count: raise ProtocolFailure("invalid CAPABILITY_PAGE geometry")
+        ids=list(struct.unpack_from("<"+"H"*count,raw,3))
+        if any(value==0 for value in ids): raise ProtocolFailure("invalid capability ID")
+        return {"next_cursor":cursor,"count":count,"capability_ids":ids}
+    if operation == 0x24:
+        if len(raw) != 6 or raw[0] > 0x0A or raw[1] not in range(7) or raw[2]&0xE0 or raw[3] > 5 or raw[4] not in (0,1) or raw[5]: raise ProtocolFailure("invalid CAPABILITY_DESCRIPTION")
+        return dict(zip(("class","value_type","operation_flags","unit","availability","reserved"),raw))
+    if operation == 0x28:
+        if len(raw)<2: raise ProtocolFailure("invalid DIAGNOSTIC_PAGE")
+        cursor,count=raw[:2]
+        if count>3 or len(raw)!=2+5*count: raise ProtocolFailure("invalid DIAGNOSTIC_PAGE geometry")
+        entries=[]
+        for i in range(count):
+            metric=raw[2+5*i]; value=struct.unpack_from("<I",raw,3+5*i)[0]
+            if metric not in METRICS: raise ProtocolFailure("unknown diagnostic metric")
+            entries.append({"metric_id":metric,"metric":METRICS[metric],"value":value})
+        return {"next_cursor":cursor,"count":count,"entries":entries}
+    raise ProtocolFailure("STRUCTURE not valid for this operation")
+
+def decode_payload(frame: Frame) -> dict:
+    base={"request_id":frame.request_id,"message_type":MESSAGE_TYPES.get(frame.message_type,f"UNKNOWN_0x{frame.message_type:02X}"),"message_type_raw":frame.message_type,"raw_payload_hex":frame.payload.hex(" ")}
+    p=frame.payload
+    if frame.message_type==2:
+        if len(p)!=16: raise ProtocolFailure("invalid HELLO_RESPONSE length")
+        selected,fmaj,fmin,fpatch,wire,schema,profile,role,device,maxpayload,cat,feat,maxops,res=struct.unpack("<10BHH2B",p)
+        if selected!=1 or maxpayload!=128 or maxops!=1 or res or cat&0xFFF0 or feat&0xFFFC or profile!=1 or role not in (1,2): raise ProtocolFailure("invalid HELLO_RESPONSE fields")
+        base.update({"selected_minor":selected,"firmware":f"{fmaj}.{fmin}.{fpatch}","wire_protocol":wire,"configuration_schema":schema,"hardware_profile":profile,"role":role,"device_id":device,"maximum_host_payload":maxpayload,"category_bitmap":cat,"categories":[CATEGORIES[x] for x in CATEGORIES if cat&(1<<(x-1))],"feature_bitmap":feat,"features":[name for bit,name in ((1,"local_operations"),(2,"radio_bridge")) if feat&bit],"maximum_outstanding_operations":maxops})
+    elif frame.message_type==0x11:
+        if len(p)<9: raise ProtocolFailure("invalid OPERATION_RESPONSE length")
+        category,operation,target_device,target_id,result_class,result_code,kind,length=struct.unpack_from("<BBBHBBBB",p)
+        raw=p[9:]
+        if len(raw)!=length or category not in CATEGORIES or operation not in OPERATIONS or result_class not in RESULT_CLASSES or result_code not in RESULT_CODES[result_class]: raise ProtocolFailure("invalid OPERATION_RESPONSE fields")
+        if result_class!=2 or result_code!=0:
+            if kind!=0 or raw: raise ProtocolFailure("non-success result must carry NONE")
+        value=decode_record(operation,raw) if kind==0x7F else decode_typed(kind,raw)
+        if result_class==2 and result_code==0:
+            valid = ((operation==0x20 and kind==2) or
+                     (operation in (0x21,0x22,0x23,0x24,0x28) and kind==0x7F) or
+                     (operation==0x25 and kind in range(1,7)) or
+                     (operation==0x26 and kind==0) or
+                     (operation==0x27 and kind in range(7)))
+            if not valid: raise ProtocolFailure("invalid successful response value schema")
+        base.update({"category":CATEGORIES[category],"category_raw":category,"operation":OPERATIONS[operation],"operation_raw":operation,"target_device":target_device,"target_id":target_id,"result_class":RESULT_CLASSES[result_class],"result_class_raw":result_class,"result_code":RESULT_CODES[result_class][result_code],"result_code_raw":result_code,"value_type":VALUE_TYPES[kind],"value_type_raw":kind,"value_length":length,"value":value})
+    elif frame.message_type==0x7F:
+        if len(p)!=4: raise ProtocolFailure("invalid PROTOCOL_ERROR length")
+        code,offending,detail=struct.unpack("<BBH",p)
+        if code not in PROTOCOL_ERRORS or detail: raise ProtocolFailure("invalid PROTOCOL_ERROR fields")
+        base.update({"error":PROTOCOL_ERRORS[code],"error_raw":code,"offending_type":offending,"detail":detail})
+    else: base["payload_hex"]=p.hex(" ")
+    return base
+
+class StreamAccumulator:
+    def __init__(self): self.candidate=bytearray(); self.discarding=False
+    def feed(self,data:bytes)->list[bytes]:
+        frames=[]
+        for b in data:
+            if b==0:
+                if self.discarding: self.discarding=False
+                elif self.candidate: frames.append(bytes(self.candidate)+b"\0")
+                self.candidate.clear()
+            elif not self.discarding:
+                if len(self.candidate)>=MAX_CANDIDATE: self.candidate.clear(); self.discarding=True
+                else: self.candidate.append(b)
+        return frames
+
+def wait_for_response(read:Callable[[int],bytes], request_id:int, timeout:float, clock=time.monotonic)->tuple[Frame,float]:
+    parser=StreamAccumulator(); start=clock(); deadline=start+timeout; malformed=False
+    while clock()<deadline:
+        chunk=read(MAX_ENCODED)
+        for encoded in parser.feed(chunk):
+            try: frame=decode_frame(encoded)
+            except ProtocolFailure: malformed=True; continue
+            if frame.request_id==request_id and frame.message_type in (2,0x11,0x7F): return frame,clock()-start
+        if not chunk: time.sleep(0.005)
+    if malformed: raise ProtocolFailure("malformed frame received before response deadline")
+    raise HostTimeout("no correlated device response before host-side deadline")
+
+def named_vectors()->dict[str,bytes]:
+    hello_decoded=bytes.fromhex("00 01 01 00 34 12 02 00 01 01 45 EA")
+    good=bytes.fromhex("01 03 01 01 04 34 12 02 05 01 01 45 EA 00")
+    def raw(major=0,minor=1,msg=1,flags=0,rid=0x1234,payload=b"\x01\x01",declared=None):
+        n=len(payload) if declared is None else declared
+        body=struct.pack("<BBBBHH",major,minor,msg,flags,rid,n)+payload
+        return cobs_encode(body+struct.pack("<H",crc16(body)))+b"\0"
+    bad_crc=bytearray(good); bad_crc[-2]^=1
+    return {"hello":good,"bad_cobs":b"\x05\x01\x00","bad_crc":bytes(bad_crc),"declared_length_mismatch":raw(declared=3),"unsupported_major":raw(major=1),"unsupported_minor":raw(minor=2),"unknown_message_type":raw(msg=0x55),"nonzero_flags":raw(flags=1),"invalid_request_id":raw(rid=0),"malformed_operation_request":raw(msg=0x10,payload=b"\x01\x20"),"oversized_candidate":b"\x01"*140+b"\0","hello_decoded":hello_decoded}
+
+COMMANDS={"ping":(1,0x20),"device-info":(1,0x21),"status":(1,0x22),"capabilities":(2,0x23),"describe":(2,0x24),"read":(2,0x25),"set-indicator":(2,0x26),"run-procedure":(3,0x27),"diagnostics":(4,0x28)}
+def parse_int(text): return int(text,0)
+def parse_bool(text):
+    if text.lower() in ("true","1"): return True
+    if text.lower() in ("false","0"): return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+def request_for_args(args)->tuple[int,bytes,bytes]:
+    rid=args.request_id if args.request_id is not None else secrets.randbelow(0xFFFF)+1
+    if args.command=="hello": payload=b"\x01\x01"; msg=1
+    else:
+        category,op=COMMANDS[args.command]; target_id=getattr(args,"capability_id",None) or getattr(args,"procedure_id",None) or 0
+        kind=0; value=None
+        if args.command in ("capabilities","diagnostics") and args.cursor is not None: kind,value=2,args.cursor
+        elif args.command=="set-indicator": kind,value=1,args.value
+        elif args.command=="run-procedure": kind,value=args.value_type,args.value
+        payload=operation_payload(category,op,args.target_device,target_id,kind,value); msg=0x10
+    decoded,encoded=build_frame(msg,rid,payload)
+    return rid,decoded,encoded
+
+def print_result(data:dict,as_json=False):
+    if as_json: print(json.dumps(data,sort_keys=True,separators=(",",":")))
+    else:
+        for key,value in data.items(): print(f"{key}={value}")
+
+def add_common(parser):
+    parser.add_argument("--request-id",type=parse_int)
+    parser.add_argument("--port")
+    parser.add_argument("--baud",type=int,default=115200)
+    parser.add_argument("--timeout",type=float,default=10.0)
+    parser.add_argument("--dry-run",action="store_true")
+    parser.add_argument("--show-hex",action="store_true")
+    parser.add_argument("--json",action="store_true")
+
+def make_parser():
+    p=argparse.ArgumentParser(description="Developmental REDLINE Host Protocol 0.1 qualification utility")
+    sub=p.add_subparsers(dest="command",required=True)
+    for name in ["hello",*COMMANDS]:
+        q=sub.add_parser(name); add_common(q)
+        if name!="hello": q.add_argument("--target-device",type=parse_int,required=True)
+        if name in ("describe","read","set-indicator"): q.add_argument("--capability-id",type=parse_int,required=True)
+        if name=="set-indicator": q.add_argument("--value",type=parse_bool,required=True)
+        if name=="run-procedure":
+            q.add_argument("--procedure-id",type=parse_int,required=True); q.add_argument("--value-type",type=parse_int,default=0); q.add_argument("--value",type=parse_int)
+        if name in ("capabilities","diagnostics"): q.add_argument("--cursor",type=parse_int)
+    q=sub.add_parser("decode"); q.add_argument("hex"); q.add_argument("--json",action="store_true")
+    q=sub.add_parser("vectors"); q.add_argument("name",nargs="?"); q.add_argument("--port"); q.add_argument("--baud",type=int,default=115200)
+    return p
+
+def open_serial_transport(port, baud, timeout, write_timeout, serial_factory=None):
+    if serial_factory is None:
+        try: import serial
+        except ImportError as exc: raise RuntimeError("live mode requires pyserial; install with: python -m pip install pyserial") from exc
+        serial_factory = serial.Serial
+    stream = serial_factory()
+    stream.baudrate = baud
+    stream.timeout = timeout
+    stream.write_timeout = write_timeout
+    stream.xonxoff = False
+    stream.rtscts = False
+    stream.dsrdtr = False
+    stream.dtr = False
+    stream.rts = False
+    stream.port = port
+    stream.open()
+    if stream.dtr or stream.rts:
+        stream.close()
+        raise RuntimeError("serial driver did not preserve inactive DTR/RTS state")
+    return stream
+
+def live_exchange(port,baud,encoded,rid,timeout):
+    start=time.monotonic()
+    stream=open_serial_transport(port,baud,0.05,timeout)
+    try:
+        stream.write(encoded); stream.flush()
+        frame,elapsed=wait_for_response(lambda n:stream.read(n),rid,timeout)
+    finally:
+        stream.close()
+    return frame,time.monotonic()-start if elapsed is None else elapsed
+
+def main(argv=None):
+    try:
+        args=make_parser().parse_args(argv)
+        if args.command=="decode":
+            encoded=bytes.fromhex(args.hex); frame=decode_frame(encoded); data=decode_payload(frame); data.update({"encoded_hex":encoded.hex(" "),"decoded_hex":frame.decoded.hex(" ")}); print_result(data,args.json); return EXIT_OK
+        if args.command=="vectors":
+            vectors=named_vectors()
+            if args.name:
+                if args.name not in vectors: raise ProtocolFailure("unknown vector name")
+                data=vectors[args.name]; print(f"{args.name}={data.hex(' ')}")
+                if args.port:
+                    stream=open_serial_transport(args.port,args.baud,0.1,1)
+                    try: stream.write(data)
+                    finally: stream.close()
+            else:
+                for name,data in vectors.items(): print(f"{name}={data.hex(' ')}")
+            return EXIT_OK
+        rid,decoded,encoded=request_for_args(args)
+        if args.show_hex or args.dry_run or not args.port:
+            print(f"request_id=0x{rid:04X}"); print(f"tx_decoded_hex={decoded.hex(' ')}"); print(f"tx_encoded_hex={encoded.hex(' ')}")
+        if args.dry_run or not args.port: return EXIT_OK
+        frame,elapsed=live_exchange(args.port,args.baud,encoded,rid,args.timeout)
+        data=decode_payload(frame); data["elapsed_seconds"]=round(elapsed,6)
+        if args.show_hex: data.update({"rx_encoded_hex":frame.encoded.hex(" "),"rx_decoded_hex":frame.decoded.hex(" ")})
+        print_result(data,args.json)
+        if frame.message_type==2: return EXIT_OK
+        if frame.message_type==0x11 and ((data["result_class_raw"]==0 and data["result_code_raw"]==0) or (data["result_class_raw"]==2 and data["result_code_raw"]==0)): return EXIT_OK
+        return EXIT_DEVICE_RESULT
+    except HostTimeout as exc: print(f"host_timeout={exc}",file=sys.stderr); return EXIT_TIMEOUT
+    except ProtocolFailure as exc: print(f"malformed_protocol={exc}",file=sys.stderr); return EXIT_MALFORMED
+    except (RuntimeError,OSError,ValueError) as exc: print(f"local_error={exc}",file=sys.stderr); return EXIT_LOCAL
+
+if __name__=="__main__": raise SystemExit(main())

@@ -1,6 +1,6 @@
 # ARGUS REDLINE — What It Is
 
-ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. Its current published v0.5.1 firmware provides a validated direct radio/device foundation and bounded local capability abstraction; cryptographic security is planned for later pre-v1 milestones and is not implemented.
+ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. The current v0.6.0 release provides a validated direct radio/device foundation, bounded capability abstraction, structured device operations and responses, and developmental Host Protocol 0.1. Cryptographic transport security is planned for later pre-v1 milestones and is not implemented.
 
 It is intended to securely connect operators, sensors, mobile devices, and controlled trigger mechanisms over resilient low-bandwidth radio when cellular service, internet access, or ordinary communications infrastructure is unavailable, unreliable, overloaded, or inappropriate for the task.
 
@@ -8,7 +8,7 @@ At its core, REDLINE provides a controlled communications path between a compute
 
 It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** privacy-first communications and coordination ecosystem.
 
-> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.5.1 packets are not cryptographically authenticated or encrypted.
+> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.6.0 Wire Protocol 1 traffic is structured and bounded but is not cryptographically authenticated or encrypted.
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
@@ -16,19 +16,25 @@ The long-term host and transport boundary is defined in [ARGUS REDLINE — Host 
 
 ## Current development state
 
-The current published firmware baseline is v0.5.1. The v0.5.x required hardware
-qualification is complete. Documentation and design for `v0.6.0 — Structured
-Operations, Responses, and Host Protocol` are active, and implementation is
-unblocked from the hardware-qualification perspective, but v0.6.0 implementation
-has **NOT STARTED**.
+ARGUS REDLINE v0.6.0 completes the Structured Operations, Responses, and Host Protocol milestone. The release preserves the direct Hub-to-Node architecture while adding the first bounded machine-readable computer interface and complete structured computer-to-Hub-to-Node-to-computer operation path.
 
-REDLINE remains a resilient field communications and capability substrate
-whose current physical transport is LoRa. Firmware owns identity, framing,
-radio mechanics, retries, duplicate handling, bounded hardware capabilities,
-and constrained host-interface validation. Host software owns application
-behavior, workflows, databases, rich UI, automation policy, third-party
-integration, and higher-level interpretation. Those application concerns do
-not move into the MCU as the Host Protocol is introduced.
+Current lifecycle authorities are:
+
+```text
+Firmware release        v0.6.0
+Host Protocol           0.1
+Wire Protocol           1
+Configuration Schema    1
+Hardware profile        HELTEC_V4
+```
+
+The production framework is Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4 through pioarduino platform 55.3.39. The framework migration and complete two-board Step 15 physical qualification passed after investigation of the earlier Arduino-ESP32 2.0.17 USB/HWCDC Host-response delivery failure.
+
+REDLINE remains a resilient field communications and capability substrate whose current physical transport is LoRa. Firmware owns bounded Host framing, structured REDLINE operations, radio mechanics, retries, duplicate handling, constrained capability exposure, authorization/interlock gates, and truthful transport outcomes. Host software owns application behavior, workflows, databases, rich UI, automation policy, third-party integration, and higher-level interpretation.
+
+The architectural rule remains:
+
+> Applications own meaning. REDLINE owns transport.
 
 ---
 
@@ -98,7 +104,7 @@ REDLINE's structured operations and future general application transport serve d
 
 **REDLINE-defined structured operations** cover device management, transport and system control, capability discovery, and safe execution of approved local hardware behavior. Their semantics are defined by REDLINE because firmware must validate and execute them predictably.
 
-**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in the current `v0.5.1` firmware and is not part of the earlier Host Protocol foundation milestones.
+**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in `v0.6.0`. Host Protocol 0.1 carries bounded REDLINE-defined device operations; general application-neutral opaque transport remains assigned to the post-v1 `v1.1.0` expansion.
 
 Transport delivery also remains distinct from application outcome:
 
@@ -146,7 +152,7 @@ Future workflow definitions might resemble a small domain-specific language or b
 
 ## The System Model
 
-The first supported topology is deliberately simple:
+The intended direct-network topology is deliberately simple:
 
 ```text
 Computer or operator service
@@ -392,45 +398,33 @@ Target capabilities:
 
 ## Implemented Now
 
-The current v0.5.1 firmware foundation already provides:
+The current v0.6.0 firmware provides:
 
-- Two independently buildable Heltec firmware targets
-- Bidirectional LoRa communication at 915 MHz
-- Asynchronous Hub and Node radio state machines
-- Protocol v0.1 wire-format support using Wire Protocol 1
-- Explicit device addressing
-- Sequence-matched acknowledgments
-- Bounded retransmission
-- Single-entry, in-memory duplicate detection based on the most recently received canonical request; this state is volatile across restart
-- Duplicate ACK regeneration from cached transaction metadata and status
-- Opcode and payload validation
-- Configurable compile-time device identities
-- RSSI and SNR diagnostics
-- Hardware-independent runtime health, error, metric, activity, inbound-packet, and saturating-counter state
-- A deterministic active-low GPIO0 input classifier with debounced short, long, and very-long presses
-- Shared Home, Radio, Device, Last Packet, Diagnostics, and About OLED screens
-- Nonblocking, dirty and rate-limited presentation with a 30-second timeout and wake-without-navigation behavior
-- Shared bounded presentation snapshots and a Heltec OLED rendering adapter
-- Validated Schema 1 local settings with dual-slot generation selection, fallback repair, and prepared-state-tested factory-reset recovery
-- A bounded nine-item settings editor with role-safe persistence integration on both Hub and Node
-- Physical two-board validation on two Heltec WiFi LoRa 32 V4.3 boards
-- A fixed 20-byte capability descriptor, bounded 16-entry immutable registry,
-  typed local values/results, authorization/interlock gates, and synchronous
-  safe dispatch
-- Three HELTEC_V4 logical capabilities: indicator `0x0101`, digital input
-  `0x0201`, and analog input `0x0301`
-- Role-safe capability diagnostics and a bounded DEVICE-screen CAPS summary
-- Physical digital-input, indicator/arbitration, and GPIO4/ADC1_CH3 electrical
-  characterization completed; ordinary production analog sampling remains
-  disabled and returns `HARDWARE_UNAVAILABLE`
+- Two independently buildable Heltec V4 firmware roles.
+- Bidirectional SX1262 LoRa communication at 915 MHz.
+- Wire Protocol 1 with explicit source/destination addressing, bounded retries, sequence matching, canonical duplicate suppression, ACK admission, and structured RESPONSE completion.
+- Preservation of the legacy autonomous `TEST=0x64` transaction.
+- Hardware-independent runtime state, health, activity, error, packet, metric, and saturating diagnostic state.
+- A deterministic active-low GPIO0 input classifier with debounced short, long, and very-long presses.
+- Shared Home, Radio, Device, Last Packet, Diagnostics, and About OLED screens with nonblocking presentation and timeout/wake behavior.
+- Configuration Schema 1 persistent settings using bounded dual-slot storage, validation, recovery, and factory reset.
+- A fixed, pointer-free capability descriptor model, bounded immutable registry, opaque logical IDs, typed values/results, authorization/interlock gates, and role-safe dispatch.
+- HELTEC_V4 logical indicator `0x0101`, digital input `0x0201`, and analog input `0x0301`; ordinary production analog access remains fail-closed as `HARDWARE_UNAVAILABLE`.
+- Developmental Host Protocol 0.1 over bounded COBS-framed USB CDC with CRC validation and deterministic malformed-frame recovery.
+- HELLO negotiation that reports Host Protocol, firmware, Wire Protocol, Configuration Schema, hardware profile, role, device ID, categories, features, and bounded operation capacity independently.
+- Structured Host operations: `PING`, `GET_DEVICE_INFO`, `GET_STATUS`, `GET_CAPABILITIES`, `DESCRIBE_CAPABILITY`, `READ_CAPABILITY`, `SET_INDICATOR`, `RUN_PROCEDURE`, and `GET_DIAGNOSTICS`.
+- One active Host operation and one fixed retained completed result with exact replay, `BUSY`, `MISMATCH`, replacement, and disconnect/reconnect lifecycle semantics.
+- A bounded Hub radio bridge mapping one accepted Host operation to one structured Wire transaction and correlated Host response.
+- Separate ACK admission and RESPONSE operation-completion semantics.
+- Bounded Host Protocol diagnostics separate from radio and capability diagnostics.
+- A deterministic Python Host reference/test utility.
+- Complete two-board physical qualification of Host Protocol, structured radio operations, retained-result lifecycle, authorization denial, input/output behavior, OLED coexistence, settings persistence, reconnect behavior, and Host-absent legacy radio operation.
 
-The codec recognizes `COMMAND`, `ACK`, and `ERROR` packet types. Current firmware actively uses only `COMMAND` and `ACK`; `ERROR` is recognized by the codec but is not currently emitted or handled as an active firmware transaction type.
+Production unauthenticated RF authority remains intentionally restricted. General remote `SET_INDICATOR` and `RUN_PROCEDURE` authority is not enabled simply because the structured operation exists.
 
-The current application behavior remains intentionally narrow: a test command and acknowledgment exchange between one Hub and one Node.
+Wire Protocol 1 currently recognizes `COMMAND`, `ACK`, `ERROR`, and `RESPONSE`. v0.6.0 actively uses `COMMAND`, `ACK`, and `RESPONSE`; `ERROR` remains recognized but is not the active structured-operation completion mechanism.
 
-Current packets are structured and validated but are **not yet cryptographically authenticated or encrypted**.
-
-Persistent identity and provisioning, sensors, trigger mechanisms, transferred procedures, multiple active Nodes, security, host integration, repeaters, and mesh routing are targeted directions—not completed capabilities.
+Current traffic is structured and validated but is **not cryptographically authenticated or encrypted**. Persistent identity/provisioning, authenticated transport, Node-originated event delivery, multiple direct Nodes, power/sleep lifecycle, stable host-service/API behavior, repeaters, routing, mesh, and general opaque application transport remain later milestones.
 
 ---
 

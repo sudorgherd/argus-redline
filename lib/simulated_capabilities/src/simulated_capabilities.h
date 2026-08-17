@@ -77,6 +77,19 @@ struct State {
     uint16_t analogInput = 0;
 };
 
+inline bool capabilityAvailability(
+    const State&,
+    CapabilityId capabilityId,
+    bool& available
+) {
+    CapabilityDescriptor descriptor = {};
+    if (!findCapability(registryView(), capabilityId, descriptor)) {
+        return false;
+    }
+    available = true;
+    return true;
+}
+
 inline OperationResult makeSuccess(ValueType type, uint32_t bits) {
     OperationResult result = {};
     result.status = OperationStatus::OK;

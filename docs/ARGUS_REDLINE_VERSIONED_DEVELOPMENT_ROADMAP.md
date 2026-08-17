@@ -1,19 +1,12 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current published baseline:** `v0.5.1` — F-01 Duplicate-Cache Remediation
-**Next planned milestone after v0.5.1:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
+**Current release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
+**Next planned milestone:** `v0.7.0` — Node-Originated Events and Reliable Delivery
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
-**Lifecycle state:** v0.5.1 is published; its F-01 remediation and focused
-qualification are complete while preserving the v0.5.0 capability milestone
-and Wire Protocol 1. The August 16 GPIO4 characterization and
-post-characterization 30/30 regression, startup-held GPIO0 reproduction, and
-designated endurance/broader fault qualification passed. The v0.5.x hardware
-entry gate is complete. v0.6.0 implementation is unblocked from the
-hardware-qualification perspective but has not started. F-02
-through F-04 remain deferred security requirements.
+**Lifecycle state:** v0.6.0 completes structured operations, Wire Protocol 1 RESPONSE semantics, developmental Host Protocol 0.1, the Arduino-ESP32 3.3.9 framework migration, and complete two-board physical qualification. Wire Protocol remains `1`, Configuration Schema remains `1`, and hardware profile remains `HELTEC_V4`. F-02 through F-04 remain deferred authenticated-transport requirements.
 
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
 
@@ -427,11 +420,11 @@ These names describe local semantic capability operations and validation behavio
 
 ## `v0.6.0` — Structured Operations, Responses, and Host Protocol
 
-**Documentation/design status:** Active; principal specifications prepared.
+**Documentation/design status:** Complete.
 
-**Implementation status:** Not started. The v0.5.x hardware entry gate is
-satisfied, so implementation is unblocked from the hardware-qualification
-perspective. Other implementation and review gates remain authoritative.
+**Implementation status:** Complete — physical qualification passed.
+
+**Release status:** Complete.
 
 The normative design package is the
 [v0.6.0 Architecture Baseline](V0.6.0_ARCHITECTURE_BASELINE.md),
@@ -477,9 +470,11 @@ PING
 GET_DEVICE_INFO
 GET_STATUS
 GET_CAPABILITIES
-READ_SENSOR
+DESCRIBE_CAPABILITY
+READ_CAPABILITY
 SET_INDICATOR
 RUN_PROCEDURE
+GET_DIAGNOSTICS
 ```
 
 `RUN_PROCEDURE` invokes a known procedure already compiled into the Node. It does not install arbitrary code.
@@ -500,17 +495,17 @@ PC command
 ### Release gate
 
 ```text
-[ ] Each operation has a documented payload schema
-[ ] ACK and RESPONSE semantics are distinct
-[ ] Unsupported operations fail predictably
-[ ] Malformed payloads cannot reach hardware handlers
-[ ] Host framing resynchronizes after bad input
-[ ] Host Protocol codec/parser validation covers malformed, truncated, oversized, and concatenated input
-[ ] Host/device capability negotiation reports supported behavior without relying only on firmware-version inference
-[ ] Host Protocol and Wire Protocol versions remain independently reported and documented
-[ ] REDLINE transport status is not represented as an application outcome
-[ ] Full PC-to-Node-to-PC transaction succeeds
-[ ] Existing Wire Protocol version is retained or deliberately incremented
+[x] Each operation has a documented payload schema
+[x] ACK and RESPONSE semantics are distinct
+[x] Unsupported operations fail predictably
+[x] Malformed payloads cannot reach hardware handlers
+[x] Host framing resynchronizes after bad input
+[x] Host Protocol codec/parser validation covers malformed, truncated, oversized, and concatenated input
+[x] Host/device capability negotiation reports supported behavior without relying only on firmware-version inference
+[x] Host Protocol and Wire Protocol versions remain independently reported and documented
+[x] REDLINE transport status is not represented as an application outcome
+[x] Full PC-to-Node-to-PC transaction succeeds
+[x] Existing Wire Protocol version is retained or deliberately incremented
 ```
 
 ---
@@ -1317,18 +1312,21 @@ v2.0.0 does not promise every possible module, application, sensor, workflow, or
 
 ## 4. Immediate Next Release
 
-After publishing the qualified v0.5.1 patch, the next planned milestone is:
+After publication of the completed v0.6.0 release candidate, the next planned milestone is:
 
 ```text
-v0.6.0
-Structured Operations, Responses, and Host Protocol
+v0.7.0
+Node-Originated Events and Reliable Delivery
 ```
 
-Immediate work:
+Immediate direction:
 
 ```text
-[x] Complete the v0.5.x required hardware entry-gate evidence
-[ ] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
-[x] Prepare the principal v0.6.0 architecture, Host Protocol, and Wire operation designs
-[ ] Begin v0.6.0 implementation through its approved brief and remaining gates
+[x] Complete v0.6.0 implementation and physical qualification
+[x] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
+[x] Complete v0.6.0 lifecycle and release documentation
+[x] Publish v0.6.0
+[ ] Begin v0.7.0 design and implementation through its own approved scope and gates
 ```
+
+v0.7.0 introduces Node-originated structured traffic and reliable delivery. It does not pull forward persistent identity, authenticated transport, multi-Node networking, routing, repeaters, or mesh behavior.

@@ -14,6 +14,18 @@
 #include "node_settings_integration.h"
 #include "heltec_v4_capabilities.h"
 #include "capability_role_integration.h"
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+#include "host_role_integration.h"
+#endif
+#if defined(ARGUS_HOST_MACHINE_STREAM) && defined(ARGUS_HOST_TEXT_STREAM)
+#error "Host machine stream and characterization text stream are mutually exclusive"
+#endif
+#if !defined(ARGUS_HOST_MACHINE_STREAM) && !defined(ARGUS_HOST_TEXT_STREAM)
+#error "Production role must select exactly one Host stream interpretation"
+#endif
+#if defined(ARGUS_HOST_MACHINE_STREAM) && defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+#error "Capability characterization cannot share the binary Host stream"
+#endif
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
 #include "capability_characterization.h"
 #include "capability_characterization_arduino.h"
@@ -74,6 +86,14 @@ bool pendingAcknowledgmentDuplicate = false;
 
 TransactionEngine::NodeDuplicateTracker duplicateTracker;
 
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+HostRoleIntegration::Stack<decltype(Serial)> hostStack(Serial, false);
+RadioOperationBridge::NodeStructuredOperationProcessor structuredProcessor;
+bool structuredAckThenExecute = false;
+bool structuredCachedResponseAfterAck = false;
+Protocol::Packet structuredResponse = {};
+#endif
+
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
 CapabilityCharacterization::AnalogAdapter characterizationAnalog;
 CapabilityCharacterization::Action pendingCharacterizationAction =
@@ -83,6 +103,20 @@ char characterizationCommand[
 ] = {};
 uint8_t characterizationCommandLength = 0;
 bool characterizationCommandOverflow = false;
+#endif
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+bool queryHostAvailability(const void* context,
+    DeviceCapabilities::CapabilityId capabilityId, bool& available) {
+    return HeltecV4Capabilities::capabilityAvailability(
+        *static_cast<const HeltecV4Capabilities::ProfileState*>(context),
+        capabilityId, available);
+}
+
+HostOperationService::AvailabilityProvider hostAvailability() {
+    return HostOperationService::makeAvailabilityProvider(
+        &capabilityState, queryHostAvailability);
+}
 #endif
 
 void IRAM_ATTR setRadioFlag() {
@@ -497,6 +531,7 @@ void serviceUi(uint32_t nowMs) {
 }
 
 void showStatus(const String& primary, const String& secondary) {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print(primary);
 
     if (secondary.length() > 0) {
@@ -505,16 +540,23 @@ void showStatus(const String& primary, const String& secondary) {
     }
 
     Serial.println();
+#else
+    (void)primary;
+    (void)secondary;
+#endif
 }
 
 void logVersionMetadata() {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("Wire Protocol: ");
     Serial.println(RedlineVersion::WIRE_PROTOCOL);
     Serial.print("Hardware profile: ");
     Serial.println(RedlineVersion::HARDWARE_PROFILE);
+#endif
 }
 
 void logPacket(const char* direction, const Protocol::Packet& packet) {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print(direction);
     Serial.print(" type=");
     Serial.print(static_cast<uint8_t>(packet.type));
@@ -528,6 +570,10 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.print(packet.opcode);
     Serial.print(" payload=");
     Serial.println(packet.payloadLength);
+#else
+    (void)direction;
+    (void)packet;
+#endif
 }
 
 void applyCurrentSettings(uint32_t nowMs, bool applyDefaultScreen) {
@@ -772,6 +818,82 @@ bool startAcknowledgment(
     return true;
 }
 
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+bool startStructuredResponse(const Protocol::Packet& response) {
+    size_t length = 0;
+    if (!Protocol::encode(response, transmitBuffer, sizeof(transmitBuffer), length))
+        return false;
+    structuredResponse = response;
+    transmitLength = length;
+    operationDone = false;
+    setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE);
+    radioLedActive = true;
+    updateLedOutput();
+    if (radio.startTransmit(transmitBuffer, transmitLength) != RADIOLIB_ERR_NONE) {
+        radioLedActive = false;
+        updateLedOutput();
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
+        startListening();
+        return false;
+    }
+    return true;
+}
+
+bool beginStructuredResponseAfterAck() {
+    Protocol::Packet response = structuredResponse;
+    if (structuredAckThenExecute) {
+        const HostOperationService::DeviceSnapshot snapshot =
+            HostOperationService::makeDeviceSnapshot(runtimeState,
+                static_cast<uint32_t>(millis()) / 1000U);
+        const RadioOperationBridge::NodeResult executed =
+            structuredProcessor.executeAdmittedOperation(snapshot,
+                capabilityRegistryValid, HeltecV4Capabilities::registryView(),
+                capabilityHandler, DeviceCapabilities::InterlockState::CLEAR,
+                capabilityDiagnostics, runtimeState, hostAvailability());
+        runtimeState.updateCapabilityDiagnostics(capabilityDiagnostics.snapshot());
+        if (executed.action != RadioOperationBridge::NodeAction::RESPONSE_READY)
+            return false;
+        response = executed.response;
+    }
+    structuredAckThenExecute = false;
+    structuredCachedResponseAfterAck = false;
+    updateLedOutput();
+    return startStructuredResponse(response);
+}
+
+void finishStructuredResponse() {
+    radioLedActive = false;
+    updateLedOutput();
+    runtimeState.incrementTransmissionsCompleted();
+    runtimeState.recordActivity(static_cast<uint32_t>(millis()));
+    markPresentationChanged();
+    startListening();
+}
+
+void serviceProductionHost(uint32_t nowMs) {
+    hostStack.observeConnection(static_cast<bool>(Serial));
+    hostStack.serviceTx();
+    hostStack.servicePendingDelivery();
+    if (!runtimeState.isReady() || operationDone ||
+        runtimeState.phase() != RuntimeState::RuntimePhase::LISTENING ||
+        Serial.available() <= 0) return;
+    if (radio.standby() != RADIOLIB_ERR_NONE || operationDone) {
+        startListening();
+        return;
+    }
+    const HostOperationService::DeviceSnapshot snapshot =
+        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U);
+    hostStack.serviceRx(snapshot, runtimeState.peerId(), capabilityRegistryValid,
+        HeltecV4Capabilities::registryView(), capabilityHandler,
+        DeviceCapabilities::InterlockState::CLEAR, capabilityDiagnostics,
+        runtimeState, hostAvailability(), nowMs, 2500U, false);
+    runtimeState.updateCapabilityDiagnostics(capabilityDiagnostics.snapshot());
+    updateLedOutput();
+    startListening();
+}
+#endif
+
 void finishAcknowledgment() {
     radioLedActive = false;
     updateLedOutput();
@@ -784,6 +906,15 @@ void finishAcknowledgment() {
         String("ACK SEQ ") + pendingAcknowledgment.sequence
     );
 
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (structuredAckThenExecute || structuredCachedResponseAfterAck) {
+        runtimeState.incrementTransmissionsCompleted();
+        runtimeState.recordActivity(static_cast<uint32_t>(millis()));
+        markPresentationChanged();
+        beginStructuredResponseAfterAck();
+        return;
+    }
+#endif
     servicePersistenceAfterAcknowledgment(
         static_cast<uint32_t>(millis()),
         standbyState == RADIOLIB_ERR_NONE
@@ -871,11 +1002,51 @@ void handleReceivedPacket() {
 
     logPacket("RX", command);
 
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("RSSI: ");
     Serial.print(runtimeState.latestRssi());
     Serial.print(" dBm | SNR: ");
     Serial.print(runtimeState.latestSnr());
     Serial.println(" dB");
+#endif
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (command.type == Protocol::PacketType::COMMAND &&
+        WireOperations::isStructuredOpcode(command.opcode)) {
+        const RadioOperationBridge::NodeResult structured =
+            structuredProcessor.admit(command, runtimeState.localId(),
+                runtimeState.peerId());
+        switch (structured.action) {
+            case RadioOperationBridge::NodeAction::ACK_THEN_EXECUTE:
+                runtimeState.incrementAcceptedCommands();
+                structuredAckThenExecute = true;
+                structuredCachedResponseAfterAck = false;
+                startAcknowledgment(command, Protocol::AckStatus::SUCCESS, false);
+                return;
+            case RadioOperationBridge::NodeAction::SEND_ACK:
+                runtimeState.incrementDuplicates();
+                startAcknowledgment(command, Protocol::AckStatus::SUCCESS, true);
+                return;
+            case RadioOperationBridge::NodeAction::SEND_ACK_AND_RESPONSE:
+                runtimeState.incrementDuplicates();
+                structuredResponse = structured.response;
+                structuredCachedResponseAfterAck = true;
+                structuredAckThenExecute = false;
+                startAcknowledgment(command, Protocol::AckStatus::SUCCESS, true);
+                return;
+            case RadioOperationBridge::NodeAction::SEND_REJECTION_ACK:
+                startAcknowledgment(command,
+                    static_cast<Protocol::AckStatus>(structured.acknowledgment.payload[0]),
+                    false);
+                return;
+            case RadioOperationBridge::NodeAction::ACTIVE_BUSY:
+            case RadioOperationBridge::NodeAction::IGNORE:
+            case RadioOperationBridge::NodeAction::RESPONSE_READY:
+                resumeListening();
+                return;
+        }
+    }
+#endif
 
     const TransactionEngine::NodeCommandEvaluation evaluation =
         TransactionEngine::evaluateNodeCommand(
@@ -942,6 +1113,10 @@ void handleReceivedPacket() {
 
 void setup() {
     Serial.begin(115200);
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    Serial.setTxTimeoutMs(0);
+    Serial.setDebugOutput(false);
+#endif
 
     HeltecV4Capabilities::initializeProfileState(capabilityState);
     capabilityRegistryValid =
@@ -973,8 +1148,10 @@ void setup() {
 
     const int state = radio.begin(915.0);
 
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("Radio init state: ");
     Serial.println(state);
+#endif
 
     if (state != RADIOLIB_ERR_NONE) {
         runtimeState.setReady(false);
@@ -1034,12 +1211,20 @@ void loop() {
             RuntimeState::RuntimePhase::TRANSMITTING_ACK
         ) {
             finishAcknowledgment();
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        } else if (runtimeState.phase() ==
+            RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE) {
+            finishStructuredResponse();
+#endif
         } else {
             handleReceivedPacket();
         }
     }
 
     if (runtimeState.isReady()) {
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        serviceProductionHost(nowMs);
+#endif
         serviceQuietMaintenance(nowMs);
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
         serviceCharacterization();
@@ -1050,6 +1235,9 @@ void loop() {
     if (
         runtimeState.phase() !=
             RuntimeState::RuntimePhase::TRANSMITTING_ACK &&
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        runtimeState.phase() != RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE &&
+#endif
         !operationDone &&
         !maintenanceOwnershipActive
     ) {

@@ -14,6 +14,26 @@
 #include "hub_settings_integration.h"
 #include "heltec_v4_capabilities.h"
 #include "capability_role_integration.h"
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+#include "host_role_integration.h"
+#endif
+#if defined(ARGUS_STRUCTURED_TRACE)
+#include "structured_trace.h"
+#define TRACE_HUB(event, request, sequence, opcode, detail, owner) \
+    StructuredTrace::record(static_cast<uint32_t>(millis()), event, request, \
+        sequence, opcode, static_cast<uint8_t>(runtimeState.phase()), detail, owner)
+#else
+#define TRACE_HUB(event, request, sequence, opcode, detail, owner) do {} while (0)
+#endif
+#if defined(ARGUS_HOST_MACHINE_STREAM) && defined(ARGUS_HOST_TEXT_STREAM)
+#error "Host machine stream and characterization text stream are mutually exclusive"
+#endif
+#if !defined(ARGUS_HOST_MACHINE_STREAM) && !defined(ARGUS_HOST_TEXT_STREAM)
+#error "Production role must select exactly one Host stream interpretation"
+#endif
+#if defined(ARGUS_HOST_MACHINE_STREAM) && defined(ARGUS_CAPABILITY_CHARACTERIZATION)
+#error "Capability characterization cannot share the binary Host stream"
+#endif
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
 #include "capability_characterization.h"
 #include "capability_characterization_arduino.h"
@@ -70,6 +90,15 @@ unsigned long nextTransmitAt = 0;
 
 TransactionEngine::HubTransactionState transactionState;
 
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+HostRoleIntegration::Stack<decltype(Serial)> hostStack(Serial, false);
+bool hostStructuredOwner = false;
+Protocol::Packet hostStructuredCommand = {};
+#if defined(ARGUS_STRUCTURED_TRACE)
+bool hostBytesAvailableEpisode = false;
+#endif
+#endif
+
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
 CapabilityCharacterization::AnalogAdapter characterizationAnalog;
 CapabilityCharacterization::Action pendingCharacterizationAction =
@@ -84,6 +113,20 @@ bool characterizationCommandOverflow = false;
 Protocol::Packet currentCommand = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
 size_t transmitLength = 0;
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+bool queryHostAvailability(const void* context,
+    DeviceCapabilities::CapabilityId capabilityId, bool& available) {
+    return HeltecV4Capabilities::capabilityAvailability(
+        *static_cast<const HeltecV4Capabilities::ProfileState*>(context),
+        capabilityId, available);
+}
+
+HostOperationService::AvailabilityProvider hostAvailability() {
+    return HostOperationService::makeAvailabilityProvider(
+        &capabilityState, queryHostAvailability);
+}
+#endif
 
 void IRAM_ATTR setRadioFlag() {
     operationDone = true;
@@ -272,6 +315,7 @@ void serviceUi(uint32_t nowMs) {
 }
 
 void showStatus(const String& primary, const String& secondary) {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print(primary);
 
     if (secondary.length() > 0) {
@@ -280,16 +324,23 @@ void showStatus(const String& primary, const String& secondary) {
     }
 
     Serial.println();
+#else
+    (void)primary;
+    (void)secondary;
+#endif
 }
 
 void logVersionMetadata() {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("Wire Protocol: ");
     Serial.println(RedlineVersion::WIRE_PROTOCOL);
     Serial.print("Hardware profile: ");
     Serial.println(RedlineVersion::HARDWARE_PROFILE);
+#endif
 }
 
 void logPacket(const char* direction, const Protocol::Packet& packet) {
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print(direction);
     Serial.print(" type=");
     Serial.print(static_cast<uint8_t>(packet.type));
@@ -303,6 +354,10 @@ void logPacket(const char* direction, const Protocol::Packet& packet) {
     Serial.print(packet.opcode);
     Serial.print(" payload=");
     Serial.println(packet.payloadLength);
+#else
+    (void)direction;
+    (void)packet;
+#endif
 }
 
 void applyCurrentSettings(uint32_t nowMs, bool applyDefaultScreen) {
@@ -650,6 +705,8 @@ void scheduleNextTransaction() {
 
 void completeAndScheduleNextTransaction() {
     transactionState.completeTransaction();
+    TRACE_HUB(StructuredTrace::Event::LEGACY_OWNER_RELEASED, 0,
+        currentCommand.sequence, currentCommand.opcode, 0, 1);
     scheduleNextTransaction();
 }
 
@@ -717,6 +774,9 @@ bool startCommandTransmission() {
     );
 
     if (state != RADIOLIB_ERR_NONE) {
+        TRACE_HUB(StructuredTrace::Event::RADIO_START_TX_FAILURE, 0,
+            currentCommand.sequence, currentCommand.opcode,
+            static_cast<uint8_t>(state), 1);
         radioLedActive = false;
         updateLedOutput();
         runtimeState.incrementRadioErrors();
@@ -730,6 +790,11 @@ bool startCommandTransmission() {
         scheduleRetryOrNext("TX START FAILED");
         return false;
     }
+
+    if (transactionState.requestedTransmission() ==
+        TransactionEngine::HubTransactionAction::TRANSMIT_INITIAL)
+        TRACE_HUB(StructuredTrace::Event::LEGACY_OWNER_ACQUIRED, 0,
+            currentCommand.sequence, currentCommand.opcode, 0, 1);
 
     logPacket(
         transactionState.requestedTransmission() ==
@@ -751,12 +816,20 @@ bool startCommandTransmission() {
     return true;
 }
 
-bool startAckReceive(bool resetDeadline) {
+bool startAckReceive(bool resetDeadline
+#if defined(ARGUS_STRUCTURED_TRACE)
+    , bool structuredResponse = false
+#endif
+) {
     operationDone = false;
 
     const int state = radio.startReceive();
 
     if (state != RADIOLIB_ERR_NONE) {
+        TRACE_HUB(StructuredTrace::Event::RADIO_START_RX_FAILURE, 0,
+            hostStructuredOwner ? hostStructuredCommand.sequence : currentCommand.sequence,
+            hostStructuredOwner ? hostStructuredCommand.opcode : currentCommand.opcode,
+            static_cast<uint8_t>(state), hostStructuredOwner ? 2 : 1);
         runtimeState.incrementRadioErrors();
         recordError(RuntimeState::ErrorClass::RADIO_START_RECEIVE);
         showStatus(
@@ -769,6 +842,14 @@ bool startAckReceive(bool resetDeadline) {
     }
 
     setRuntimePhase(RuntimeState::RuntimePhase::WAITING_FOR_ACK);
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (hostStructuredOwner)
+        TRACE_HUB(structuredResponse
+                ? StructuredTrace::Event::STRUCTURED_RX_ARM_RESPONSE
+                : StructuredTrace::Event::STRUCTURED_RX_ARM_ACK,
+            hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
+            hostStructuredCommand.opcode, 0, 2);
+#endif
 
     if (resetDeadline) {
         transactionState.beginAcknowledgmentWait(
@@ -778,6 +859,115 @@ bool startAckReceive(bool resetDeadline) {
 
     return true;
 }
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+bool startHostStructuredTransmission(const Protocol::Packet& command) {
+    size_t length = 0;
+    if (!Protocol::encode(command, transmitBuffer, sizeof(transmitBuffer), length))
+        return false;
+    const bool acquiringOwner = !hostStructuredOwner;
+    hostStructuredCommand = command;
+    TRACE_HUB(StructuredTrace::Event::STRUCTURED_COMMAND_PREPARED,
+        hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
+    transmitLength = length;
+    operationDone = false;
+    radioLedActive = true;
+    updateLedOutput();
+    setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING);
+    hostStructuredOwner = true;
+    if (acquiringOwner)
+        TRACE_HUB(StructuredTrace::Event::STRUCTURED_OWNER_ACQUIRED,
+            hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
+    if (radio.startTransmit(transmitBuffer, transmitLength) != RADIOLIB_ERR_NONE) {
+        TRACE_HUB(StructuredTrace::Event::RADIO_START_TX_FAILURE,
+            hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
+        radioLedActive = false;
+        updateLedOutput();
+        runtimeState.incrementRadioErrors();
+        recordError(RuntimeState::ErrorClass::RADIO_START_TRANSMIT);
+        return false;
+    }
+    TRACE_HUB(StructuredTrace::Event::STRUCTURED_TX_START,
+        hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
+    return true;
+}
+
+void finishHostStructuredOwnership() {
+    radio.standby();
+    hostStructuredOwner = false;
+    TRACE_HUB(StructuredTrace::Event::STRUCTURED_OWNER_RELEASED,
+        hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
+        hostStructuredCommand.opcode, 0, 2);
+    setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
+    nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
+}
+
+void serviceProductionHost(uint32_t nowMs) {
+    const bool connected = static_cast<bool>(Serial);
+#if defined(ARGUS_STRUCTURED_TRACE)
+    const int available = Serial.available();
+    if (available > 0 && !hostBytesAvailableEpisode) {
+        hostBytesAvailableEpisode = true;
+        TRACE_HUB(StructuredTrace::Event::HOST_BYTES_AVAILABLE, 0, 0, 0,
+            static_cast<uint8_t>(available > 255 ? 255 : available), 0);
+        if (!connected)
+            TRACE_HUB(StructuredTrace::Event::HOST_BYTES_WHILE_CONNECTION_FALSE,
+                0, 0, 0, static_cast<uint8_t>(available > 255 ? 255 : available), 0);
+    } else if (available == 0) hostBytesAvailableEpisode = false;
+#endif
+    hostStack.observeConnection(connected);
+    const HostTransport::TxResult txResult = hostStack.serviceTx();
+#if defined(ARGUS_STRUCTURED_TRACE)
+    if (txResult.writeAttempted) {
+        TRACE_HUB(StructuredTrace::Event::HOST_TX_WRITE_RESULT,
+            hostStack.lifecycle().entry().requestId, 0,
+            static_cast<uint8_t>(txResult.availableForWrite > 255
+                    ? 255 : txResult.availableForWrite),
+            static_cast<uint8_t>(txResult.bytesRequested),
+            static_cast<uint8_t>(txResult.bytesWritten));
+        if (txResult.status == HostTransport::TxStatus::COMPLETE)
+            TRACE_HUB(StructuredTrace::Event::HOST_TX_FRAME_RETIRED,
+                hostStack.lifecycle().entry().requestId, 0, 0, 0, 0);
+    }
+#else
+    (void)txResult;
+#endif
+    if (hostStack.servicePendingDelivery())
+    {
+        TRACE_HUB(StructuredTrace::Event::HOST_TX_SUBMITTED,
+            hostStack.lifecycle().entry().requestId, 0, 0,
+            static_cast<uint8_t>(hostStack.transport().remainingTx()),
+            static_cast<uint8_t>(connected));
+        TRACE_HUB(StructuredTrace::Event::HOST_RESPONSE_HANDOFF,
+            hostStack.lifecycle().entry().requestId, 0, 0, 0, 0);
+    }
+    if (!runtimeState.isReady()) return;
+    if (runtimeState.phase() != RuntimeState::RuntimePhase::IDLE &&
+        !hostStructuredOwner) return;
+    const HostOperationService::DeviceSnapshot snapshot =
+        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U);
+    const HostRoleIntegration::Result result = hostStack.serviceRx(snapshot,
+        runtimeState.peerId(), capabilityRegistryValid,
+        HeltecV4Capabilities::registryView(), capabilityHandler,
+        DeviceCapabilities::InterlockState::CLEAR, capabilityDiagnostics,
+        runtimeState, hostAvailability(), nowMs, 2500U, true);
+    if (result.action == HostRoleIntegration::Action::TRANSMIT_COMMAND &&
+        runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
+        radio.standby();
+        startHostStructuredTransmission(result.packet);
+    }
+    if (result.action == HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF) {
+        TRACE_HUB(StructuredTrace::Event::HOST_TX_SUBMITTED,
+            hostStack.lifecycle().entry().requestId, 0, 0,
+            static_cast<uint8_t>(hostStack.transport().remainingTx()),
+            static_cast<uint8_t>(connected));
+        TRACE_HUB(StructuredTrace::Event::HOST_RESPONSE_HANDOFF,
+            hostStack.lifecycle().entry().requestId, 0, 0, 0, 0);
+    }
+    runtimeState.updateCapabilityDiagnostics(capabilityDiagnostics.snapshot());
+    updateLedOutput();
+}
+#endif
 
 void handleAckTimeout() {
     runtimeState.incrementAcknowledgmentTimeouts();
@@ -832,6 +1022,8 @@ void processAcknowledgment() {
     );
 
     if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        TRACE_HUB(StructuredTrace::Event::RADIO_READ_FAILURE, 0, 0, 0,
+            static_cast<uint8_t>(state), hostStructuredOwner ? 2 : 1);
         runtimeState.incrementRadioErrors();
         recordError(RuntimeState::ErrorClass::RADIO_READ);
         showStatus("BAD ACK", "CRC mismatch");
@@ -840,6 +1032,8 @@ void processAcknowledgment() {
     }
 
     if (state != RADIOLIB_ERR_NONE) {
+        TRACE_HUB(StructuredTrace::Event::RADIO_READ_FAILURE, 0, 0, 0,
+            static_cast<uint8_t>(state), hostStructuredOwner ? 2 : 1);
         runtimeState.incrementRadioErrors();
         recordError(RuntimeState::ErrorClass::RADIO_READ);
         showStatus(
@@ -892,11 +1086,75 @@ void processAcknowledgment() {
 
     logPacket("RX", acknowledgment);
 
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("RSSI: ");
     Serial.print(runtimeState.latestRssi());
     Serial.print(" dBm | SNR: ");
     Serial.print(runtimeState.latestSnr());
     Serial.println(" dB");
+#endif
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (hostStructuredOwner) {
+        TRACE_HUB(StructuredTrace::Event::STRUCTURED_PACKET_RX,
+            hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+            acknowledgment.opcode, static_cast<uint8_t>(acknowledgment.type), 2);
+        const RuntimeState::RuntimePhase previousPhase = runtimeState.phase();
+        const HostRoleIntegration::Result hostResult =
+            hostStack.onRadioPacket(acknowledgment);
+        if (hostResult.action == HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF) {
+            TRACE_HUB(StructuredTrace::Event::HOST_TX_SUBMITTED,
+                hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                acknowledgment.opcode,
+                static_cast<uint8_t>(hostStack.transport().remainingTx()),
+                static_cast<uint8_t>(static_cast<bool>(Serial)));
+            TRACE_HUB(StructuredTrace::Event::HOST_RESPONSE_HANDOFF,
+                hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                acknowledgment.opcode, 0, 0);
+        }
+        if (!hostStack.lifecycle().remoteBridge().active()) {
+            if (acknowledgment.type == Protocol::PacketType::RESPONSE)
+                TRACE_HUB(StructuredTrace::Event::STRUCTURED_RESPONSE_MATCHED,
+                    hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                    acknowledgment.opcode, 0, 2);
+            TRACE_HUB(StructuredTrace::Event::STRUCTURED_TERMINAL,
+                hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                acknowledgment.opcode, 0, 2);
+            TRACE_HUB(StructuredTrace::Event::HOST_TERMINAL_RETAINED,
+                hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                acknowledgment.opcode, 0, 2);
+            if (acknowledgment.type == Protocol::PacketType::RESPONSE)
+                runtimeState.incrementSuccessfulTransactions();
+            (void)hostResult;
+            finishHostStructuredOwnership();
+            return;
+        }
+        const bool matchingSuccessAck =
+            acknowledgment.type == Protocol::PacketType::ACK &&
+            acknowledgment.source == hostStructuredCommand.destination &&
+            acknowledgment.destination == hostStructuredCommand.source &&
+            acknowledgment.sequence == hostStructuredCommand.sequence &&
+            acknowledgment.opcode == hostStructuredCommand.opcode &&
+            acknowledgment.payloadLength == 1 &&
+            acknowledgment.payload[0] == static_cast<uint8_t>(
+                Protocol::AckStatus::SUCCESS);
+#if defined(ARGUS_STRUCTURED_TRACE)
+        startAckReceive(false, matchingSuccessAck ||
+            previousPhase == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE);
+#else
+        startAckReceive(false);
+#endif
+        if (matchingSuccessAck ||
+            previousPhase == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE)
+            setRuntimePhase(RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE);
+        if (matchingSuccessAck) {
+            TRACE_HUB(StructuredTrace::Event::STRUCTURED_ACK_MATCHED,
+                hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
+                acknowledgment.opcode, 0, 2);
+        }
+        return;
+    }
+#endif
 
     const TransactionEngine::HubAckEvaluation evaluation =
         TransactionEngine::evaluateHubAcknowledgment(
@@ -984,6 +1242,10 @@ void processAcknowledgment() {
 
 void setup() {
     Serial.begin(115200);
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    Serial.setTxTimeoutMs(0);
+    Serial.setDebugOutput(false);
+#endif
 
     HeltecV4Capabilities::initializeProfileState(capabilityState);
     capabilityRegistryValid =
@@ -1015,8 +1277,10 @@ void setup() {
 
     const int state = radio.begin(915.0);
 
+#if defined(ARGUS_HOST_TEXT_STREAM)
     Serial.print("Radio init state: ");
     Serial.println(state);
+#endif
 
     if (state != RADIOLIB_ERR_NONE) {
         runtimeState.setReady(false);
@@ -1055,6 +1319,35 @@ void setup() {
 }
 
 void serviceHubTransport(uint32_t nowMs) {
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (hostStructuredOwner && !operationDone) {
+        const HostRoleIntegration::Result action = hostStack.serviceRemote(nowMs);
+        if (action.action == HostRoleIntegration::Action::TRANSMIT_COMMAND) {
+            runtimeState.incrementRetransmissions();
+            radio.standby();
+            startHostStructuredTransmission(action.packet);
+        } else if (!hostStack.lifecycle().remoteBridge().active()) {
+            TRACE_HUB(StructuredTrace::Event::STRUCTURED_TERMINAL,
+                hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
+                hostStructuredCommand.opcode, 1, 2);
+            TRACE_HUB(StructuredTrace::Event::HOST_TERMINAL_RETAINED,
+                hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
+                hostStructuredCommand.opcode, 1, 2);
+            if (action.action == HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF) {
+                TRACE_HUB(StructuredTrace::Event::HOST_TX_SUBMITTED,
+                    hostStack.lifecycle().entry().requestId,
+                    hostStructuredCommand.sequence, hostStructuredCommand.opcode,
+                    static_cast<uint8_t>(hostStack.transport().remainingTx()),
+                    static_cast<uint8_t>(static_cast<bool>(Serial)));
+                TRACE_HUB(StructuredTrace::Event::HOST_RESPONSE_HANDOFF,
+                    hostStack.lifecycle().entry().requestId,
+                    hostStructuredCommand.sequence, hostStructuredCommand.opcode, 0, 0);
+            }
+            finishHostStructuredOwnership();
+        }
+        return;
+    }
+#endif
     if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
         if ((long)(millis() - nextTransmitAt) < 0) {
             return;
@@ -1092,6 +1385,12 @@ void serviceHubTransport(uint32_t nowMs) {
         runtimeState.phase() ==
         RuntimeState::RuntimePhase::TRANSMITTING
     ) {
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        if (hostStructuredOwner)
+            TRACE_HUB(StructuredTrace::Event::STRUCTURED_TX_COMPLETE,
+                hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
+                hostStructuredCommand.opcode, 0, 2);
+#endif
         radioLedActive = false;
         updateLedOutput();
         runtimeState.incrementTransmissionsCompleted();
@@ -1102,13 +1401,20 @@ void serviceHubTransport(uint32_t nowMs) {
             String("SEQ ") + transactionState.currentSequence()
         );
 
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        startAckReceive(!hostStructuredOwner);
+#else
         startAckReceive(true);
+#endif
         return;
     }
 
     if (
         runtimeState.phase() ==
         RuntimeState::RuntimePhase::WAITING_FOR_ACK
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        || runtimeState.phase() == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE
+#endif
     ) {
         processAcknowledgment();
     }
@@ -1127,6 +1433,10 @@ void loop() {
 
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
     serviceCharacterization(nowMs);
+#endif
+
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    serviceProductionHost(nowMs);
 #endif
 
     if (runtimeState.isReady()) {

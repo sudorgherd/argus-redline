@@ -233,6 +233,31 @@ Category-specific operation numbers are `PING=0x20`,
 target uses the connected device ID. A remote target is submitted only through
 the Hub and remains subject to the remote authorization policy.
 
+`GET_DIAGNOSTICS` target ID is zero. Its value is either `NONE`, which starts
+at diagnostic metric index zero, or `UNSIGNED_32`, which is a zero-based index
+into the fixed diagnostic metric registry. Cursor equal to the metric count
+returns an empty terminal page; cursor greater than the count returns
+`OPERATION_RESULT/VALUE_OUT_OF_RANGE`. No other cursor value type is valid.
+
+The v0.6 diagnostic metric registry is fixed in `RuntimeState` counter
+declaration order: `0x01 transmissionsCompleted`,
+`0x02 decodedPacketsReceived`, `0x03 successfulTransactions`,
+`0x04 acceptedCommands`, `0x05 retransmissions`,
+`0x06 acknowledgmentTimeouts`, `0x07 duplicates`,
+`0x08 malformedPackets`, `0x09 ignoredPackets`, and `0x0A radioErrors`.
+`DIAGNOSTIC_PAGE` contains at most three entries. Its next cursor is the
+zero-based index of the next metric or `0xFF` when complete.
+
+For `STATUS`, `READY` is set when `RuntimeState::State::isReady()` is true;
+`RADIO_OPERATIONAL` is also set from readiness because the current runtime
+reaches ready only after radio initialization. `TRANSACTION_ACTIVE` is set
+in `TRANSMITTING`, `WAITING_FOR_ACK`, `TRANSMITTING_ACK`,
+`WAITING_FOR_RESPONSE`, or `TRANSMITTING_RESPONSE`, not in `IDLE` or
+`LISTENING`. `DEGRADED` and `ERROR` reflect their matching health
+states independently, so ready may coexist with degraded. Retry and timeout
+are the `retransmissions` and `acknowledgmentTimeouts` counters saturated to
+`uint16_t`; uptime is a caller-supplied `uint32_t` seconds snapshot.
+
 The only valid category/operation pairs are:
 
 | Category | Valid operations |
@@ -329,6 +354,38 @@ Responses MUST match the request ID. A host ignores responses for other IDs.
 The device emits at most one newly generated terminal response per accepted
 request, except byte-identical re-emission from the retained cache after
 reconnect/retry.
+
+### 5.1 Diagnostic observation mapping
+
+Host Protocol diagnostics are nine independently owned, volatile, saturating
+`uint32_t` counters. A non-empty candidate increments `framesReceived` exactly
+once when it produces `FRAME_READY`, `FRAME_REJECTED`, or
+`OVERSIZED_CANDIDATE`; empty delimiters, partial candidates, discarded bytes
+after an oversize decision, and transport-discarded partial candidates do not.
+`framesAccepted` increments only after envelope, version, inbound direction,
+flags, request ID, and semantic payload validation all succeed.
+
+Malformed framing, geometry, CRC, flags, request ID, or semantic payload
+increments `malformedFrames`. An otherwise trustworthy unsupported Host major,
+minor, or HELLO minor range increments only `unsupportedVersions`; an unknown
+or wrong-direction Host message type increments only
+`unsupportedMessageTypes`. These three rejection classifications do not
+overlap.
+
+`requestsDispatched` increments once when new valid operation work is accepted
+by a local service or remote bridge, not for HELLO, duplicates, retained replay,
+pre-acceptance rejection, or Wire retry. `busyOrRejectedRequests` increments
+once for an `OPERATION_RESPONSE` whose result class is `REQUEST_REJECTED`, not
+for accepted operation or radio failures. `responsesEmitted` increments at one
+logical complete-response handoff to Host output; creation while disconnected
+does not count, while a later retained replay handoff does. Physical byte
+completion does not increment it again. `transportResets` increments only for
+an explicitly observed Host physical transport reset/disconnect event and does
+not clear diagnostic history.
+
+Host counters do not mutate or reuse radio diagnostics, capability diagnostics,
+RuntimeState health, or the ten-metric `GET_DIAGNOSTICS` registry. Construction
+or explicit device-state reset clears them; no counter is persistent.
 
 ## 6. Validation and recovery
 

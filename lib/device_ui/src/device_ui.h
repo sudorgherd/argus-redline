@@ -208,6 +208,10 @@ inline const char* phaseLabel(RuntimeState::RuntimePhase phase) {
             return "LISTEN";
         case RuntimeState::RuntimePhase::TRANSMITTING_ACK:
             return "TX ACK";
+        case RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE:
+            return "WAIT RESPONSE";
+        case RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE:
+            return "TX RESPONSE";
     }
     return "UNKNOWN";
 }

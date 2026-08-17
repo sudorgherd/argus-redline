@@ -196,6 +196,10 @@ void testPacketTypeNumericValues() {
         0x03,
         static_cast<uint8_t>(Protocol::PacketType::ERROR)
     );
+    TEST_ASSERT_EQUAL_HEX8(
+        0x04,
+        static_cast<uint8_t>(Protocol::PacketType::RESPONSE)
+    );
 }
 
 void testTestOpcodeNumericValue() {
@@ -239,6 +243,28 @@ void testUnsupportedOpcodeFailsCommandValidation() {
     ));
 }
 
+void testResponseRoundTripsWithoutChangingGeometry() {
+    Protocol::Packet response = {};
+    response.type = Protocol::PacketType::RESPONSE;
+    response.source = NODE_ID;
+    response.destination = HUB_ID;
+    response.sequence = SEQUENCE;
+    response.opcode = static_cast<uint8_t>(Protocol::Opcode::PING);
+    response.payloadLength = Protocol::MAX_PAYLOAD_SIZE;
+    for (size_t index = 0; index < response.payloadLength; ++index) {
+        response.payload[index] = static_cast<uint8_t>(index);
+    }
+    uint8_t encoded[Protocol::MAX_PACKET_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_TRUE(Protocol::encode(response, encoded, sizeof(encoded), length));
+    TEST_ASSERT_EQUAL_UINT32(32, length);
+    TEST_ASSERT_EQUAL_HEX8(0x14, encoded[0]);
+    Protocol::Packet decoded = {};
+    TEST_ASSERT_TRUE(Protocol::decode(encoded, length, decoded));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(response.payload, decoded.payload,
+        Protocol::MAX_PAYLOAD_SIZE);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -256,5 +282,6 @@ int main(int, char**) {
     RUN_TEST(testAcknowledgmentStatusNumericValues);
     RUN_TEST(testTestCommandAcceptsOnlyZeroBytePayload);
     RUN_TEST(testUnsupportedOpcodeFailsCommandValidation);
+    RUN_TEST(testResponseRoundTripsWithoutChangingGeometry);
     return UNITY_END();
 }

@@ -16,7 +16,9 @@ enum class RuntimePhase : uint8_t {
     TRANSMITTING,
     WAITING_FOR_ACK,
     LISTENING,
-    TRANSMITTING_ACK
+    TRANSMITTING_ACK,
+    WAITING_FOR_RESPONSE,
+    TRANSMITTING_RESPONSE
 };
 
 enum class Health : uint8_t {

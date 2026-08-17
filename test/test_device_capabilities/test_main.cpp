@@ -1066,6 +1066,7 @@ void testCallerClassNumericValuesAndContextLayout() {
     TEST_ASSERT_EQUAL_HEX8(0x02, static_cast<uint8_t>(CallerClass::UI_LOCAL));
     TEST_ASSERT_EQUAL_HEX8(0x03, static_cast<uint8_t>(CallerClass::TEST));
     TEST_ASSERT_EQUAL_HEX8(0x04, static_cast<uint8_t>(CallerClass::FUTURE_REMOTE));
+    TEST_ASSERT_EQUAL_HEX8(0x05, static_cast<uint8_t>(CallerClass::HOST_LOCAL));
     TEST_ASSERT_EQUAL_UINT32(4, sizeof(CallerContext));
 }
 
@@ -1074,7 +1075,8 @@ void testCallerContextAcceptsEveryRepresentableCaller() {
         CallerClass::FIRMWARE_LOCAL,
         CallerClass::UI_LOCAL,
         CallerClass::TEST,
-        CallerClass::FUTURE_REMOTE
+        CallerClass::FUTURE_REMOTE,
+        CallerClass::HOST_LOCAL
     };
     for (CallerClass callerClass : callers) {
         const CallerContext caller = makeCaller(callerClass);
@@ -1086,7 +1088,7 @@ void testCallerContextAcceptsEveryRepresentableCaller() {
 void testCallerContextRejectsInvalidUnknownAndReservedState() {
     TEST_ASSERT_FALSE(isValidCallerContext(makeCaller(CallerClass::INVALID)));
     TEST_ASSERT_FALSE(isValidCallerContext(
-        makeCaller(static_cast<CallerClass>(0x05))
+        makeCaller(static_cast<CallerClass>(0x06))
     ));
     TEST_ASSERT_FALSE(isValidCallerContext(
         makeCaller(static_cast<CallerClass>(0xFF))

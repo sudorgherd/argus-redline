@@ -25,9 +25,15 @@ public:
             HeltecV4Capabilities::Resources::EXTERNAL_ANALOG_GPIO,
             ADC_11db
         );
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+        // Arduino-ESP32 3.x removed adcAttachPin(). ADC one-shot
+        // initialization is performed internally by the supported ADC API.
+        initialized_ = true;
+#else
         initialized_ = adcAttachPin(
             HeltecV4Capabilities::Resources::EXTERNAL_ANALOG_GPIO
         );
+#endif
         return initialized_;
     }
 

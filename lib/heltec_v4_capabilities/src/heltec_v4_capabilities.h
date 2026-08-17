@@ -109,6 +109,25 @@ inline void initializeProfileState(ProfileState& state) {
     state = {};
 }
 
+inline bool capabilityAvailability(
+    const ProfileState& state,
+    CapabilityId capabilityId,
+    bool& available
+) {
+    switch (capabilityId) {
+        case APPLICATION_INDICATOR_ID:
+            available = true;
+            return true;
+        case DIGITAL_INPUT_ID:
+            available = state.digitalInputAvailable;
+            return true;
+        case ANALOG_INPUT_0_ID:
+            available = state.analogInputAvailable;
+            return true;
+    }
+    return false;
+}
+
 inline OperationResult makeSuccess(ValueType type, uint32_t bits) {
     OperationResult result = {};
     result.status = OperationStatus::OK;
