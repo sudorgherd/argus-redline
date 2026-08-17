@@ -77,7 +77,7 @@ ARGUS REDLINE is an experimental embedded communications and device-control plat
 
 > **Firmware identifier:** v0.5.1 — focused duplicate-cache security/correctness patch over the v0.5.0 capability substrate, preserving Wire Protocol 1.
 
-**Current published baseline:** v0.5.1. Its F-01 remediation and focused qualification are complete. The August 16 GPIO4 ADC characterization and post-characterization 30/30 radio regression passed; remaining startup-held and designated endurance/fault qualification gates v0.6.0 implementation, while v0.6.0 architecture and protocol design work is active.
+**Current published baseline:** v0.5.1. Its F-01 remediation and focused qualification are complete. The August 16 GPIO4 ADC characterization, post-characterization 30/30 radio regression, startup-held GPIO0 reproduction, and designated endurance/broader fault qualification passed. The v0.5.x hardware entry gate is complete, so v0.6.0 implementation is unblocked from the hardware-qualification perspective; implementation has not started.
 
 Configuration Schema remains `1` and the current hardware profile remains `HELTEC_V4`.
 
@@ -300,7 +300,7 @@ See **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTU
 
 The next planned milestone is **`v0.6.0 — Structured Operations, Responses, and Host Protocol`**.
 
-Its **[implementation brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)** is planning, not active firmware work. Documentation/design is active; implementation entry remains gated on successful completion of the remaining required hardware qualification.
+Its **[implementation brief](docs/V0.6.0_IMPLEMENTATION_BRIEF.md)** is planning, not active firmware work. Documentation/design is active, and the completed v0.5.x hardware entry gate no longer blocks implementation.
 
 ### V1 target
 

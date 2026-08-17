@@ -9,9 +9,10 @@
 **Lifecycle state:** v0.5.1 is published; its F-01 remediation and focused
 qualification are complete while preserving the v0.5.0 capability milestone
 and Wire Protocol 1. The August 16 GPIO4 characterization and
-post-characterization 30/30 regression passed. Remaining required startup-held
-and designated endurance/fault qualification is pending. v0.6.0 documentation/design may proceed, but v0.6.0
-implementation has not started and remains gated on that hardware work. F-02
+post-characterization 30/30 regression, startup-held GPIO0 reproduction, and
+designated endurance/broader fault qualification passed. The v0.5.x hardware
+entry gate is complete. v0.6.0 implementation is unblocked from the
+hardware-qualification perspective but has not started. F-02
 through F-04 remain deferred security requirements.
 
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
@@ -330,8 +331,9 @@ patches before advancement to v0.6.0. The formal isolated radio exchange gate
 passed during v0.5.1 qualification. The separate August 16 follow-up completed
 controlled GPIO4/ADC1_CH3 electrical characterization and a formal
 post-characterization 30/30 regression. Remaining documented broader work is
-physical startup-held reproduction and the designated extended endurance/fault
-qualification; those items are pending and are not represented as passed.
+also complete: physical startup-held GPIO0 reproduction and the designated
+endurance/broader fault qualification passed on August 16. The v0.5.x required
+hardware entry-gate items are closed.
 
 `v0.5.1` is the focused F-01 duplicate-cache security/correctness patch. It
 uses exact canonical request identity (source, sequence, opcode, payload length,
@@ -427,10 +429,9 @@ These names describe local semantic capability operations and validation behavio
 
 **Documentation/design status:** Active; principal specifications prepared.
 
-**Implementation status:** Not started. Entry requires successful completion
-of the remaining required hardware qualification. Documentation work is not
-blocked by that gate; the implementation brief assumes it has been met before
-implementation Step 1 begins.
+**Implementation status:** Not started. The v0.5.x hardware entry gate is
+satisfied, so implementation is unblocked from the hardware-qualification
+perspective. Other implementation and review gates remain authoritative.
 
 The normative design package is the
 [v0.6.0 Architecture Baseline](V0.6.0_ARCHITECTURE_BASELINE.md),
@@ -1326,8 +1327,8 @@ Structured Operations, Responses, and Host Protocol
 Immediate work:
 
 ```text
-[ ] Complete remaining explicitly deferred startup-held and designated endurance/fault evidence as scheduled
+[x] Complete the v0.5.x required hardware entry-gate evidence
 [ ] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
 [x] Prepare the principal v0.6.0 architecture, Host Protocol, and Wire operation designs
-[ ] Begin v0.6.0 implementation only after its hardware entry gate is satisfied
+[ ] Begin v0.6.0 implementation through its approved brief and remaining gates
 ```
