@@ -263,16 +263,21 @@ response validation/authenticated transport rather than expanding v0.5.1.
 
 ## Remaining broader v0.5.x hardware work
 
-The F-01 release evidence does not claim completion of:
+The later [August 16 hardware qualification follow-up](V0.5.1_HARDWARE_QUALIFICATION_RESULTS.md)
+completed GPIO4/ADC1_CH3 electrical characterization over the tested
+0.51–2.31 V range and a separate formal 30/30 post-characterization TEST/ACK
+regression. Ordinary production analog remains fail-closed as
+`HARDWARE_UNAVAILABLE`; this evidence does not enable it.
 
-- GPIO4/ADC1_CH3 electrical characterization and analog correlation;
+Remaining broader work is:
+
 - physical startup-held-button reproduction;
 - extended endurance and broader fault testing; or
 - selective first-ACK-loss physical isolation.
 
-The analog capability remains fail-closed as `HARDWARE_UNAVAILABLE`. These
-items remain scheduled broader v0.5.x evidence and do not change the completed
-F-01 acceptance result.
+Selective first-ACK-loss isolation retains authoritative native coverage and
+is not represented as a physical pass. These remaining items do not change the
+completed F-01 acceptance result.
 
 ## Release contents and commit chain
 

@@ -77,7 +77,7 @@ ARGUS REDLINE is an experimental embedded communications and device-control plat
 
 > **Firmware identifier:** v0.5.1 — focused duplicate-cache security/correctness patch over the v0.5.0 capability substrate, preserving Wire Protocol 1.
 
-**Current published baseline:** v0.5.1. Its F-01 remediation and focused qualification are complete. Remaining electrical, startup, and endurance qualification gates v0.6.0 implementation, while v0.6.0 architecture and protocol design work is active.
+**Current published baseline:** v0.5.1. Its F-01 remediation and focused qualification are complete. The August 16 GPIO4 ADC characterization and post-characterization 30/30 radio regression passed; remaining startup-held and designated endurance/fault qualification gates v0.6.0 implementation, while v0.6.0 architecture and protocol design work is active.
 
 Configuration Schema remains `1` and the current hardware profile remains `HELTEC_V4`.
 
@@ -99,6 +99,7 @@ Mesh routing, repeaters, GNSS, final enclosures, general opaque application tran
 * **[August 14 Security Review](docs/ARGUS_REDLINE_SECURITY_REVIEW_2026-08-14.md)** — security findings and current dispositions
 * **[v0.5.1 Implementation and Qualification Brief](docs/V0.5.1_IMPLEMENTATION_AND_QUALIFICATION_BRIEF.md)** — F-01 correction and acceptance gates
 * **[v0.5.1 Qualification Results](docs/V0.5.1_QUALIFICATION_RESULTS.md)** — physical qualification evidence
+* **[v0.5.1 Hardware Qualification Follow-up](docs/V0.5.1_HARDWARE_QUALIFICATION_RESULTS.md)** — August 16 GPIO4 ADC and post-characterization radio evidence
 * **[v0.5.1 Dependency and Source Audit](docs/V0.5.1_DEPENDENCY_AND_SOURCE_AUDIT.md)** — dependency and source verification
 * **[v0.5.1 Development Handoff](docs/ARGUS_REDLINE_v0.5.1_Development_Handoff.md)** — patch, compatibility, validation, and remaining limitations
 
@@ -110,7 +111,7 @@ The underlying v0.5.0 capability milestone adds three immutable `HELTEC_V4` logi
 * Digital input `0x0201`
 * Analog input `0x0301`
 
-Digital input and indicator/arbitration behavior were physically validated. Analog sampling remains disabled and reports `HARDWARE_UNAVAILABLE` pending GPIO4/ADC1_CH3 electrical characterization in a v0.5.x patch.
+Digital input, indicator/arbitration behavior, and the temporary GPIO4/ADC1_CH3 characterization path were physically validated. Ordinary production analog sampling remains disabled and reports `HARDWARE_UNAVAILABLE`; the characterization result does not authorize production enablement.
 
 Verified behavior includes:
 

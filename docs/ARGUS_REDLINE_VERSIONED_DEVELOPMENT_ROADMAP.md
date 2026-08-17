@@ -8,8 +8,9 @@
 
 **Lifecycle state:** v0.5.1 is published; its F-01 remediation and focused
 qualification are complete while preserving the v0.5.0 capability milestone
-and Wire Protocol 1. Remaining required electrical, startup, and endurance
-qualification is pending. v0.6.0 documentation/design may proceed, but v0.6.0
+and Wire Protocol 1. The August 16 GPIO4 characterization and
+post-characterization 30/30 regression passed. Remaining required startup-held
+and designated endurance/fault qualification is pending. v0.6.0 documentation/design may proceed, but v0.6.0
 implementation has not started and remains gated on that hardware work. F-02
 through F-04 remain deferred security requirements.
 
@@ -317,18 +318,20 @@ LED-arbitration adapters, minimal DEVICE-screen summary, and retained
 characterization tooling. Physical digital input and indicator/arbitration
 behavior were validated on the V4.3 boards.
 
-GPIO4/ADC1_CH3 physical electrical characterization remains deferred to a
-v0.5.x patch. The registered analog capability remains
-`HARDWARE_UNAVAILABLE` in ordinary v0.5.0 production firmware.
+GPIO4/ADC1_CH3 physical electrical characterization passed in an August 16,
+2026 v0.5.x follow-up over the tested 0.51–2.31 V range, together with a
+post-characterization 30/30 TEST/ACK regression. The registered analog
+capability remains `HARDWARE_UNAVAILABLE` in ordinary production firmware.
 
 ### v0.5.x qualification line
 
 The v0.5.x line remains available for qualification and bounded corrective
 patches before advancement to v0.6.0. The formal isolated radio exchange gate
-passed during v0.5.1 qualification. Remaining documented broader work includes
-controlled GPIO4/ADC1_CH3 electrical characterization, physical startup-held
-reproduction, and extended endurance/fault testing. These items are pending;
-they are not architecture failures and are not represented as passed.
+passed during v0.5.1 qualification. The separate August 16 follow-up completed
+controlled GPIO4/ADC1_CH3 electrical characterization and a formal
+post-characterization 30/30 regression. Remaining documented broader work is
+physical startup-held reproduction and the designated extended endurance/fault
+qualification; those items are pending and are not represented as passed.
 
 `v0.5.1` is the focused F-01 duplicate-cache security/correctness patch. It
 uses exact canonical request identity (source, sequence, opcode, payload length,
@@ -407,7 +410,7 @@ These names describe local semantic capability operations and validation behavio
 [x] Approved output can be controlled
 [x] Local authorization and safety checks can deny an operation
 [x] Radio and UI remain responsive during observed hardware operations
-[~] GPIO4 ADC electrical characterization deferred to v0.5.x; production remains fail-closed
+[x] GPIO4 ADC electrical characterization passed in the August 16 follow-up; production remains fail-closed
 ```
 
 ### Explicit non-goals
@@ -1323,7 +1326,7 @@ Structured Operations, Responses, and Host Protocol
 Immediate work:
 
 ```text
-[ ] Complete remaining explicitly deferred v0.5.x electrical, startup, and endurance evidence as scheduled
+[ ] Complete remaining explicitly deferred startup-held and designated endurance/fault evidence as scheduled
 [ ] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
 [x] Prepare the principal v0.6.0 architecture, Host Protocol, and Wire operation designs
 [ ] Begin v0.6.0 implementation only after its hardware entry gate is satisfied
