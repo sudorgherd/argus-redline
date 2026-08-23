@@ -98,6 +98,14 @@ identity, authentication, or cross-reset idempotency.
 Host Protocol 0.2 retains one active Host operation and one retained completion.
 It does not add multiple outstanding operations.
 
+Every accepted request MUST retain the protocol minor from its decoded frame.
+Every correlated response--whether immediate, produced after deferred operation
+completion, or replayed from retained completion--MUST use that retained request
+minor. A minor-1 request therefore always receives a minor-1 correlated response;
+raising the firmware's highest supported minor to 2 MUST NOT change its response
+minor to 2. A response with request ID zero may use the decoded inbound minor only
+when that minor is trustworthy under the existing parser validation rules.
+
 ## 5. Version Handling and HELLO
 
 ### 5.1 HELLO request
@@ -120,6 +128,9 @@ For a minor-2 frame:
 - the HELLO_RESPONSE frame minor remains 2 because it answers a minor-2
   request, even when `selected minor` is 1. The Host uses its selected minor in
   each later frame; the device retains no negotiated-version state.
+
+HELLO is discovery only. It MUST NOT create connection-version state, and it
+MUST NOT alter the interpretation or response minor of any later frame.
 
 ### 5.2 HELLO response
 
@@ -444,6 +455,14 @@ The Host Protocol 0.1 single-active/single-retained lifecycle applies to Event
 operations. Retained identity remains request ID plus byte-exact accepted
 OPERATION_REQUEST payload.
 
+The active-operation entry and retained-completion entry additionally store the
+accepted request's frame minor as response-encoding context. Immediate correlated
+responses copy the inbound request minor; deferred completions copy the active
+entry's stored minor; retained replays copy the retained entry's stored minor.
+Replacing a retained completion replaces this stored context together with the
+response. Firmware-wide `CURRENT_MINOR` or `MAX_SUPPORTED_MINOR` constants MUST
+NOT be substituted for it.
+
 The volatile Host retry cache and persistent Hub Event ledger are independent:
 
 - replacing a retained Host completion never consumes, deletes, reorders, or
@@ -544,6 +563,8 @@ five categories and all three features. The sample Event is BUTTON family
 seconds, and one-byte body `0x02`. All lines include CRC bytes; encoded lines
 include the final delimiter.
 
+For the frozen v0.7 Event registry, BUTTON body `0x02` means `RELEASE`.
+
 ```text
 HELLO_REQUEST 0.2, supported range 1..2
 decoded: 00 02 01 00 34 12 02 00 01 02 62 F7
@@ -597,6 +618,9 @@ Before integration, native tests MUST cover:
   lifecycle, diagnostics, and golden-vector compatibility;
 - minor-2 HELLO ranges selecting 1 or 2, no-overlap error, frame-minor
   authority, and absence of hidden connection-version state;
+- immediate, deferred, and retained completion responses preserving the exact
+  accepted request minor, including minor-1 requests while firmware supports
+  minor 2 and retained minor-1 replay after unrelated minor-2 traffic;
 - role-dependent Event category/feature advertisement and equality of both
   bits; all reserved category/feature/HELLO bits and bytes;
 - unchanged existing operation categories, values, pairings, responses, and
@@ -648,6 +672,7 @@ Implementation may begin only when:
 ```text
 [ ] Minor-1 behavior is frozen by byte-exact regression fixtures
 [ ] Minor-2 HELLO selection and frame-minor authority are accepted
+[ ] Immediate, deferred, and retained responses preserve their request minor
 [ ] EVENT category 0x05 and feature bit 0x0004 are accepted
 [ ] POLL_EVENTS 0x29 and CONSUME_EVENT 0x2A are accepted
 [ ] 29-byte Host Event record and 9-byte consume identity are frozen
