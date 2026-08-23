@@ -1,0 +1,13 @@
+{
+  "name": "esp32_event_storage",
+  "version": "0.7.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "node_event_store": "*",
+    "event_identity": "*",
+    "event_storage": "*",
+    "event_protocol": "*",
+    "redline_protocol": "*"
+  }
+}
