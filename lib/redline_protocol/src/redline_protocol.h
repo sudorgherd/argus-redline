@@ -40,7 +40,8 @@ enum class PacketType : uint8_t {
     COMMAND = 0x01,
     ACK = 0x02,
     ERROR = 0x03,
-    RESPONSE = 0x04
+    RESPONSE = 0x04,
+    EVENT = 0x05
 };
 
 enum class AckStatus : uint8_t {
@@ -180,7 +181,8 @@ inline bool decode(
         type != PacketType::COMMAND &&
         type != PacketType::ACK &&
         type != PacketType::ERROR &&
-        type != PacketType::RESPONSE
+        type != PacketType::RESPONSE &&
+        type != PacketType::EVENT
     ) {
         return false;
     }

@@ -200,6 +200,10 @@ void testPacketTypeNumericValues() {
         0x04,
         static_cast<uint8_t>(Protocol::PacketType::RESPONSE)
     );
+    TEST_ASSERT_EQUAL_HEX8(
+        0x05,
+        static_cast<uint8_t>(Protocol::PacketType::EVENT)
+    );
 }
 
 void testTestOpcodeNumericValue() {
