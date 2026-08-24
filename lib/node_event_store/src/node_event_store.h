@@ -44,6 +44,15 @@ enum class MutationStatus : uint8_t {
     DEGRADED
 };
 
+enum class AttemptStatus : uint8_t {
+    ARMED,
+    EXHAUSTED,
+    INVALID_SLOT,
+    NOT_QUEUED,
+    STORAGE_FAILURE,
+    DEGRADED
+};
+
 struct EventInput {
     uint8_t family;
     uint8_t flags;
@@ -230,6 +239,42 @@ public:
             return MutationStatus::INVALID_TRANSITION;
         }
         return makeFree(slot);
+    }
+
+    MutationStatus checkpointRemaining(
+        uint8_t slot,
+        uint32_t remainingActiveSeconds
+    ) {
+        if (!healthy_) return MutationStatus::DEGRADED;
+        if (slot >= NODE_EVENT_CAPACITY) return MutationStatus::INVALID_SLOT;
+        const EventRecords::NodeRecord& current = slots_[slot].record;
+        if (current.state != EventRecords::NodeState::QUEUED ||
+            remainingActiveSeconds == 0 ||
+            remainingActiveSeconds >= current.remainingActiveSeconds) {
+            return MutationStatus::INVALID_TRANSITION;
+        }
+        EventRecords::NodeRecord next = current;
+        next.generation += 1U;
+        next.remainingActiveSeconds = remainingActiveSeconds;
+        if (!commitMutation(slot, next)) return MutationStatus::STORAGE_FAILURE;
+        return MutationStatus::OK;
+    }
+
+    AttemptStatus armAttempt(uint8_t slot) {
+        if (!healthy_) return AttemptStatus::DEGRADED;
+        if (slot >= NODE_EVENT_CAPACITY) return AttemptStatus::INVALID_SLOT;
+        const EventRecords::NodeRecord& current = slots_[slot].record;
+        if (current.state != EventRecords::NodeState::QUEUED) {
+            return AttemptStatus::NOT_QUEUED;
+        }
+        if (current.attemptsUsed >= EventRecords::MAX_ATTEMPTS) {
+            return AttemptStatus::EXHAUSTED;
+        }
+        EventRecords::NodeRecord next = current;
+        next.generation += 1U;
+        next.attemptsUsed += 1U;
+        if (!commitMutation(slot, next)) return AttemptStatus::STORAGE_FAILURE;
+        return AttemptStatus::ARMED;
     }
 
     bool healthy() const { return healthy_; }
