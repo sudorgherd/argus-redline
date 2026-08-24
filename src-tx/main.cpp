@@ -14,6 +14,9 @@
 #include "hub_settings_integration.h"
 #include "heltec_v4_capabilities.h"
 #include "capability_role_integration.h"
+#include "esp32_event_storage.h"
+#include "host_event_service.h"
+#include "hub_event_radio.h"
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 #include "host_role_integration.h"
 #endif
@@ -89,6 +92,14 @@ uint32_t feedbackLedUntilMs = 0;
 unsigned long nextTransmitAt = 0;
 
 TransactionEngine::HubTransactionState transactionState;
+Esp32EventStorage::PreferencesStore eventStorage;
+HubEventLedger::Ledger hubEventLedger;
+HostEventService::Service hostEventService(hubEventLedger);
+EventRadioIntegration::HubAdapter hubEventAdapter;
+EventRadioIntegration::HubArbiter hubRadioArbiter;
+bool hubEventLedgerRecovered = false;
+bool eventAckTxActive = false;
+RuntimeState::RuntimePhase eventAckPriorPhase = RuntimeState::RuntimePhase::IDLE;
 
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 HostRoleIntegration::Stack<decltype(Serial)> hostStack(Serial, false);
@@ -860,6 +871,66 @@ bool startAckReceive(bool resetDeadline
     return true;
 }
 
+bool restoreHubReceive(RuntimeState::RuntimePhase phase) {
+    operationDone = false;
+    if (radio.startReceive() != RADIOLIB_ERR_NONE) return false;
+    setRuntimePhase(phase);
+    return true;
+}
+
+bool startEventAdmissionAck(const EventRadioIntegration::HubResult& result,
+                            RuntimeState::RuntimePhase priorPhase) {
+    if (result.action != EventRadioIntegration::HubAction::START_EVENT_ACK ||
+        result.length == 0 || result.length > sizeof(transmitBuffer)) return false;
+    eventAckPriorPhase = priorPhase;
+    EventRadioIntegration::HubOwner owner = EventRadioIntegration::HubOwner::IDLE_RECEIVE;
+    if (priorPhase == RuntimeState::RuntimePhase::WAITING_FOR_ACK)
+        owner = EventRadioIntegration::HubOwner::COMMAND_WAIT_ACK;
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    if (priorPhase == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE)
+        owner = EventRadioIntegration::HubOwner::COMMAND_WAIT_RESPONSE;
+#endif
+    hubRadioArbiter.setOwner(owner);
+    if (!hubRadioArbiter.beginEventAck()) return false;
+    for (size_t i = 0; i < result.length; ++i) transmitBuffer[i] = result.bytes[i];
+    transmitLength = result.length;
+    operationDone = false;
+    eventAckTxActive = true;
+    if (radio.startTransmit(transmitBuffer, transmitLength) != RADIOLIB_ERR_NONE) {
+        eventAckTxActive = false;
+        hubRadioArbiter.finishEventAck();
+        restoreHubReceive(priorPhase);
+        return false;
+    }
+    return true;
+}
+
+bool processEventBytes(const uint8_t* bytes, size_t length,
+                       RuntimeState::RuntimePhase priorPhase) {
+    if (!hubEventLedgerRecovered) return false;
+    const EventRadioIntegration::HubResult result = hubEventAdapter.process(
+        bytes, length, runtimeState.localId(), runtimeState.peerId(), hubEventLedger);
+    if (result.action != EventRadioIntegration::HubAction::START_EVENT_ACK) return false;
+    (void)startEventAdmissionAck(result, priorPhase);
+    return true;
+}
+
+void finishEventAdmissionAck() {
+    eventAckTxActive = false;
+    hubRadioArbiter.finishEventAck();
+    restoreHubReceive(eventAckPriorPhase);
+}
+
+void processIdleInbound() {
+    const size_t length = radio.getPacketLength();
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {};
+    if (length < Protocol::HEADER_SIZE || length > sizeof(bytes) ||
+        radio.readData(bytes, length) != RADIOLIB_ERR_NONE ||
+        !processEventBytes(bytes, length, RuntimeState::RuntimePhase::IDLE)) {
+        restoreHubReceive(RuntimeState::RuntimePhase::IDLE);
+    }
+}
+
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 bool startHostStructuredTransmission(const Protocol::Packet& command) {
     size_t length = 0;
@@ -944,6 +1015,10 @@ void serviceProductionHost(uint32_t nowMs) {
     if (!runtimeState.isReady()) return;
     if (runtimeState.phase() != RuntimeState::RuntimePhase::IDLE &&
         !hostStructuredOwner) return;
+    if (Serial.available() <= 0) return;
+    if (operationDone) return;
+    if (radio.standby() != RADIOLIB_ERR_NONE) return;
+    if (operationDone) return;
     const HostOperationService::DeviceSnapshot snapshot =
         HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U);
     const HostRoleIntegration::Result result = hostStack.serviceRx(snapshot,
@@ -953,8 +1028,9 @@ void serviceProductionHost(uint32_t nowMs) {
         runtimeState, hostAvailability(), nowMs, 2500U, true);
     if (result.action == HostRoleIntegration::Action::TRANSMIT_COMMAND &&
         runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
-        radio.standby();
         startHostStructuredTransmission(result.packet);
+    } else if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
+        restoreHubReceive(RuntimeState::RuntimePhase::IDLE);
     }
     if (result.action == HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF) {
         TRACE_HUB(StructuredTrace::Event::HOST_TX_SUBMITTED,
@@ -1042,6 +1118,14 @@ void processAcknowledgment() {
         );
 
         continueWaitingForAck();
+        return;
+    }
+
+    Protocol::Packet classified = {};
+    if (Protocol::decode(receiveBuffer, packetLength, classified) &&
+        classified.type == Protocol::PacketType::EVENT) {
+        if (!processEventBytes(receiveBuffer, packetLength, runtimeState.phase()))
+            restoreHubReceive(runtimeState.phase());
         return;
     }
 
@@ -1273,6 +1357,13 @@ void setup() {
 
     loadSettings(static_cast<uint32_t>(millis()));
 
+    (void)hubEventLedger.recover(
+        eventStorage, DeviceConfig::LOCAL_ID, DeviceConfig::PEER_ID);
+    hubEventLedgerRecovered = hubEventLedger.healthy();
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+    hostStack.setEventService(&hostEventService);
+#endif
+
     radioSPI.begin(9, 11, 10, 8);
 
     const int state = radio.begin(915.0);
@@ -1316,9 +1407,14 @@ void setup() {
     logVersionMetadata();
 
     nextTransmitAt = millis() + INITIAL_DELAY_MS;
+    restoreHubReceive(RuntimeState::RuntimePhase::IDLE);
 }
 
 void serviceHubTransport(uint32_t nowMs) {
+    if (eventAckTxActive) {
+        if (operationDone) { operationDone = false; finishEventAdmissionAck(); }
+        return;
+    }
 #if defined(ARGUS_HOST_MACHINE_STREAM)
     if (hostStructuredOwner && !operationDone) {
         const HostRoleIntegration::Result action = hostStack.serviceRemote(nowMs);
@@ -1349,10 +1445,18 @@ void serviceHubTransport(uint32_t nowMs) {
     }
 #endif
     if (runtimeState.phase() == RuntimeState::RuntimePhase::IDLE) {
+        if (operationDone) {
+            operationDone = false;
+            processIdleInbound();
+            return;
+        }
         if ((long)(millis() - nextTransmitAt) < 0) {
             return;
         }
-
+        if (radio.standby() != RADIOLIB_ERR_NONE) {
+            restoreHubReceive(RuntimeState::RuntimePhase::IDLE); return;
+        }
+        if (operationDone) { processIdleInbound(); return; }
         startCommandTransmission();
         return;
     }

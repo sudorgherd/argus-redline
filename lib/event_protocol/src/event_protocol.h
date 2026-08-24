@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "protocol.h"
+#include "../../../include/protocol.h"
 
 namespace EventProtocol {
 

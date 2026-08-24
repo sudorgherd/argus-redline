@@ -14,6 +14,10 @@
 #include "node_settings_integration.h"
 #include "heltec_v4_capabilities.h"
 #include "capability_role_integration.h"
+#include "esp32_event_storage.h"
+#include "node_event_delivery.h"
+#include "node_event_radio.h"
+#include <esp_system.h>
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 #include "host_role_integration.h"
 #endif
@@ -76,6 +80,35 @@ bool feedbackLedActive = false;
 uint32_t feedbackLedUntilMs = 0;
 bool quietMaintenanceAttemptArmed = false;
 bool maintenanceOwnershipActive = false;
+
+class EspEventEntropy final : public EventIdentity::EntropySource {
+public:
+    bool nextUint32(uint32_t& value) override { value = esp_random(); return true; }
+};
+class EventSequence final : public NodeEventDelivery::SequenceSource {
+public:
+    bool next(uint8_t& value) override {
+        ++value_; if (value_ == 0) ++value_; value = value_; return true;
+    }
+private:
+    uint8_t value_ = 0;
+};
+class EventJitter final : public NodeEventDelivery::JitterSource {
+public:
+    uint16_t nextMilliseconds() override {
+        return static_cast<uint16_t>(esp_random() % 251U);
+    }
+};
+
+Esp32EventStorage::PreferencesStore eventStorage;
+EspEventEntropy eventEntropy;
+NodeEventStore::Store nodeEventStore;
+EventSequence eventSequence;
+EventJitter eventJitter;
+NodeEventDelivery::Controller eventDelivery;
+EventRadioIntegration::NodeArbiter eventRadio;
+EventRadioIntegration::CommandPreAckTimer commandPreAck;
+bool eventSubsystemReady = false;
 
 uint8_t receiveBuffer[Protocol::MAX_PACKET_SIZE] = {};
 uint8_t transmitBuffer[Protocol::MAX_PACKET_SIZE] = {};
@@ -690,6 +723,8 @@ bool startListening() {
         return false;
     }
 
+    eventRadio.restoreListening();
+
     return true;
 }
 
@@ -786,11 +821,21 @@ bool startAcknowledgment(
 
     pendingAcknowledgmentDuplicate = duplicate;
 
-    radio.standby();
-    delay(100);
-
-    operationDone = false;
+    if (radio.standby() != RADIOLIB_ERR_NONE) {
+        startListening();
+        return false;
+    }
+    eventRadio.beginCommandPreAck();
+    commandPreAck.begin(static_cast<uint32_t>(millis()));
     setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_ACK);
+    return true;
+}
+
+void serviceCommandPreAck(uint32_t nowMs) {
+    if (!commandPreAck.due(nowMs)) return;
+    commandPreAck.clear();
+    operationDone = false;
+    eventRadio.beginCommandAckTx();
     radioLedActive = true;
     updateLedOutput();
 
@@ -810,12 +855,13 @@ bool startAcknowledgment(
             "ACK FAILED",
             String("CODE ") + state
         );
-
+#if defined(ARGUS_HOST_MACHINE_STREAM)
+        structuredAckThenExecute = false;
+        structuredCachedResponseAfterAck = false;
+#endif
         startListening();
-        return false;
+        return;
     }
-
-    return true;
 }
 
 #if defined(ARGUS_HOST_MACHINE_STREAM)
@@ -827,6 +873,7 @@ bool startStructuredResponse(const Protocol::Packet& response) {
     transmitLength = length;
     operationDone = false;
     setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE);
+    eventRadio.beginCommandResponseTx();
     radioLedActive = true;
     updateLedOutput();
     if (radio.startTransmit(transmitBuffer, transmitLength) != RADIOLIB_ERR_NONE) {
@@ -975,6 +1022,12 @@ void handleReceivedPacket() {
     runtimeState.updateRadioMetrics(rssi, snr);
     runtimeState.recordActivity(observedAtMs);
     markPresentationChanged();
+
+    if (eventSubsystemReady &&
+        eventDelivery.state() == NodeEventDelivery::RuntimeState::WAIT_ADMISSION) {
+        (void)eventDelivery.admissionCandidate(
+            receiveBuffer, packetLength, observedAtMs);
+    }
 
     Protocol::Packet command = {};
 
@@ -1144,6 +1197,17 @@ void setup() {
 
     loadSettings(static_cast<uint32_t>(millis()));
 
+    const NodeEventStore::Status eventStoreStatus = nodeEventStore.recover(
+        eventStorage, eventEntropy, DeviceConfig::LOCAL_ID);
+    if (eventStoreStatus == NodeEventStore::Status::READY) {
+        const NodeEventDelivery::ControllerResult recovered = eventDelivery.recover(
+            nodeEventStore, DeviceConfig::LOCAL_ID, DeviceConfig::PEER_ID,
+            eventSequence, eventJitter, static_cast<uint32_t>(millis()));
+        eventSubsystemReady =
+            recovered.status == NodeEventDelivery::ControllerStatus::OK ||
+            recovered.status == NodeEventDelivery::ControllerStatus::NO_ACTIVE_EVENT;
+    }
+
     radioSPI.begin(9, 11, 10, 8);
 
     const int state = radio.begin(915.0);
@@ -1194,10 +1258,55 @@ void setup() {
     logVersionMetadata();
 }
 
+void serviceNodeEvents(uint32_t nowMs) {
+    if (!eventSubsystemReady) return;
+    const bool synchronousWork = commandPreAck.active() ||
+        eventRadio.owner() != EventRadioIntegration::NodeOwner::LISTENING ||
+        runtimeState.phase() != RuntimeState::RuntimePhase::LISTENING ||
+        operationDone || maintenanceOwnershipActive || renderingPresentation;
+    const NodeEventDelivery::ControllerResult serviced =
+        eventDelivery.service(nowMs, synchronousWork);
+    if (serviced.status == NodeEventDelivery::ControllerStatus::DEGRADED ||
+        serviced.status == NodeEventDelivery::ControllerStatus::POLICY_FAILURE ||
+        serviced.status == NodeEventDelivery::ControllerStatus::STORAGE_FAILURE) {
+        eventSubsystemReady = false;
+        return;
+    }
+    EventRadioIntegration::NodeSafePoint point = {
+        runtimeState.isReady(),
+        runtimeState.phase() == RuntimeState::RuntimePhase::LISTENING,
+        operationDone,
+        synchronousWork,
+        maintenanceOwnershipActive,
+        renderingPresentation
+    };
+    if (eventRadio.requestEvent(point, eventDelivery.state()) !=
+        EventRadioIntegration::NodeAcquireResult::ACQUIRE_STANDBY) return;
+    const bool standbyOk = radio.standby() == RADIOLIB_ERR_NONE;
+    const EventRadioIntegration::NodeAcquireResult acquired =
+        eventRadio.finishStandby(standbyOk, operationDone);
+    if (acquired == EventRadioIntegration::NodeAcquireResult::RECEIVED_PACKET_WON) return;
+    if (acquired != EventRadioIntegration::NodeAcquireResult::GRANT_EVENT_TX) {
+        startListening(); return;
+    }
+    const NodeEventDelivery::ControllerResult grant = eventDelivery.grantTransmit(nowMs);
+    if (grant.action.type != NodeEventDelivery::RadioActionType::TRANSMIT) {
+        startListening(); return;
+    }
+    operationDone = false;
+    if (radio.startTransmit(grant.action.bytes, grant.action.length) != RADIOLIB_ERR_NONE) {
+        (void)eventDelivery.txStartFailed(nowMs);
+        startListening();
+        return;
+    }
+    (void)eventDelivery.txStarted(nowMs);
+}
+
 void loop() {
     const uint32_t nowMs = static_cast<uint32_t>(millis());
     serviceButton(nowMs);
     serviceButtonFeedback(nowMs);
+    serviceCommandPreAck(nowMs);
 
 #if defined(ARGUS_CAPABILITY_CHARACTERIZATION)
     serviceCharacterizationInput();
@@ -1206,7 +1315,10 @@ void loop() {
     if (runtimeState.isReady() && operationDone) {
         operationDone = false;
 
-        if (
+        if (eventRadio.eventOwnsRadio()) {
+            (void)eventDelivery.txCompleted(nowMs);
+            startListening();
+        } else if (
             runtimeState.phase() ==
             RuntimeState::RuntimePhase::TRANSMITTING_ACK
         ) {
@@ -1230,6 +1342,8 @@ void loop() {
         serviceCharacterization();
 #endif
     }
+
+    serviceNodeEvents(nowMs);
 
     // Defer OLED I/O until an active ACK has completed and receive restarted.
     if (
