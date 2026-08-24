@@ -35,6 +35,9 @@ public:
     HostOperationLifecycle::Lifecycle& lifecycle() { return lifecycle_; }
     HostProtocolDiagnostics::Diagnostics& diagnostics() { return diagnostics_; }
     HostTransport::Adapter<ByteStream>& transport() { return transport_; }
+    void setEventService(HostEventService::Service* service) {
+        eventService_ = service;
+    }
 
     void observeConnection(bool connected) {
         if (connected == connected_) return;
@@ -155,7 +158,7 @@ public:
             const HostOperationService::HelloResult hello =
                 HostOperationService::handleHello(frame.requestId, frame.major,
                     frame.minor,
-                    request, snapshot, radioBridge);
+                    request, snapshot, radioBridge, eventService_ != nullptr);
             uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {};
             size_t length = 0;
             if (hello.disposition == HostOperationService::HelloDisposition::RESPONSE) {
@@ -189,20 +192,6 @@ public:
             return result;
         }
         diagnostics_.observeFrame(rx.parserResult);
-        if (semantic.category == HostProtocol::OperationCategory::EVENT) {
-            HostProtocol::OperationResponse unsupported = {};
-            unsupported.category = semantic.category;
-            unsupported.operation = semantic.operation;
-            unsupported.targetDeviceId = semantic.targetDeviceId;
-            unsupported.targetId = semantic.targetId;
-            unsupported.resultClass = HostProtocol::ResultClass::REQUEST_REJECTED;
-            unsupported.resultCode = static_cast<uint8_t>(
-                HostProtocol::RequestRejectionCode::UNSUPPORTED_OPERATION);
-            HostProtocol::setNoneValue(unsupported.value);
-            if (submitOperationResponse(frame.minor, frame.requestId, unsupported))
-                result.action = Action::HOST_RESPONSE_HANDOFF;
-            return result;
-        }
 #if defined(ARGUS_STRUCTURED_TRACE)
         StructuredTrace::record(now, StructuredTrace::Event::HOST_FRAME_ACCEPTED,
             frame.requestId, 0, static_cast<uint8_t>(semantic.operation));
@@ -212,10 +201,13 @@ public:
                 semantic.targetDeviceId);
 #endif
         const HostOperationLifecycle::State before = lifecycle_.state();
+        const bool retainedReplay = lifecycle_.isExactRetainedRequest(
+            frame.requestId, frame.payload, frame.payloadLength);
         const HostOperationLifecycle::Result life = lifecycle_.submit(
             frame.requestId, frame.payload, frame.payloadLength, snapshot, peerId,
             registryValid, registry, handler, interlock, capabilityDiagnostics,
-            runtimeState, availability, now, overallTimeout, 2, false, frame.minor);
+            runtimeState, availability, now, overallTimeout, 2, false, frame.minor,
+            eventService_);
         if (life.action == HostOperationLifecycle::Action::TRANSMIT_COMMAND) {
 #if defined(ARGUS_STRUCTURED_TRACE)
             StructuredTrace::record(now,
@@ -226,8 +218,9 @@ public:
             result.action = Action::TRANSMIT_COMMAND;
             result.packet = life.packet;
         } else if (life.action == HostOperationLifecycle::Action::HOST_RESPONSE_READY) {
-            if (before == HostOperationLifecycle::State::EMPTY ||
-                before == HostOperationLifecycle::State::COMPLETED) {
+            if (!retainedReplay &&
+                (before == HostOperationLifecycle::State::EMPTY ||
+                 before == HostOperationLifecycle::State::COMPLETED)) {
                 if (life.response.resultClass != HostProtocol::ResultClass::REQUEST_REJECTED)
                     diagnostics_.observeRequestDispatched();
             }
@@ -308,6 +301,7 @@ private:
     HostProtocolDiagnostics::Diagnostics diagnostics_ = {};
     bool connected_ = false;
     bool pendingOriginalDelivery_ = false;
+    HostEventService::Service* eventService_ = nullptr;
 };
 
 }  // namespace HostRoleIntegration

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "radio_operation_bridge.h"
+#include "host_event_service.h"
 
 namespace HostOperationLifecycle {
 
@@ -40,6 +41,11 @@ public:
     State state() const { return state_; }
     bool hostConnected() const { return hostConnected_; }
     const RetainedEntry& entry() const { return entry_; }
+    bool isExactRetainedRequest(uint16_t requestId, const uint8_t* payload,
+        size_t payloadLength) const {
+        return state_ == State::COMPLETED && requestId == entry_.requestId &&
+            payload != nullptr && samePayload(payload, payloadLength);
+    }
     RadioOperationBridge::HubStructuredOperationBridge& remoteBridge() {
         return remoteBridge_;
     }
@@ -61,7 +67,8 @@ public:
         uint32_t overallTimeout,
         uint8_t maxRetries = 2,
         bool explicitlyConfigured = false,
-        uint8_t requestMinor = HostProtocol::VERSION_MINOR_0_1
+        uint8_t requestMinor = HostProtocol::VERSION_MINOR_0_1,
+        HostEventService::Service* eventService = nullptr
     ) {
         Result result = {};
         result.requestId = requestId;
@@ -96,11 +103,22 @@ public:
                 HostProtocol::RequestRejectionCode::BUSY);
         }
 
-        if (request.targetDeviceId == snapshot.deviceId) {
-            const HostOperationService::Result local =
-                HostOperationService::handleLocalOperation(requestId, request,
+        if (request.targetDeviceId == snapshot.deviceId ||
+            request.category == HostProtocol::OperationCategory::EVENT) {
+            HostOperationService::Result local = {};
+            if (request.category == HostProtocol::OperationCategory::EVENT) {
+                local = eventService != nullptr
+                    ? eventService->handle(requestId, request, snapshot.role,
+                        snapshot.deviceId)
+                    : HostOperationService::reject(requestId, request,
+                        request.targetDeviceId == snapshot.deviceId
+                            ? HostProtocol::RequestRejectionCode::UNSUPPORTED_OPERATION
+                            : HostProtocol::RequestRejectionCode::BAD_TARGET, true);
+            } else {
+                local = HostOperationService::handleLocalOperation(requestId, request,
                     snapshot, registryValid, registry, handler, interlock,
                     diagnostics, runtimeState, availability);
+            }
             if (local.disposition != HostOperationService::Disposition::HANDLED) {
                 return rejection(requestId, request, requestMinor,
                     local.disposition == HostOperationService::Disposition::NOT_HANDLED

@@ -290,6 +290,60 @@ void test_minor_two_event_codec_is_rejected_without_service_using_request_minor(
                            response.resultCode);
 }
 
+void test_hub_event_service_advertises_and_dispatches_locally_once() {
+    Fixture f;
+    HubEventLedger::Ledger unavailableLedger;
+    HostEventService::Service eventService(unavailableLedger);
+    f.stack.setEventService(&eventService);
+
+    HostProtocol::HelloRequest hello = {1, 2};
+    uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {}; size_t length = 0;
+    HostProtocol::encodeHelloRequest(HostProtocol::VERSION_MINOR_0_2,
+        hello, payload, sizeof(payload), length);
+    appendFrame(f, HostProtocol::MessageType::HELLO_REQUEST, 0x8301,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF),
+        static_cast<uint8_t>(f.service().action));
+    HostProtocol::Frame frame = drainAndDecode(f);
+    HostProtocol::HelloResponse helloResponse = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeHelloResponse(
+            frame.payload, frame.payloadLength, helloResponse)));
+    TEST_ASSERT_EQUAL_UINT16(HostProtocol::CATEGORY_EVENT_BIT,
+        helloResponse.operationCategoryBitmap & HostProtocol::CATEGORY_EVENT_BIT);
+    TEST_ASSERT_EQUAL_UINT16(HostProtocol::FEATURE_EVENT_SERVICE,
+        helloResponse.featureBitmap & HostProtocol::FEATURE_EVENT_SERVICE);
+
+    HostProtocol::OperationRequest poll = {};
+    poll.category = HostProtocol::OperationCategory::EVENT;
+    poll.operation = HostProtocol::OperationCode::POLL_EVENTS;
+    poll.targetDeviceId = 1; HostProtocol::setNoneValue(poll.value);
+    HostProtocol::encodeOperationRequest(HostProtocol::VERSION_MINOR_0_2,
+        poll, payload, sizeof(payload), length);
+    appendFrame(f, HostProtocol::MessageType::OPERATION_REQUEST, 0x8302,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF),
+        static_cast<uint8_t>(f.service().action));
+    frame = drainAndDecode(f);
+    HostProtocol::OperationResponse response = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeOperationResponse(
+            HostProtocol::VERSION_MINOR_0_2, frame.payload,
+            frame.payloadLength, response)));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::ResultClass::EVENT_RESULT),
+        static_cast<uint8_t>(response.resultClass));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::EventResultCode::STORAGE_FAILURE),
+        response.resultCode);
+    TEST_ASSERT_EQUAL_UINT32(1, f.stack.diagnostics().snapshot().requestsDispatched);
+
+    appendFrame(f, HostProtocol::MessageType::OPERATION_REQUEST, 0x8302,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF),
+        static_cast<uint8_t>(f.service().action));
+    drainAndDecode(f);
+    TEST_ASSERT_EQUAL_UINT32(1, f.stack.diagnostics().snapshot().requestsDispatched);
+}
+
 
 }  // namespace
 
@@ -303,5 +357,6 @@ int main(int, char**) {
     RUN_TEST(test_remote_completion_disconnected_is_replayed_without_new_wire_work);
     RUN_TEST(test_minor_two_hello_is_stateless_and_does_not_advertise_stage9_service);
     RUN_TEST(test_minor_two_event_codec_is_rejected_without_service_using_request_minor);
+    RUN_TEST(test_hub_event_service_advertises_and_dispatches_locally_once);
     return UNITY_END();
 }

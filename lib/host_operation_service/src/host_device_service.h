@@ -245,7 +245,8 @@ inline HelloResult handleHello(
     uint8_t envelopeMinor,
     const HostProtocol::HelloRequest& request,
     const DeviceSnapshot& snapshot,
-    bool radioStructuredBridge = false
+    bool radioStructuredBridge = false,
+    bool eventServiceAvailable = false
 ) {
     HelloResult result = {};
     result.requestId = requestId;
@@ -294,6 +295,11 @@ inline HelloResult handleHello(
     result.response.featureBitmap = HostProtocol::FEATURE_LOCAL_OPERATIONS;
     if (radioStructuredBridge) {
         result.response.featureBitmap |= HostProtocol::FEATURE_RADIO_BRIDGE;
+    }
+    if (selectedMinor == HostProtocol::VERSION_MINOR_0_2 &&
+        snapshot.role == RuntimeState::DeviceRole::HUB && eventServiceAvailable) {
+        result.response.operationCategoryBitmap |= HostProtocol::CATEGORY_EVENT_BIT;
+        result.response.featureBitmap |= HostProtocol::FEATURE_EVENT_SERVICE;
     }
     result.response.maximumOutstandingOperations =
         HostProtocol::MAX_OUTSTANDING_OPERATIONS;
