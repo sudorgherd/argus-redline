@@ -242,6 +242,7 @@ struct HelloResult {
 inline HelloResult handleHello(
     uint16_t requestId,
     uint8_t envelopeMajor,
+    uint8_t envelopeMinor,
     const HostProtocol::HelloRequest& request,
     const DeviceSnapshot& snapshot,
     bool radioStructuredBridge = false
@@ -255,8 +256,15 @@ inline HelloResult handleHello(
         result.error.errorCode = HostProtocol::ProtocolErrorCode::UNSUPPORTED_MAJOR;
         return result;
     }
-    if (!HostProtocol::isValidHelloMinorRange(
+    if (!HostProtocol::isValidHelloMinorRange(envelopeMinor,
             request.minimumMinor, request.maximumMinor)) {
+        result.disposition = HelloDisposition::PROTOCOL_ERROR;
+        result.error.errorCode = HostProtocol::ProtocolErrorCode::UNSUPPORTED_MINOR;
+        return result;
+    }
+    uint8_t selectedMinor = 0;
+    if (!HostProtocol::selectHighestSupportedMinor(
+            request.minimumMinor, request.maximumMinor, selectedMinor)) {
         result.disposition = HelloDisposition::PROTOCOL_ERROR;
         result.error.errorCode = HostProtocol::ProtocolErrorCode::UNSUPPORTED_MINOR;
         return result;
@@ -268,7 +276,7 @@ inline HelloResult handleHello(
         return result;
     }
     result.disposition = HelloDisposition::RESPONSE;
-    result.response.selectedMinor = HostProtocol::VERSION_MINOR;
+    result.response.selectedMinor = selectedMinor;
     result.response.firmwareMajor = RedlineVersion::FIRMWARE_MAJOR;
     result.response.firmwareMinor = RedlineVersion::FIRMWARE_MINOR;
     result.response.firmwarePatch = RedlineVersion::FIRMWARE_PATCH;
@@ -291,6 +299,13 @@ inline HelloResult handleHello(
         HostProtocol::MAX_OUTSTANDING_OPERATIONS;
     result.response.reserved = HostProtocol::HELLO_RESERVED_VALUE;
     return result;
+}
+
+inline HelloResult handleHello(uint16_t requestId, uint8_t envelopeMajor,
+    const HostProtocol::HelloRequest& request,
+    const DeviceSnapshot& snapshot, bool radioStructuredBridge = false) {
+    return handleHello(requestId, envelopeMajor, HostProtocol::VERSION_MINOR_0_1,
+        request, snapshot, radioStructuredBridge);
 }
 
 static_assert(DeviceSettings::SCHEMA_VERSION <= UINT8_MAX,

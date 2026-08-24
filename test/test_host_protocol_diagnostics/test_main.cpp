@@ -245,7 +245,7 @@ void testUnsupportedVersionAndMessageTypeDoNotOverlapMalformed() {
     diagnostics.observeFrame(parse(makeRawFrame(1, VERSION_MINOR,
         static_cast<uint8_t>(MessageType::HELLO_REQUEST), 0, 1, 2,
         payload, sizeof(payload))));
-    diagnostics.observeFrame(parse(makeRawFrame(VERSION_MAJOR, 2,
+    diagnostics.observeFrame(parse(makeRawFrame(VERSION_MAJOR, 3,
         static_cast<uint8_t>(MessageType::HELLO_REQUEST), 0, 1, 2,
         payload, sizeof(payload))));
     diagnostics.observeFrame(parse(makeRawFrame(VERSION_MAJOR, VERSION_MINOR,

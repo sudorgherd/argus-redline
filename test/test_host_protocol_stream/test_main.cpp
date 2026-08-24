@@ -1,5 +1,7 @@
 #include <unity.h>
 
+#include <cstring>
+
 #include <host_protocol_stream.h>
 
 using namespace HostProtocol;
@@ -195,7 +197,7 @@ void testMalformedCandidatesRecoverAtNextDelimiter() {
 void testTrustworthyEnvelopeFailuresRemainClassified() {
     const struct { size_t decodedIndex; uint8_t value; DecodeResult expected; } cases[] = {
         {0, 1, DecodeResult::UNSUPPORTED_MAJOR},
-        {1, 2, DecodeResult::UNSUPPORTED_MINOR},
+        {1, 3, DecodeResult::UNSUPPORTED_MINOR},
         {2, 0x55, DecodeResult::UNSUPPORTED_MESSAGE_TYPE},
         {3, 1, DecodeResult::UNSUPPORTED_FLAGS},
         {4, 0, DecodeResult::INVALID_REQUEST_ID}
@@ -310,6 +312,46 @@ void testInvalidArgumentDoesNotAlterPartialState() {
     assertHello(parser.consume(HELLO_FRAME + 4, sizeof(HELLO_FRAME) - 4));
 }
 
+void testMixedMinorFramesRemainFrameAuthoritative() {
+    Frame minorTwo = {};
+    minorTwo.major = VERSION_MAJOR;
+    minorTwo.minor = VERSION_MINOR_0_2;
+    minorTwo.messageType = MessageType::HELLO_REQUEST;
+    minorTwo.requestId = 0x4567;
+    minorTwo.payloadLength = 2;
+    minorTwo.payload[0] = 1;
+    minorTwo.payload[1] = 2;
+    uint8_t encodedTwo[MAX_ENCODED_FRAME_SIZE] = {};
+    size_t encodedTwoLength = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EncodeResult::OK),
+        static_cast<uint8_t>(encodeFrame(minorTwo, encodedTwo,
+            sizeof(encodedTwo), encodedTwoLength)));
+
+    for (size_t split = 0; split <= encodedTwoLength; ++split) {
+        StreamParser splitParser;
+        StreamResult first = splitParser.consume(encodedTwo, split);
+        if (split < encodedTwoLength) {
+            TEST_ASSERT_EQUAL_UINT8(raw(StreamEvent::NONE), raw(first.event));
+        }
+        StreamResult second = splitParser.consume(encodedTwo + split,
+            encodedTwoLength - split);
+        const StreamResult& ready = split == encodedTwoLength ? first : second;
+        TEST_ASSERT_EQUAL_UINT8(raw(StreamEvent::FRAME_READY), raw(ready.event));
+        TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, ready.frame.minor);
+    }
+
+    uint8_t mixed[sizeof(HELLO_FRAME) + MAX_ENCODED_FRAME_SIZE] = {};
+    memcpy(mixed, HELLO_FRAME, sizeof(HELLO_FRAME));
+    memcpy(mixed + sizeof(HELLO_FRAME), encodedTwo, encodedTwoLength);
+    StreamParser parser;
+    StreamResult one = parser.consume(mixed, sizeof(HELLO_FRAME) + encodedTwoLength);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_1, one.frame.minor);
+    StreamResult two = parser.consume(mixed + one.consumed,
+        sizeof(HELLO_FRAME) + encodedTwoLength - one.consumed);
+    TEST_ASSERT_EQUAL_UINT8(raw(StreamEvent::FRAME_READY), raw(two.event));
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, two.frame.minor);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -327,5 +369,6 @@ int main(int, char**) {
     RUN_TEST(testZeroHeavyBinaryPayloadRoundTrips);
     RUN_TEST(testDeterministicMalformedCorpus);
     RUN_TEST(testInvalidArgumentDoesNotAlterPartialState);
+    RUN_TEST(testMixedMinorFramesRemainFrameAuthoritative);
     return UNITY_END();
 }

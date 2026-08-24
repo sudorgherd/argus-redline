@@ -659,6 +659,134 @@ void testEnvelopeIntegrationRoundTripsFourSemanticMessages() {
         inbound.payload, inbound.payloadLength, decodedError)));
 }
 
+void testMinorTwoHelloVocabularyAndRangeSelection() {
+    uint8_t bytes[32] = {}; size_t length = 0;
+    HelloRequest request = {1, 2};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeHelloRequest(
+        VERSION_MINOR_0_2, request, bytes, sizeof(bytes), length)));
+    HelloRequest decoded = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(decodeHelloRequest(
+        VERSION_MINOR_0_2, bytes, length, decoded)));
+    uint8_t selected = 0;
+    TEST_ASSERT_TRUE(selectHighestSupportedMinor(1, 1, selected));
+    TEST_ASSERT_EQUAL_UINT8(1, selected);
+    TEST_ASSERT_TRUE(selectHighestSupportedMinor(1, 3, selected));
+    TEST_ASSERT_EQUAL_UINT8(2, selected);
+    TEST_ASSERT_FALSE(selectHighestSupportedMinor(3, 3, selected));
+    request = {0, 2};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::INVALID_FIELD), raw(
+        encodeHelloRequest(VERSION_MINOR_0_2, request, bytes, sizeof(bytes), length)));
+
+    HelloResponse hello = validHelloResponse();
+    hello.selectedMinor = VERSION_MINOR_0_2;
+    hello.operationCategoryBitmap |= CATEGORY_EVENT_BIT;
+    hello.featureBitmap |= FEATURE_EVENT_SERVICE;
+    TEST_ASSERT_TRUE(isValidHelloResponse(hello));
+    hello.featureBitmap &= static_cast<uint16_t>(~FEATURE_EVENT_SERVICE);
+    TEST_ASSERT_FALSE(isValidHelloResponse(hello));
+    hello.featureBitmap = FEATURE_LOCAL_OPERATIONS | FEATURE_EVENT_SERVICE;
+    hello.operationCategoryBitmap |= 0x0020;
+    TEST_ASSERT_FALSE(isValidHelloResponse(hello));
+}
+
+void testHostEventIdentityAndRecordExactGeometry() {
+    HostEventIdentity identity = {2, 0x11223344U, 0x01020304U};
+    uint8_t bytes[HOST_EVENT_RECORD_SIZE] = {}; size_t length = 0;
+    const uint8_t expectedIdentity[] = {2, 0x44, 0x33, 0x22, 0x11,
+        0x04, 0x03, 0x02, 0x01};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeHostEventIdentity(
+        identity, bytes, sizeof(bytes), length)));
+    TEST_ASSERT_EQUAL_UINT32(9, length);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedIdentity, bytes, 9);
+    HostEventIdentity decodedIdentity = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(decodeHostEventIdentity(
+        bytes, 9, decodedIdentity)));
+    bytes[0] = 0;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::INVALID_VALUE), raw(
+        decodeHostEventIdentity(bytes, 9, decodedIdentity)));
+
+    HostEventRecord record = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeHostEventRecord(
+        record, bytes, sizeof(bytes), length)));
+    TEST_ASSERT_EQUAL_UINT32(29, length);
+    for (size_t i = 0; i < 29; ++i) TEST_ASSERT_EQUAL_UINT8(0, bytes[i]);
+    bytes[28] = 1;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::INVALID_VALUE), raw(
+        decodeHostEventRecord(bytes, 29, record)));
+
+    record = {}; record.available = 1; record.sourceDeviceId = 2;
+    record.family = 0x40; record.flags = 1; record.eventEpoch = 0x11223344U;
+    record.eventId = 0x01020304U; record.lifetimeBudgetSeconds = 3600;
+    record.bodyLength = 1; record.body[0] = 2;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeHostEventRecord(
+        record, bytes, sizeof(bytes), length)));
+    const uint8_t expected[] = {1,2,0x40,1,0x44,0x33,0x22,0x11,
+        4,3,2,1,0x10,0x0E,0,0,1,2,0,0,0,0,0,0,0,0,0,0,0};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, bytes, 29);
+    HostEventRecord decoded = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(decodeHostEventRecord(
+        bytes, 29, decoded)));
+}
+
+void testMinorSpecificEventRequestAndResponseSchemas() {
+    uint8_t payload[MAX_PAYLOAD_SIZE] = {}; size_t length = 0;
+    OperationRequest poll = makeRequest(OperationCategory::EVENT,
+        OperationCode::POLL_EVENTS, 0);
+    poll.targetDeviceId = 1;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_2, poll, payload, sizeof(payload), length)));
+    TEST_ASSERT_EQUAL_UINT32(7, length);
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_1, poll, payload, sizeof(payload), length)));
+    poll.value.type = STRUCTURE_VALUE_TYPE; poll.value.length = 1;
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_2, poll, payload, sizeof(payload), length)));
+
+    OperationRequest consume = makeRequest(OperationCategory::EVENT,
+        OperationCode::CONSUME_EVENT, 0);
+    consume.targetDeviceId = 1; consume.value.type = STRUCTURE_VALUE_TYPE;
+    consume.value.length = HOST_EVENT_IDENTITY_SIZE;
+    HostEventIdentity identity = {2, 0x11223344U, 0x01020304U};
+    size_t identityLength = 0;
+    encodeHostEventIdentity(identity, consume.value.bytes,
+        sizeof(consume.value.bytes), identityLength);
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_2, consume, payload, sizeof(payload), length)));
+    TEST_ASSERT_EQUAL_UINT32(16, length);
+    consume.value.bytes[0] = 0;
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_2, consume, payload, sizeof(payload), length)));
+
+    OperationResponse response = {};
+    response.category = OperationCategory::EVENT;
+    response.operation = OperationCode::POLL_EVENTS;
+    response.targetDeviceId = 1; response.resultClass = ResultClass::SUCCESS;
+    response.resultCode = 0; response.value.type = STRUCTURE_VALUE_TYPE;
+    response.value.length = HOST_EVENT_RECORD_SIZE;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_2, response, payload, sizeof(payload), length)));
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_1, response, payload, sizeof(payload), length)));
+
+    response.operation = OperationCode::CONSUME_EVENT;
+    response.resultClass = ResultClass::EVENT_RESULT;
+    response.resultCode = static_cast<uint8_t>(EventResultCode::NOT_FOUND);
+    setNoneValue(response.value);
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_2, response, payload, sizeof(payload), length)));
+    response.operation = OperationCode::POLL_EVENTS;
+    response.resultCode = static_cast<uint8_t>(EventResultCode::STORAGE_FAILURE);
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_2, response, payload, sizeof(payload), length)));
+    response.resultCode = static_cast<uint8_t>(EventResultCode::NOT_FOUND);
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::INVALID_RESULT_CODE), raw(
+        validateOperationResponse(VERSION_MINOR_0_2, response)));
+    response.operation = OperationCode::CONSUME_EVENT;
+    response.resultCode = 3;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::INVALID_RESULT_CODE), raw(
+        validateOperationResponse(VERSION_MINOR_0_2, response)));
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -681,5 +809,8 @@ int main(int, char**) {
     RUN_TEST(testOperationResponseExactGeometryAndRoundTrip);
     RUN_TEST(testProtocolErrorExactCodecAndValidation);
     RUN_TEST(testEnvelopeIntegrationRoundTripsFourSemanticMessages);
+    RUN_TEST(testMinorTwoHelloVocabularyAndRangeSelection);
+    RUN_TEST(testHostEventIdentityAndRecordExactGeometry);
+    RUN_TEST(testMinorSpecificEventRequestAndResponseSchemas);
     return UNITY_END();
 }

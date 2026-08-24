@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include <host_protocol.h>
+#include <event_protocol.h>
 
 namespace HostProtocol {
 
@@ -21,6 +22,8 @@ constexpr uint8_t MAX_CAPABILITY_PAGE_ENTRIES = 9;
 constexpr uint8_t MAX_DIAGNOSTIC_PAGE_ENTRIES = 3;
 constexpr uint16_t CAPABILITY_PAGE_END = 0xFFFF;
 constexpr uint8_t DIAGNOSTIC_PAGE_END = 0xFF;
+constexpr uint8_t HOST_EVENT_IDENTITY_SIZE = 9;
+constexpr uint8_t HOST_EVENT_RECORD_SIZE = 29;
 
 constexpr uint16_t STATUS_READY = 0x0001;
 constexpr uint16_t STATUS_RADIO_OPERATIONAL = 0x0002;
@@ -106,6 +109,24 @@ struct ProtocolError {
     uint16_t detail;
 };
 
+struct HostEventIdentity {
+    uint8_t sourceDeviceId;
+    uint32_t eventEpoch;
+    uint32_t eventId;
+};
+
+struct HostEventRecord {
+    uint8_t available;
+    uint8_t sourceDeviceId;
+    uint8_t family;
+    uint8_t flags;
+    uint32_t eventEpoch;
+    uint32_t eventId;
+    uint32_t lifetimeBudgetSeconds;
+    uint8_t bodyLength;
+    uint8_t body[EventProtocol::MAX_BODY_SIZE];
+};
+
 struct DeviceInfoRecord {
     uint8_t firmwareMajor;
     uint8_t firmwareMinor;
@@ -172,6 +193,96 @@ inline uint32_t readUint32Le(const uint8_t* input) {
         (static_cast<uint32_t>(input[1]) << 8) |
         (static_cast<uint32_t>(input[2]) << 16) |
         (static_cast<uint32_t>(input[3]) << 24);
+}
+
+inline bool isValidHostEventIdentity(const HostEventIdentity& identity) {
+    return identity.sourceDeviceId != 0 && identity.eventEpoch != 0 &&
+        identity.eventId != 0;
+}
+
+inline PayloadResult encodeHostEventIdentity(const HostEventIdentity& identity,
+    uint8_t* output, size_t outputCapacity, size_t& outputLength) {
+    outputLength = 0;
+    if (output == nullptr) return PayloadResult::NULL_ARGUMENT;
+    if (!isValidHostEventIdentity(identity)) return PayloadResult::INVALID_VALUE;
+    if (outputCapacity < HOST_EVENT_IDENTITY_SIZE) return PayloadResult::OUTPUT_TOO_SMALL;
+    output[0] = identity.sourceDeviceId;
+    writeUint32Le(output + 1, identity.eventEpoch);
+    writeUint32Le(output + 5, identity.eventId);
+    outputLength = HOST_EVENT_IDENTITY_SIZE;
+    return PayloadResult::OK;
+}
+
+inline PayloadResult decodeHostEventIdentity(const uint8_t* input,
+    size_t inputLength, HostEventIdentity& identity) {
+    if (input == nullptr) return PayloadResult::NULL_ARGUMENT;
+    if (inputLength != HOST_EVENT_IDENTITY_SIZE) return PayloadResult::INVALID_LENGTH;
+    HostEventIdentity candidate = {input[0], readUint32Le(input + 1),
+        readUint32Le(input + 5)};
+    if (!isValidHostEventIdentity(candidate)) return PayloadResult::INVALID_VALUE;
+    identity = candidate;
+    return PayloadResult::OK;
+}
+
+inline bool isValidHostEventRecord(const HostEventRecord& record) {
+    if (record.available == 0) {
+        if (record.sourceDeviceId != 0 || record.family != 0 || record.flags != 0 ||
+            record.eventEpoch != 0 || record.eventId != 0 ||
+            record.lifetimeBudgetSeconds != 0 || record.bodyLength != 0) return false;
+        for (size_t i = 0; i < EventProtocol::MAX_BODY_SIZE; ++i)
+            if (record.body[i] != 0) return false;
+        return true;
+    }
+    if (record.available != 1 || record.sourceDeviceId == 0 ||
+        record.eventEpoch == 0 || record.eventId == 0 ||
+        (record.flags & static_cast<uint8_t>(~EventProtocol::ALLOWED_FLAGS)) != 0 ||
+        record.lifetimeBudgetSeconds < EventProtocol::MIN_LIFETIME_SECONDS ||
+        record.lifetimeBudgetSeconds > EventProtocol::MAX_LIFETIME_SECONDS ||
+        record.bodyLength > EventProtocol::MAX_BODY_SIZE ||
+        !EventProtocol::isRegisteredFamily(record.family) ||
+        !EventProtocol::isValidFamilyBody(record.family, record.body, record.bodyLength))
+        return false;
+    for (size_t i = record.bodyLength; i < EventProtocol::MAX_BODY_SIZE; ++i)
+        if (record.body[i] != 0) return false;
+    return true;
+}
+
+inline PayloadResult encodeHostEventRecord(const HostEventRecord& record,
+    uint8_t* output, size_t outputCapacity, size_t& outputLength) {
+    outputLength = 0;
+    if (output == nullptr) return PayloadResult::NULL_ARGUMENT;
+    if (!isValidHostEventRecord(record)) return PayloadResult::INVALID_VALUE;
+    if (outputCapacity < HOST_EVENT_RECORD_SIZE) return PayloadResult::OUTPUT_TOO_SMALL;
+    for (size_t i = 0; i < HOST_EVENT_RECORD_SIZE; ++i) output[i] = 0;
+    output[0] = record.available;
+    output[1] = record.sourceDeviceId;
+    output[2] = record.family;
+    output[3] = record.flags;
+    writeUint32Le(output + 4, record.eventEpoch);
+    writeUint32Le(output + 8, record.eventId);
+    writeUint32Le(output + 12, record.lifetimeBudgetSeconds);
+    output[16] = record.bodyLength;
+    for (size_t i = 0; i < EventProtocol::MAX_BODY_SIZE; ++i) output[17 + i] = record.body[i];
+    outputLength = HOST_EVENT_RECORD_SIZE;
+    return PayloadResult::OK;
+}
+
+inline PayloadResult decodeHostEventRecord(const uint8_t* input,
+    size_t inputLength, HostEventRecord& record) {
+    if (input == nullptr) return PayloadResult::NULL_ARGUMENT;
+    if (inputLength != HOST_EVENT_RECORD_SIZE) return PayloadResult::INVALID_LENGTH;
+    HostEventRecord candidate = {};
+    candidate.available = input[0]; candidate.sourceDeviceId = input[1];
+    candidate.family = input[2]; candidate.flags = input[3];
+    candidate.eventEpoch = readUint32Le(input + 4);
+    candidate.eventId = readUint32Le(input + 8);
+    candidate.lifetimeBudgetSeconds = readUint32Le(input + 12);
+    candidate.bodyLength = input[16];
+    for (size_t i = 0; i < EventProtocol::MAX_BODY_SIZE; ++i)
+        candidate.body[i] = input[17 + i];
+    if (!isValidHostEventRecord(candidate)) return PayloadResult::INVALID_VALUE;
+    record = candidate;
+    return PayloadResult::OK;
 }
 
 inline uint8_t expectedScalarValueLength(uint8_t type) {
@@ -330,6 +441,17 @@ inline OperationClassification classifyCategoryOperation(
         : OperationClassification::UNSUPPORTED;
 }
 
+inline OperationClassification classifyCategoryOperation(uint8_t minor,
+    uint8_t category, uint8_t operation) {
+    const OperationCategory typedCategory = static_cast<OperationCategory>(category);
+    const OperationCode typedOperation = static_cast<OperationCode>(operation);
+    if (!isKnownOperationCategory(minor, typedCategory) ||
+        !isKnownOperationCode(minor, typedOperation))
+        return OperationClassification::MALFORMED;
+    return isSupportedCategoryOperation(minor, typedCategory, typedOperation)
+        ? OperationClassification::VALID : OperationClassification::UNSUPPORTED;
+}
+
 inline bool isValidOperationTarget(
     OperationCategory category,
     OperationCode operation,
@@ -345,6 +467,8 @@ inline bool isValidOperationTarget(
                 : targetId != DeviceCapabilities::INVALID_CAPABILITY_ID;
         case OperationCategory::PROCEDURE:
             return targetId != 0;
+        case OperationCategory::EVENT:
+            return targetId == 0;
     }
     return false;
 }
@@ -380,13 +504,14 @@ inline bool isValidOperationRequestValue(
     return false;
 }
 
-inline PayloadResult validateOperationRequest(const OperationRequest& request) {
-    const OperationClassification classification = classifyCategoryOperation(
+inline PayloadResult validateOperationRequest(uint8_t minor,
+    const OperationRequest& request) {
+    const OperationClassification classification = classifyCategoryOperation(minor,
         static_cast<uint8_t>(request.category),
         static_cast<uint8_t>(request.operation)
     );
     if (classification == OperationClassification::MALFORMED) {
-        return !isKnownOperationCategory(request.category)
+        return !isKnownOperationCategory(minor, request.category)
             ? PayloadResult::UNKNOWN_CATEGORY
             : PayloadResult::UNKNOWN_OPERATION;
     }
@@ -397,13 +522,29 @@ inline PayloadResult validateOperationRequest(const OperationRequest& request) {
             request.category, request.operation, request.targetId)) {
         return PayloadResult::INVALID_TARGET;
     }
+    if (request.category == OperationCategory::EVENT) {
+        if (request.operation == OperationCode::POLL_EVENTS)
+            return isNoneValue(request.value) ? PayloadResult::OK : PayloadResult::INVALID_VALUE;
+        if (request.operation == OperationCode::CONSUME_EVENT) {
+            HostEventIdentity identity = {};
+            return request.value.type == STRUCTURE_VALUE_TYPE &&
+                request.value.length == HOST_EVENT_IDENTITY_SIZE &&
+                decodeHostEventIdentity(request.value.bytes, request.value.length, identity) ==
+                    PayloadResult::OK ? PayloadResult::OK : PayloadResult::INVALID_VALUE;
+        }
+    }
     if (!isValidOperationRequestValue(request.operation, request.value)) {
         return PayloadResult::INVALID_VALUE;
     }
     return PayloadResult::OK;
 }
 
+inline PayloadResult validateOperationRequest(const OperationRequest& request) {
+    return validateOperationRequest(VERSION_MINOR_0_1, request);
+}
+
 inline PayloadResult encodeHelloRequest(
+    uint8_t frameMinor,
     const HelloRequest& request,
     uint8_t* output,
     size_t outputCapacity,
@@ -411,7 +552,8 @@ inline PayloadResult encodeHelloRequest(
 ) {
     outputLength = 0;
     if (output == nullptr) return PayloadResult::NULL_ARGUMENT;
-    if (!isValidHelloMinorRange(request.minimumMinor, request.maximumMinor)) {
+    if (!isValidHelloMinorRange(frameMinor,
+            request.minimumMinor, request.maximumMinor)) {
         return PayloadResult::INVALID_FIELD;
     }
     if (outputCapacity < HELLO_REQUEST_PAYLOAD_SIZE) {
@@ -423,7 +565,14 @@ inline PayloadResult encodeHelloRequest(
     return PayloadResult::OK;
 }
 
+inline PayloadResult encodeHelloRequest(const HelloRequest& request,
+    uint8_t* output, size_t outputCapacity, size_t& outputLength) {
+    return encodeHelloRequest(VERSION_MINOR_0_1, request, output,
+        outputCapacity, outputLength);
+}
+
 inline PayloadResult decodeHelloRequest(
+    uint8_t frameMinor,
     const uint8_t* input,
     size_t inputLength,
     HelloRequest& request
@@ -433,20 +582,30 @@ inline PayloadResult decodeHelloRequest(
         return PayloadResult::INVALID_LENGTH;
     }
     HelloRequest candidate = {input[0], input[1]};
-    if (!isValidHelloMinorRange(candidate.minimumMinor, candidate.maximumMinor)) {
+    if (!isValidHelloMinorRange(frameMinor,
+            candidate.minimumMinor, candidate.maximumMinor)) {
         return PayloadResult::INVALID_FIELD;
     }
     request = candidate;
     return PayloadResult::OK;
 }
 
+inline PayloadResult decodeHelloRequest(const uint8_t* input,
+    size_t inputLength, HelloRequest& request) {
+    return decodeHelloRequest(VERSION_MINOR_0_1, input, inputLength, request);
+}
+
 inline bool isValidHelloResponse(const HelloResponse& response) {
-    return response.selectedMinor == VERSION_MINOR &&
+    return response.selectedMinor >= MIN_SUPPORTED_MINOR &&
+        response.selectedMinor <= MAX_SUPPORTED_MINOR &&
         isKnownHardwareProfile(response.hardwareProfile) &&
         isKnownDeviceRole(response.role) &&
         response.maximumHostPayload == MAX_PAYLOAD_SIZE &&
-        hasValidCategoryBitmap(response.operationCategoryBitmap) &&
-        hasValidFeatureBitmap(response.featureBitmap) &&
+        hasValidCategoryBitmap(response.selectedMinor,
+            response.operationCategoryBitmap) &&
+        hasValidFeatureBitmap(response.selectedMinor, response.featureBitmap) &&
+        hasConsistentEventAdvertisement(response.selectedMinor,
+            response.operationCategoryBitmap, response.featureBitmap) &&
         response.maximumOutstandingOperations == MAX_OUTSTANDING_OPERATIONS &&
         response.reserved == HELLO_RESERVED_VALUE;
 }
@@ -511,6 +670,7 @@ inline PayloadResult decodeHelloResponse(
 }
 
 inline PayloadResult encodeOperationRequest(
+    uint8_t minor,
     const OperationRequest& request,
     uint8_t* output,
     size_t outputCapacity,
@@ -518,7 +678,7 @@ inline PayloadResult encodeOperationRequest(
 ) {
     outputLength = 0;
     if (output == nullptr) return PayloadResult::NULL_ARGUMENT;
-    const PayloadResult validation = validateOperationRequest(request);
+    const PayloadResult validation = validateOperationRequest(minor, request);
     if (validation != PayloadResult::OK) return validation;
     const size_t required = OPERATION_REQUEST_FIXED_SIZE + request.value.length;
     if (required > MAX_PAYLOAD_SIZE) return PayloadResult::INVALID_LENGTH;
@@ -536,7 +696,14 @@ inline PayloadResult encodeOperationRequest(
     return PayloadResult::OK;
 }
 
+inline PayloadResult encodeOperationRequest(const OperationRequest& request,
+    uint8_t* output, size_t outputCapacity, size_t& outputLength) {
+    return encodeOperationRequest(VERSION_MINOR_0_1, request, output,
+        outputCapacity, outputLength);
+}
+
 inline PayloadResult decodeOperationRequest(
+    uint8_t minor,
     const uint8_t* input,
     size_t inputLength,
     OperationRequest& request
@@ -553,14 +720,24 @@ inline PayloadResult decodeOperationRequest(
     candidate.operation = static_cast<OperationCode>(input[1]);
     candidate.targetDeviceId = input[2];
     candidate.targetId = readUint16Le(input + 3);
-    const PayloadResult valueResult = decodeTypedValue(
-        input[5], input + 7, valueLength, candidate.value
-    );
-    if (valueResult != PayloadResult::OK) return valueResult;
-    const PayloadResult validation = validateOperationRequest(candidate);
+    candidate.value.type = input[5];
+    candidate.value.length = valueLength;
+    for (size_t index = 0; index < valueLength; ++index)
+        candidate.value.bytes[index] = input[7 + index];
+    if (candidate.value.type != STRUCTURE_VALUE_TYPE &&
+        !isValidScalarValue(candidate.value)) {
+        return !isKnownHostValueType(candidate.value.type)
+            ? PayloadResult::INVALID_VALUE_TYPE : PayloadResult::INVALID_VALUE;
+    }
+    const PayloadResult validation = validateOperationRequest(minor, candidate);
     if (validation != PayloadResult::OK) return validation;
     request = candidate;
     return PayloadResult::OK;
+}
+
+inline PayloadResult decodeOperationRequest(const uint8_t* input,
+    size_t inputLength, OperationRequest& request) {
+    return decodeOperationRequest(VERSION_MINOR_0_1, input, inputLength, request);
 }
 
 inline bool isValidStructureLength(OperationCode operation, uint8_t length) {
@@ -575,6 +752,8 @@ inline bool isValidStructureLength(OperationCode operation, uint8_t length) {
             return length == CAPABILITY_DESCRIPTION_SIZE;
         case OperationCode::GET_DIAGNOSTICS:
             return length >= 2 && length <= 17 && ((length - 2) % 5) == 0;
+        case OperationCode::POLL_EVENTS:
+            return length == HOST_EVENT_RECORD_SIZE;
         default:
             return false;
     }
@@ -617,6 +796,10 @@ inline bool isValidStructureValue(
             return count <= MAX_DIAGNOSTIC_PAGE_ENTRIES &&
                 value.length == 2 + 5 * count;
         }
+        case OperationCode::POLL_EVENTS: {
+            HostEventRecord record = {};
+            return decodeHostEventRecord(value.bytes, value.length, record) == PayloadResult::OK;
+        }
         default:
             return false;
     }
@@ -647,15 +830,14 @@ inline bool isValidSuccessfulOperationValue(
     return false;
 }
 
-inline PayloadResult validateOperationResponse(
-    const OperationResponse& response
-) {
-    const OperationClassification classification = classifyCategoryOperation(
+inline PayloadResult validateOperationResponse(uint8_t minor,
+    const OperationResponse& response) {
+    const OperationClassification classification = classifyCategoryOperation(minor,
         static_cast<uint8_t>(response.category),
         static_cast<uint8_t>(response.operation)
     );
     if (classification == OperationClassification::MALFORMED) {
-        return !isKnownOperationCategory(response.category)
+        return !isKnownOperationCategory(minor, response.category)
             ? PayloadResult::UNKNOWN_CATEGORY
             : PayloadResult::UNKNOWN_OPERATION;
     }
@@ -666,11 +848,38 @@ inline PayloadResult validateOperationResponse(
             response.category, response.operation, response.targetId)) {
         return PayloadResult::INVALID_TARGET;
     }
-    if (!isKnownResultClass(response.resultClass)) {
+    if (!isKnownResultClass(minor, response.resultClass)) {
         return PayloadResult::INVALID_RESULT_CLASS;
     }
     if (!isValidResultCode(response.resultClass, response.resultCode)) {
         return PayloadResult::INVALID_RESULT_CODE;
+    }
+    if (response.resultClass == ResultClass::EVENT_RESULT) {
+        if (response.category != OperationCategory::EVENT)
+            return PayloadResult::INVALID_RESULT_CLASS;
+        const EventResultCode eventCode = static_cast<EventResultCode>(
+            response.resultCode);
+        if ((eventCode == EventResultCode::NOT_FOUND &&
+                response.operation != OperationCode::CONSUME_EVENT) ||
+            (eventCode == EventResultCode::STORAGE_FAILURE &&
+                response.operation != OperationCode::POLL_EVENTS &&
+                response.operation != OperationCode::CONSUME_EVENT))
+            return PayloadResult::INVALID_RESULT_CODE;
+        return isNoneValue(response.value) ? PayloadResult::OK
+                                           : PayloadResult::INVALID_RESPONSE_VALUE;
+    }
+    if (response.category == OperationCategory::EVENT) {
+        if (response.resultClass == ResultClass::SUCCESS &&
+            response.resultCode == static_cast<uint8_t>(SuccessCode::OK)) {
+            if (response.operation == OperationCode::POLL_EVENTS)
+                return isValidStructureValue(response.operation, response.value)
+                    ? PayloadResult::OK : PayloadResult::INVALID_RESPONSE_VALUE;
+            return isNoneValue(response.value) ? PayloadResult::OK
+                                               : PayloadResult::INVALID_RESPONSE_VALUE;
+        }
+        return response.resultClass == ResultClass::REQUEST_REJECTED &&
+            isNoneValue(response.value) ? PayloadResult::OK
+                                        : PayloadResult::INVALID_RESPONSE_VALUE;
     }
     const bool isSuccessfulTargetResult =
         response.resultClass == ResultClass::OPERATION_RESULT &&
@@ -685,7 +894,12 @@ inline PayloadResult validateOperationResponse(
         : PayloadResult::INVALID_RESPONSE_VALUE;
 }
 
+inline PayloadResult validateOperationResponse(const OperationResponse& response) {
+    return validateOperationResponse(VERSION_MINOR_0_1, response);
+}
+
 inline PayloadResult encodeOperationResponse(
+    uint8_t minor,
     const OperationResponse& response,
     uint8_t* output,
     size_t outputCapacity,
@@ -693,7 +907,7 @@ inline PayloadResult encodeOperationResponse(
 ) {
     outputLength = 0;
     if (output == nullptr) return PayloadResult::NULL_ARGUMENT;
-    const PayloadResult validation = validateOperationResponse(response);
+    const PayloadResult validation = validateOperationResponse(minor, response);
     if (validation != PayloadResult::OK) return validation;
     const size_t required = OPERATION_RESPONSE_FIXED_SIZE + response.value.length;
     if (required > MAX_PAYLOAD_SIZE) return PayloadResult::INVALID_LENGTH;
@@ -713,7 +927,14 @@ inline PayloadResult encodeOperationResponse(
     return PayloadResult::OK;
 }
 
+inline PayloadResult encodeOperationResponse(const OperationResponse& response,
+    uint8_t* output, size_t outputCapacity, size_t& outputLength) {
+    return encodeOperationResponse(VERSION_MINOR_0_1, response, output,
+        outputCapacity, outputLength);
+}
+
 inline PayloadResult decodeOperationResponse(
+    uint8_t minor,
     const uint8_t* input,
     size_t inputLength,
     OperationResponse& response
@@ -743,10 +964,15 @@ inline PayloadResult decodeOperationResponse(
             ? PayloadResult::INVALID_VALUE_TYPE
             : PayloadResult::INVALID_VALUE;
     }
-    const PayloadResult validation = validateOperationResponse(candidate);
+    const PayloadResult validation = validateOperationResponse(minor, candidate);
     if (validation != PayloadResult::OK) return validation;
     response = candidate;
     return PayloadResult::OK;
+}
+
+inline PayloadResult decodeOperationResponse(const uint8_t* input,
+    size_t inputLength, OperationResponse& response) {
+    return decodeOperationResponse(VERSION_MINOR_0_1, input, inputLength, response);
 }
 
 inline bool isValidProtocolError(const ProtocolError& error) {

@@ -22,12 +22,14 @@ enum class Action : uint8_t {
 struct Result {
     Action action;
     uint16_t requestId;
+    uint8_t responseMinor;
     Protocol::Packet packet;
     HostProtocol::OperationResponse response;
 };
 
 struct RetainedEntry {
     uint16_t requestId;
+    uint8_t requestMinor;
     uint8_t requestPayloadLength;
     uint8_t requestPayload[HostProtocol::MAX_PAYLOAD_SIZE];
     HostProtocol::OperationResponse response;
@@ -58,14 +60,17 @@ public:
         uint32_t now,
         uint32_t overallTimeout,
         uint8_t maxRetries = 2,
-        bool explicitlyConfigured = false
+        bool explicitlyConfigured = false,
+        uint8_t requestMinor = HostProtocol::VERSION_MINOR_0_1
     ) {
         Result result = {};
         result.requestId = requestId;
+        result.responseMinor = requestMinor;
         HostProtocol::OperationRequest request = {};
         if (!HostProtocol::isValidRequestId(requestId) || payload == nullptr ||
             payloadLength > HostProtocol::MAX_PAYLOAD_SIZE ||
-            HostProtocol::decodeOperationRequest(payload, payloadLength, request) !=
+            HostProtocol::decodeOperationRequest(requestMinor,
+                payload, payloadLength, request) !=
                 HostProtocol::PayloadResult::OK) {
             result.action = Action::INVALID_REQUEST;
             return result;
@@ -73,7 +78,7 @@ public:
 
         if (state_ != State::EMPTY && requestId == entry_.requestId) {
             if (!samePayload(payload, payloadLength)) {
-                return rejection(requestId, request,
+                return rejection(requestId, request, requestMinor,
                     HostProtocol::RequestRejectionCode::MISMATCH);
             }
             if (state_ == State::ACTIVE) {
@@ -81,12 +86,13 @@ public:
                 return result;
             }
             result.response = entry_.response;
+            result.responseMinor = entry_.requestMinor;
             result.action = hostConnected_ ? Action::HOST_RESPONSE_READY
                                            : Action::RESPONSE_RETAINED;
             return result;
         }
         if (state_ == State::ACTIVE) {
-            return rejection(requestId, request,
+            return rejection(requestId, request, requestMinor,
                 HostProtocol::RequestRejectionCode::BUSY);
         }
 
@@ -96,7 +102,7 @@ public:
                     snapshot, registryValid, registry, handler, interlock,
                     diagnostics, runtimeState, availability);
             if (local.disposition != HostOperationService::Disposition::HANDLED) {
-                return rejection(requestId, request,
+                return rejection(requestId, request, requestMinor,
                     local.disposition == HostOperationService::Disposition::NOT_HANDLED
                         ? HostProtocol::RequestRejectionCode::UNSUPPORTED_OPERATION
                         : local.rejectionCode);
@@ -108,7 +114,7 @@ public:
                 result.response = local.response;
                 return result;
             }
-            acceptIdentity(requestId, payload, payloadLength);
+            acceptIdentity(requestId, requestMinor, payload, payloadLength);
             complete(local.response);
             result.response = entry_.response;
             result.action = hostConnected_ ? Action::HOST_RESPONSE_READY
@@ -120,7 +126,7 @@ public:
             requestId, request, snapshot.role, snapshot.deviceId, peerId, now,
             overallTimeout, maxRetries, explicitlyConfigured);
         if (remote.action == RadioOperationBridge::HubAction::TRANSMIT_COMMAND) {
-            acceptIdentity(requestId, payload, payloadLength);
+            acceptIdentity(requestId, requestMinor, payload, payloadLength);
             result.action = Action::TRANSMIT_COMMAND;
             result.packet = remote.packet;
             return result;
@@ -162,10 +168,12 @@ private:
         return true;
     }
 
-    void acceptIdentity(uint16_t requestId, const uint8_t* payload,
+    void acceptIdentity(uint16_t requestId, uint8_t requestMinor,
+        const uint8_t* payload,
         size_t payloadLength) {
         entry_ = {};
         entry_.requestId = requestId;
+        entry_.requestMinor = requestMinor;
         entry_.requestPayloadLength = static_cast<uint8_t>(payloadLength);
         for (size_t index = 0; index < payloadLength; ++index) {
             entry_.requestPayload[index] = payload[index];
@@ -180,9 +188,11 @@ private:
 
     Result rejection(uint16_t requestId,
         const HostProtocol::OperationRequest& request,
+        uint8_t requestMinor,
         HostProtocol::RequestRejectionCode code) const {
         Result result = {};
         result.requestId = requestId;
+        result.responseMinor = requestMinor;
         result.response = RadioOperationBridge::makeHostResponseBase(request);
         result.response.resultClass = HostProtocol::ResultClass::REQUEST_REJECTED;
         result.response.resultCode = static_cast<uint8_t>(code);
@@ -195,6 +205,7 @@ private:
         Result result = {};
         if (state_ != State::ACTIVE) return result;
         result.requestId = entry_.requestId;
+        result.responseMinor = entry_.requestMinor;
         if (remote.action == RadioOperationBridge::HubAction::TRANSMIT_COMMAND) {
             result.action = Action::TRANSMIT_COMMAND;
             result.packet = remote.packet;

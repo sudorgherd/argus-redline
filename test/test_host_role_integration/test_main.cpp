@@ -52,10 +52,11 @@ struct Fixture {
 };
 
 void appendFrame(Fixture& f, HostProtocol::MessageType type, uint16_t requestId,
-    const uint8_t* payload, size_t payloadLength) {
+    const uint8_t* payload, size_t payloadLength,
+    uint8_t minor = HostProtocol::VERSION_MINOR_0_1) {
     HostProtocol::Frame frame = {};
     frame.major = HostProtocol::VERSION_MAJOR;
-    frame.minor = HostProtocol::VERSION_MINOR;
+    frame.minor = minor;
     frame.messageType = type;
     frame.requestId = requestId;
     frame.payloadLength = static_cast<uint16_t>(payloadLength);
@@ -66,6 +67,16 @@ void appendFrame(Fixture& f, HostProtocol::MessageType type, uint16_t requestId,
         static_cast<uint8_t>(HostProtocol::encodeFrame(frame, encoded,
             sizeof(encoded), length)));
     f.stream.append(encoded, length);
+}
+
+HostProtocol::Frame drainAndDecode(Fixture& fixture) {
+    while (fixture.stack.txPending()) fixture.stack.serviceTx();
+    HostProtocol::Frame frame = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::DecodeResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeFrame(fixture.stream.output,
+            fixture.stream.outputLength, frame)));
+    fixture.stream.outputLength = 0;
+    return frame;
 }
 
 void test_hello_handoff_and_role_feature_bits() {
@@ -205,6 +216,80 @@ void test_remote_completion_disconnected_is_replayed_without_new_wire_work() {
     TEST_ASSERT_FALSE(hub.stack.lifecycle().remoteBridge().active());
 }
 
+void test_minor_two_hello_is_stateless_and_does_not_advertise_stage9_service() {
+    Fixture f;
+    HostProtocol::HelloRequest hello = {1, 2};
+    uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {}; size_t length = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::encodeHelloRequest(
+            HostProtocol::VERSION_MINOR_0_2, hello, payload, sizeof(payload), length)));
+    appendFrame(f, HostProtocol::MessageType::HELLO_REQUEST, 0x8101,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF),
+                           static_cast<uint8_t>(f.service().action));
+    HostProtocol::Frame response = drainAndDecode(f);
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_2, response.minor);
+    HostProtocol::HelloResponse semantic = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeHelloResponse(
+            response.payload, response.payloadLength, semantic)));
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_2, semantic.selectedMinor);
+    TEST_ASSERT_EQUAL_UINT16(0, semantic.operationCategoryBitmap &
+        HostProtocol::CATEGORY_EVENT_BIT);
+    TEST_ASSERT_EQUAL_UINT16(0, semantic.featureBitmap &
+        HostProtocol::FEATURE_EVENT_SERVICE);
+
+    hello.maximumMinor = 1;
+    HostProtocol::encodeHelloRequest(HostProtocol::VERSION_MINOR_0_2,
+        hello, payload, sizeof(payload), length);
+    appendFrame(f, HostProtocol::MessageType::HELLO_REQUEST, 0x8103,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    f.service(); response = drainAndDecode(f);
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_2, response.minor);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeHelloResponse(
+            response.payload, response.payloadLength, semantic)));
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_1,
+        semantic.selectedMinor);
+
+    HostProtocol::OperationRequest ping = {};
+    ping.category = HostProtocol::OperationCategory::DEVICE;
+    ping.operation = HostProtocol::OperationCode::PING;
+    ping.targetDeviceId = 1; HostProtocol::setNoneValue(ping.value);
+    HostProtocol::encodeOperationRequest(ping, payload, sizeof(payload), length);
+    appendFrame(f, HostProtocol::MessageType::OPERATION_REQUEST, 0x8102,
+        payload, length, HostProtocol::VERSION_MINOR_0_1);
+    f.service(); response = drainAndDecode(f);
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_1, response.minor);
+}
+
+void test_minor_two_event_codec_is_rejected_without_service_using_request_minor() {
+    Fixture f;
+    HostProtocol::OperationRequest poll = {};
+    poll.category = HostProtocol::OperationCategory::EVENT;
+    poll.operation = HostProtocol::OperationCode::POLL_EVENTS;
+    poll.targetDeviceId = 1; HostProtocol::setNoneValue(poll.value);
+    uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {}; size_t length = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::encodeOperationRequest(
+            HostProtocol::VERSION_MINOR_0_2, poll, payload, sizeof(payload), length)));
+    appendFrame(f, HostProtocol::MessageType::OPERATION_REQUEST, 0x8201,
+        payload, length, HostProtocol::VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostRoleIntegration::Action::HOST_RESPONSE_HANDOFF),
+                           static_cast<uint8_t>(f.service().action));
+    HostProtocol::Frame frame = drainAndDecode(f);
+    TEST_ASSERT_EQUAL_UINT8(HostProtocol::VERSION_MINOR_0_2, frame.minor);
+    HostProtocol::OperationResponse response = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::PayloadResult::OK),
+        static_cast<uint8_t>(HostProtocol::decodeOperationResponse(
+            HostProtocol::VERSION_MINOR_0_2, frame.payload,
+            frame.payloadLength, response)));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::ResultClass::REQUEST_REJECTED),
+                           static_cast<uint8_t>(response.resultClass));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HostProtocol::RequestRejectionCode::UNSUPPORTED_OPERATION),
+                           response.resultCode);
+}
+
 
 }  // namespace
 
@@ -216,5 +301,7 @@ int main(int, char**) {
     RUN_TEST(test_service_budgets_match_complete_frame_bound);
     RUN_TEST(test_remote_ping_ack_before_execute_and_terminal_handoff);
     RUN_TEST(test_remote_completion_disconnected_is_replayed_without_new_wire_work);
+    RUN_TEST(test_minor_two_hello_is_stateless_and_does_not_advertise_stage9_service);
+    RUN_TEST(test_minor_two_event_codec_is_rejected_without_service_using_request_minor);
     return UNITY_END();
 }

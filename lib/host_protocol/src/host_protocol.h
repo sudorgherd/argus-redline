@@ -8,6 +8,12 @@
 namespace HostProtocol {
 
 constexpr uint8_t VERSION_MAJOR = 0;
+constexpr uint8_t VERSION_MINOR_0_1 = 1;
+constexpr uint8_t VERSION_MINOR_0_2 = 2;
+constexpr uint8_t MIN_SUPPORTED_MINOR = VERSION_MINOR_0_1;
+constexpr uint8_t MAX_SUPPORTED_MINOR = VERSION_MINOR_0_2;
+// Retained for byte-exact Host Protocol 0.1 call sites. New correlated code
+// MUST carry an explicit frame minor instead of treating this as current.
 constexpr uint8_t VERSION_MINOR = 1;
 constexpr uint8_t FLAGS_NONE = 0x00;
 
@@ -40,7 +46,8 @@ enum class OperationCategory : uint8_t {
     DEVICE = 0x01,
     CAPABILITY = 0x02,
     PROCEDURE = 0x03,
-    DIAGNOSTIC = 0x04
+    DIAGNOSTIC = 0x04,
+    EVENT = 0x05
 };
 
 enum class OperationCode : uint8_t {
@@ -52,7 +59,9 @@ enum class OperationCode : uint8_t {
     READ_CAPABILITY = 0x25,
     SET_INDICATOR = 0x26,
     RUN_PROCEDURE = 0x27,
-    GET_DIAGNOSTICS = 0x28
+    GET_DIAGNOSTICS = 0x28,
+    POLL_EVENTS = 0x29,
+    CONSUME_EVENT = 0x2A
 };
 
 enum class ResultClass : uint8_t {
@@ -60,7 +69,8 @@ enum class ResultClass : uint8_t {
     REQUEST_REJECTED = 0x01,
     OPERATION_RESULT = 0x02,
     RADIO_RESULT = 0x03,
-    LOCAL_RUNTIME_RESULT = 0x04
+    LOCAL_RUNTIME_RESULT = 0x04,
+    EVENT_RESULT = 0x05
 };
 
 enum class SuccessCode : uint8_t {
@@ -84,6 +94,11 @@ enum class RadioResultCode : uint8_t {
 enum class LocalRuntimeResultCode : uint8_t {
     BUSY = 0x04,
     OPERATION_FAILED = 0x0A
+};
+
+enum class EventResultCode : uint8_t {
+    NOT_FOUND = 0x01,
+    STORAGE_FAILURE = 0x02
 };
 
 enum class ProtocolErrorCode : uint8_t {
@@ -112,21 +127,30 @@ constexpr uint16_t CATEGORY_DEVICE_BIT = 0x0001;
 constexpr uint16_t CATEGORY_CAPABILITY_BIT = 0x0002;
 constexpr uint16_t CATEGORY_PROCEDURE_BIT = 0x0004;
 constexpr uint16_t CATEGORY_DIAGNOSTIC_BIT = 0x0008;
+constexpr uint16_t CATEGORY_EVENT_BIT = 0x0010;
 constexpr uint16_t KNOWN_CATEGORY_BITMAP =
     CATEGORY_DEVICE_BIT |
     CATEGORY_CAPABILITY_BIT |
     CATEGORY_PROCEDURE_BIT |
     CATEGORY_DIAGNOSTIC_BIT;
 constexpr uint16_t RESERVED_CATEGORY_BITMAP = 0xFFF0;
+constexpr uint16_t KNOWN_CATEGORY_BITMAP_0_2 =
+    KNOWN_CATEGORY_BITMAP | CATEGORY_EVENT_BIT;
+constexpr uint16_t RESERVED_CATEGORY_BITMAP_0_2 = 0xFFE0;
 
 constexpr uint16_t FEATURE_LOCAL_OPERATIONS = 0x0001;
 constexpr uint16_t FEATURE_RADIO_BRIDGE = 0x0002;
+constexpr uint16_t FEATURE_EVENT_SERVICE = 0x0004;
 constexpr uint16_t KNOWN_FEATURE_BITMAP =
     FEATURE_LOCAL_OPERATIONS | FEATURE_RADIO_BRIDGE;
 constexpr uint16_t RESERVED_FEATURE_BITMAP = 0xFFFC;
+constexpr uint16_t KNOWN_FEATURE_BITMAP_0_2 =
+    KNOWN_FEATURE_BITMAP | FEATURE_EVENT_SERVICE;
+constexpr uint16_t RESERVED_FEATURE_BITMAP_0_2 = 0xFFF8;
 
 inline bool isSupportedVersion(uint8_t major, uint8_t minor) {
-    return major == VERSION_MAJOR && minor == VERSION_MINOR;
+    return major == VERSION_MAJOR && minor >= MIN_SUPPORTED_MINOR &&
+        minor <= MAX_SUPPORTED_MINOR;
 }
 
 inline bool isKnownMessageType(MessageType type) {
@@ -180,6 +204,18 @@ inline bool isKnownOperationCode(OperationCode operation) {
     return false;
 }
 
+inline bool isKnownOperationCategory(uint8_t minor, OperationCategory category) {
+    return isKnownOperationCategory(category) ||
+        (minor == VERSION_MINOR_0_2 && category == OperationCategory::EVENT);
+}
+
+inline bool isKnownOperationCode(uint8_t minor, OperationCode operation) {
+    return isKnownOperationCode(operation) ||
+        (minor == VERSION_MINOR_0_2 &&
+            (operation == OperationCode::POLL_EVENTS ||
+             operation == OperationCode::CONSUME_EVENT));
+}
+
 inline bool isSupportedCategoryOperation(
     OperationCategory category,
     OperationCode operation
@@ -198,8 +234,20 @@ inline bool isSupportedCategoryOperation(
             return operation == OperationCode::RUN_PROCEDURE;
         case OperationCategory::DIAGNOSTIC:
             return operation == OperationCode::GET_DIAGNOSTICS;
+        case OperationCategory::EVENT:
+            return false;
     }
     return false;
+}
+
+inline bool isSupportedCategoryOperation(uint8_t minor,
+    OperationCategory category, OperationCode operation) {
+    if (minor == VERSION_MINOR_0_2 && category == OperationCategory::EVENT)
+        return operation == OperationCode::POLL_EVENTS ||
+            operation == OperationCode::CONSUME_EVENT;
+    return isKnownOperationCategory(minor, category) &&
+        isKnownOperationCode(minor, operation) &&
+        isSupportedCategoryOperation(category, operation);
 }
 
 inline bool isKnownResultClass(ResultClass resultClass) {
@@ -212,6 +260,11 @@ inline bool isKnownResultClass(ResultClass resultClass) {
             return true;
     }
     return false;
+}
+
+inline bool isKnownResultClass(uint8_t minor, ResultClass resultClass) {
+    return isKnownResultClass(resultClass) ||
+        (minor == VERSION_MINOR_0_2 && resultClass == ResultClass::EVENT_RESULT);
 }
 
 inline bool isValidResultCode(ResultClass resultClass, uint8_t code) {
@@ -245,6 +298,9 @@ inline bool isValidResultCode(ResultClass resultClass, uint8_t code) {
                 code == static_cast<uint8_t>(
                     LocalRuntimeResultCode::OPERATION_FAILED
                 );
+        case ResultClass::EVENT_RESULT:
+            return code == static_cast<uint8_t>(EventResultCode::NOT_FOUND) ||
+                code == static_cast<uint8_t>(EventResultCode::STORAGE_FAILURE);
     }
     return false;
 }
@@ -266,12 +322,57 @@ inline bool isValidHelloMinorRange(uint8_t minimum, uint8_t maximum) {
     return minimum == VERSION_MINOR && maximum == VERSION_MINOR;
 }
 
+inline bool isValidHelloMinorRange(uint8_t frameMinor, uint8_t minimum,
+                                   uint8_t maximum) {
+    if (frameMinor == VERSION_MINOR_0_1) return isValidHelloMinorRange(minimum, maximum);
+    return frameMinor == VERSION_MINOR_0_2 && minimum != 0 && maximum != 0 &&
+        minimum <= maximum;
+}
+
+inline bool selectHighestSupportedMinor(uint8_t minimum, uint8_t maximum,
+                                        uint8_t& selected) {
+    if (minimum == 0 || maximum == 0 || minimum > maximum) return false;
+    if (minimum <= VERSION_MINOR_0_2 && maximum >= VERSION_MINOR_0_2) {
+        selected = VERSION_MINOR_0_2;
+        return true;
+    }
+    if (minimum <= VERSION_MINOR_0_1 && maximum >= VERSION_MINOR_0_1) {
+        selected = VERSION_MINOR_0_1;
+        return true;
+    }
+    return false;
+}
+
 inline bool hasValidCategoryBitmap(uint16_t bitmap) {
     return (bitmap & RESERVED_CATEGORY_BITMAP) == 0;
 }
 
 inline bool hasValidFeatureBitmap(uint16_t bitmap) {
     return (bitmap & RESERVED_FEATURE_BITMAP) == 0;
+}
+
+inline bool hasValidCategoryBitmap(uint8_t selectedMinor, uint16_t bitmap) {
+    return selectedMinor == VERSION_MINOR_0_1
+        ? hasValidCategoryBitmap(bitmap)
+        : selectedMinor == VERSION_MINOR_0_2 &&
+            (bitmap & RESERVED_CATEGORY_BITMAP_0_2) == 0;
+}
+
+inline bool hasValidFeatureBitmap(uint8_t selectedMinor, uint16_t bitmap) {
+    return selectedMinor == VERSION_MINOR_0_1
+        ? hasValidFeatureBitmap(bitmap)
+        : selectedMinor == VERSION_MINOR_0_2 &&
+            (bitmap & RESERVED_FEATURE_BITMAP_0_2) == 0;
+}
+
+inline bool hasConsistentEventAdvertisement(uint8_t selectedMinor,
+                                            uint16_t categories,
+                                            uint16_t features) {
+    const bool category = (categories & CATEGORY_EVENT_BIT) != 0;
+    const bool feature = (features & FEATURE_EVENT_SERVICE) != 0;
+    return selectedMinor == VERSION_MINOR_0_1
+        ? !category && !feature
+        : selectedMinor == VERSION_MINOR_0_2 && category == feature;
 }
 
 inline bool isKnownHardwareProfile(HardwareProfile profile) {
@@ -628,7 +729,7 @@ inline DecodeResult decodeFrame(
     if (major != VERSION_MAJOR) {
         return DecodeResult::UNSUPPORTED_MAJOR;
     }
-    if (minor != VERSION_MINOR) {
+    if (minor < MIN_SUPPORTED_MINOR || minor > MAX_SUPPORTED_MINOR) {
         return DecodeResult::UNSUPPORTED_MINOR;
     }
     if (!isKnownMessageType(messageType)) {

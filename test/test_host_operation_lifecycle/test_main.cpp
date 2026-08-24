@@ -33,11 +33,11 @@ struct Fixture {
             &capabilityState, availability)) {}
 
     Result submit(uint16_t id, const uint8_t* payload, size_t length,
-        bool configured = false) {
+        bool configured = false, uint8_t minor = VERSION_MINOR_0_1) {
         return lifecycle.submit(id, payload, length, snapshot, NODE, true,
             SimulatedCapabilities::registryView(), handler,
             DeviceCapabilities::InterlockState::CLEAR, diagnostics, runtime,
-            availabilityProvider, 10, 20, 1, configured);
+            availabilityProvider, 10, 20, 1, configured, minor);
     }
 };
 
@@ -376,6 +376,46 @@ void testBoundsAreSingleEntryAndAllocationFreeShape() {
     TEST_ASSERT_TRUE(sizeof(RetainedEntry) < 512);
 }
 
+void testRequestMinorIsRetainedAcrossImmediateDeferredAndReplay() {
+    Fixture local;
+    EncodedRequest ping = encodeRequest(makeRequest(
+        OperationCategory::DEVICE, OperationCode::PING));
+    Result immediate = local.submit(0x7101, ping.bytes, ping.length, false,
+        VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, immediate.responseMinor);
+    Result crossMinorReplay = local.submit(0x7101, ping.bytes, ping.length, false,
+        VERSION_MINOR_0_1);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, crossMinorReplay.responseMinor);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, local.lifecycle.entry().requestMinor);
+
+    Fixture remote;
+    remote.lifecycle.remoteBridge().configurePeerSupport(
+        WireOperations::PeerSupport::SUPPORTED);
+    OperationRequest request = makeRequest(OperationCategory::DEVICE,
+        OperationCode::PING, NODE);
+    EncodedRequest encoded = encodeRequest(request);
+    Result started = remote.submit(0x7102, encoded.bytes, encoded.length, false,
+        VERSION_MINOR_0_1);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Action::TRANSMIT_COMMAND),
+                           static_cast<uint8_t>(started.action));
+    Result completed = remote.lifecycle.receive(responseFor(started.packet,
+        DeviceCapabilities::OperationStatus::OK, 7));
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_1, completed.responseMinor);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_1,
+                           remote.lifecycle.entry().requestMinor);
+
+    Fixture busy;
+    busy.lifecycle.remoteBridge().configurePeerSupport(
+        WireOperations::PeerSupport::SUPPORTED);
+    Result active = busy.submit(0x7103, encoded.bytes, encoded.length, false,
+        VERSION_MINOR_0_1);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Action::TRANSMIT_COMMAND),
+                           static_cast<uint8_t>(active.action));
+    Result rejected = busy.submit(0x7104, ping.bytes, ping.length, false,
+        VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, rejected.responseMinor);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -390,5 +430,6 @@ int main(int, char**) {
     RUN_TEST(testResetClearsActiveAndCompletedWithoutAmbiguity);
     RUN_TEST(testResultClassAuthoritiesRemainDistinct);
     RUN_TEST(testBoundsAreSingleEntryAndAllocationFreeShape);
+    RUN_TEST(testRequestMinorIsRetainedAcrossImmediateDeferredAndReplay);
     return UNITY_END();
 }

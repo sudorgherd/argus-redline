@@ -626,6 +626,77 @@ void testDecodeRejectsBadCrcAndEnvelopeVocabulary() {
     }
 }
 
+template <size_t D, size_t E>
+void assertMinorTwoVector(const uint8_t (&decoded)[D], const uint8_t (&encoded)[E]) {
+    TEST_ASSERT_EQUAL_UINT32(D, MIN_DECODED_FRAME_SIZE +
+        static_cast<uint16_t>(decoded[6] | (decoded[7] << 8)));
+    TEST_ASSERT_EQUAL_HEX16(static_cast<uint16_t>(decoded[D - 2] |
+        (decoded[D - 1] << 8)), crc16CcittFalse(decoded, D - 2));
+    Frame frame = {};
+    frame.major = decoded[0]; frame.minor = decoded[1];
+    frame.messageType = static_cast<MessageType>(decoded[2]);
+    frame.flags = decoded[3]; frame.requestId = static_cast<uint16_t>(
+        decoded[4] | (decoded[5] << 8));
+    frame.payloadLength = static_cast<uint16_t>(decoded[6] | (decoded[7] << 8));
+    for (size_t i = 0; i < frame.payloadLength; ++i) frame.payload[i] = decoded[8 + i];
+    uint8_t actual[MAX_ENCODED_FRAME_SIZE] = {}; size_t actualLength = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EncodeResult::OK),
+        static_cast<uint8_t>(encodeFrame(frame, actual, sizeof(actual), actualLength)));
+    TEST_ASSERT_EQUAL_UINT32(E, actualLength);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(encoded, actual, E);
+    Frame roundTrip = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DecodeResult::OK),
+        static_cast<uint8_t>(decodeFrame(encoded, E, roundTrip)));
+    TEST_ASSERT_EQUAL_UINT8(VERSION_MINOR_0_2, roundTrip.minor);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(decoded + 8, roundTrip.payload, frame.payloadLength);
+}
+
+void testEveryNormativeHostProtocol02Vector() {
+    const uint8_t hReqD[] = {0,2,1,0,0x34,0x12,2,0,1,2,0x62,0xF7};
+    const uint8_t hReqE[] = {1,3,2,1,4,0x34,0x12,2,5,1,2,0x62,0xF7,0};
+    assertMinorTwoVector(hReqD, hReqE);
+    const uint8_t hResD[] = {0,2,2,0,0x34,0x12,0x10,0,2,0,7,0,1,1,1,1,1,0x80,0x1F,0,7,0,1,0,0x2C,0xC5};
+    const uint8_t hResE[] = {1,3,2,2,4,0x34,0x12,0x10,2,2,2,7,8,1,1,1,1,1,0x80,0x1F,2,7,2,1,3,0x2C,0xC5,0};
+    assertMinorTwoVector(hResD, hResE);
+    const uint8_t pollD[] = {0,2,0x10,0,1,0x10,7,0,5,0x29,1,0,0,0,0,0xDD,0xFD};
+    const uint8_t pollE[] = {1,3,2,0x10,4,1,0x10,7,4,5,0x29,1,1,1,1,3,0xDD,0xFD,0};
+    assertMinorTwoVector(pollD, pollE);
+    const uint8_t noneD[] = {0,2,0x11,0,1,0x10,0x26,0,5,0x29,1,0,0,0,0,0x7F,0x1D,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0x36};
+    const uint8_t noneE[] = {1,3,2,0x11,4,1,0x10,0x26,4,5,0x29,1,1,1,1,3,0x7F,0x1D,
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,2,0x36,0};
+    assertMinorTwoVector(noneD, noneE);
+    const uint8_t oneD[] = {0,2,0x11,0,1,0x10,0x26,0,5,0x29,1,0,0,0,0,0x7F,0x1D,
+        1,2,0x40,1,0x44,0x33,0x22,0x11,4,3,2,1,0x10,0x0E,0,0,1,2,0,0,0,0,0,0,0,0,0,0,0,0x0B,0x49};
+    const uint8_t oneE[] = {1,3,2,0x11,4,1,0x10,0x26,4,5,0x29,1,1,1,1,0x11,0x7F,0x1D,
+        1,2,0x40,1,0x44,0x33,0x22,0x11,4,3,2,1,0x10,0x0E,1,3,1,2,1,1,1,1,1,1,1,1,1,1,3,0x0B,0x49,0};
+    assertMinorTwoVector(oneD, oneE);
+    const uint8_t consumeD[] = {0,2,0x10,0,2,0x10,0x10,0,5,0x2A,1,0,0,0x7F,9,2,0x44,0x33,0x22,0x11,4,3,2,1,0xDA,0xCB};
+    const uint8_t consumeE[] = {1,3,2,0x10,4,2,0x10,0x10,4,5,0x2A,1,1,0x0E,0x7F,9,2,0x44,0x33,0x22,0x11,4,3,2,1,0xDA,0xCB,0};
+    assertMinorTwoVector(consumeD, consumeE);
+    const uint8_t successD[] = {0,2,0x11,0,2,0x10,9,0,5,0x2A,1,0,0,0,0,0,0,0x1B,0x85};
+    const uint8_t successE[] = {1,3,2,0x11,4,2,0x10,9,4,5,0x2A,1,1,1,1,1,1,3,0x1B,0x85,0};
+    assertMinorTwoVector(successD, successE);
+    const uint8_t notFoundD[] = {0,2,0x11,0,2,0x10,9,0,5,0x2A,1,0,0,5,1,0,0,0x6E,0x0E};
+    const uint8_t notFoundE[] = {1,3,2,0x11,4,2,0x10,9,4,5,0x2A,1,1,3,5,1,1,3,0x6E,0x0E,0};
+    assertMinorTwoVector(notFoundD, notFoundE);
+}
+
+void testFrameMinorOneAndTwoCoexistWithoutGeometryChange() {
+    Frame one = makeFrame();
+    Frame two = one; two.minor = VERSION_MINOR_0_2; two.requestId = 0x2345;
+    uint8_t bytes[MAX_ENCODED_FRAME_SIZE] = {}; size_t length = 0;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EncodeResult::OK),
+        static_cast<uint8_t>(encodeFrame(two, bytes, sizeof(bytes), length)));
+    Frame decoded = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DecodeResult::OK),
+        static_cast<uint8_t>(decodeFrame(bytes, length, decoded)));
+    TEST_ASSERT_EQUAL_UINT8(2, decoded.minor);
+    two.minor = 3;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EncodeResult::UNSUPPORTED_VERSION),
+        static_cast<uint8_t>(encodeFrame(two, bytes, sizeof(bytes), length)));
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -647,5 +718,7 @@ int main(int, char**) {
     RUN_TEST(testDecodeRejectsShortLengthAndTruncatedCrc);
     RUN_TEST(testDecodeRejectsPayloadAndGeometryMismatches);
     RUN_TEST(testDecodeRejectsBadCrcAndEnvelopeVocabulary);
+    RUN_TEST(testEveryNormativeHostProtocol02Vector);
+    RUN_TEST(testFrameMinorOneAndTwoCoexistWithoutGeometryChange);
     return UNITY_END();
 }

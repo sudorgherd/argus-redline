@@ -58,7 +58,8 @@ public:
             lifecycle_.state() != HostOperationLifecycle::State::COMPLETED)
             return false;
         const HostOperationLifecycle::RetainedEntry& entry = lifecycle_.entry();
-        if (!submitOperationResponse(entry.requestId, entry.response)) return false;
+        if (!submitOperationResponse(entry.requestMinor,
+                entry.requestId, entry.response)) return false;
         pendingOriginalDelivery_ = false;
         return true;
     }
@@ -119,7 +120,11 @@ public:
                 size_t length = 0;
                 if (HostProtocol::encodeProtocolError(error, payload,
                         sizeof(payload), length) == HostProtocol::PayloadResult::OK &&
-                    submitFrame(HostProtocol::MessageType::PROTOCOL_ERROR,
+                    submitFrame(HostProtocol::isSupportedVersion(
+                            HostProtocol::VERSION_MAJOR, rx.parserResult.frame.minor)
+                            ? rx.parserResult.frame.minor
+                            : HostProtocol::VERSION_MINOR_0_1,
+                        HostProtocol::MessageType::PROTOCOL_ERROR,
                         rx.parserResult.frame.requestId, payload, length))
                     result.action = Action::HOST_RESPONSE_HANDOFF;
             }
@@ -128,7 +133,8 @@ public:
         const HostProtocol::Frame& frame = rx.parserResult.frame;
         if (frame.messageType == HostProtocol::MessageType::HELLO_REQUEST) {
             HostProtocol::HelloRequest request = {};
-            if (HostProtocol::decodeHelloRequest(frame.payload, frame.payloadLength,
+            if (HostProtocol::decodeHelloRequest(frame.minor,
+                    frame.payload, frame.payloadLength,
                     request) != HostProtocol::PayloadResult::OK) {
                 diagnostics_.observeFrame(rx.parserResult,
                     HostProtocolDiagnostics::MessageBoundaryResult::MALFORMED);
@@ -139,7 +145,8 @@ public:
                 size_t errorLength = 0;
                 if (HostProtocol::encodeProtocolError(error, errorPayload,
                         sizeof(errorPayload), errorLength) == HostProtocol::PayloadResult::OK &&
-                    submitFrame(HostProtocol::MessageType::PROTOCOL_ERROR,
+                    submitFrame(frame.minor,
+                        HostProtocol::MessageType::PROTOCOL_ERROR,
                         frame.requestId, errorPayload, errorLength))
                     result.action = Action::HOST_RESPONSE_HANDOFF;
                 return result;
@@ -147,19 +154,22 @@ public:
             diagnostics_.observeFrame(rx.parserResult);
             const HostOperationService::HelloResult hello =
                 HostOperationService::handleHello(frame.requestId, frame.major,
+                    frame.minor,
                     request, snapshot, radioBridge);
             uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {};
             size_t length = 0;
             if (hello.disposition == HostOperationService::HelloDisposition::RESPONSE) {
                 if (HostProtocol::encodeHelloResponse(hello.response, payload,
                         sizeof(payload), length) == HostProtocol::PayloadResult::OK &&
-                    submitFrame(HostProtocol::MessageType::HELLO_RESPONSE,
+                    submitFrame(frame.minor,
+                        HostProtocol::MessageType::HELLO_RESPONSE,
                         frame.requestId, payload, length)) {
                     result.action = Action::HOST_RESPONSE_HANDOFF;
                 }
             } else if (HostProtocol::encodeProtocolError(hello.error, payload,
                     sizeof(payload), length) == HostProtocol::PayloadResult::OK &&
-                submitFrame(HostProtocol::MessageType::PROTOCOL_ERROR,
+                submitFrame(frame.minor,
+                    HostProtocol::MessageType::PROTOCOL_ERROR,
                     frame.requestId, payload, length)) {
                 result.action = Action::HOST_RESPONSE_HANDOFF;
             }
@@ -171,13 +181,28 @@ public:
             return result;
         }
         HostProtocol::OperationRequest semantic = {};
-        if (HostProtocol::decodeOperationRequest(frame.payload, frame.payloadLength,
+        if (HostProtocol::decodeOperationRequest(frame.minor,
+                frame.payload, frame.payloadLength,
                 semantic) != HostProtocol::PayloadResult::OK) {
             diagnostics_.observeFrame(rx.parserResult,
                 HostProtocolDiagnostics::MessageBoundaryResult::MALFORMED);
             return result;
         }
         diagnostics_.observeFrame(rx.parserResult);
+        if (semantic.category == HostProtocol::OperationCategory::EVENT) {
+            HostProtocol::OperationResponse unsupported = {};
+            unsupported.category = semantic.category;
+            unsupported.operation = semantic.operation;
+            unsupported.targetDeviceId = semantic.targetDeviceId;
+            unsupported.targetId = semantic.targetId;
+            unsupported.resultClass = HostProtocol::ResultClass::REQUEST_REJECTED;
+            unsupported.resultCode = static_cast<uint8_t>(
+                HostProtocol::RequestRejectionCode::UNSUPPORTED_OPERATION);
+            HostProtocol::setNoneValue(unsupported.value);
+            if (submitOperationResponse(frame.minor, frame.requestId, unsupported))
+                result.action = Action::HOST_RESPONSE_HANDOFF;
+            return result;
+        }
 #if defined(ARGUS_STRUCTURED_TRACE)
         StructuredTrace::record(now, StructuredTrace::Event::HOST_FRAME_ACCEPTED,
             frame.requestId, 0, static_cast<uint8_t>(semantic.operation));
@@ -190,7 +215,7 @@ public:
         const HostOperationLifecycle::Result life = lifecycle_.submit(
             frame.requestId, frame.payload, frame.payloadLength, snapshot, peerId,
             registryValid, registry, handler, interlock, capabilityDiagnostics,
-            runtimeState, availability, now, overallTimeout);
+            runtimeState, availability, now, overallTimeout, 2, false, frame.minor);
         if (life.action == HostOperationLifecycle::Action::TRANSMIT_COMMAND) {
 #if defined(ARGUS_STRUCTURED_TRACE)
             StructuredTrace::record(now,
@@ -207,7 +232,8 @@ public:
                     diagnostics_.observeRequestDispatched();
             }
             diagnostics_.observeOperationResponse(life.response);
-            if (submitOperationResponse(life.requestId, life.response))
+            if (submitOperationResponse(life.responseMinor,
+                    life.requestId, life.response))
                 result.action = Action::HOST_RESPONSE_HANDOFF;
         }
         return result;
@@ -229,11 +255,12 @@ public:
     }
 
 private:
-    bool submitFrame(HostProtocol::MessageType type, uint16_t requestId,
+    bool submitFrame(uint8_t minor, HostProtocol::MessageType type,
+        uint16_t requestId,
         const uint8_t* payload, size_t payloadLength) {
         HostProtocol::Frame frame = {};
         frame.major = HostProtocol::VERSION_MAJOR;
-        frame.minor = HostProtocol::VERSION_MINOR;
+        frame.minor = minor;
         frame.messageType = type;
         frame.requestId = requestId;
         frame.payloadLength = static_cast<uint16_t>(payloadLength);
@@ -248,13 +275,13 @@ private:
         return true;
     }
 
-    bool submitOperationResponse(uint16_t requestId,
+    bool submitOperationResponse(uint8_t minor, uint16_t requestId,
         const HostProtocol::OperationResponse& response) {
         uint8_t payload[HostProtocol::MAX_PAYLOAD_SIZE] = {};
         size_t length = 0;
-        return HostProtocol::encodeOperationResponse(response, payload,
+        return HostProtocol::encodeOperationResponse(minor, response, payload,
                    sizeof(payload), length) == HostProtocol::PayloadResult::OK &&
-            submitFrame(HostProtocol::MessageType::OPERATION_RESPONSE,
+            submitFrame(minor, HostProtocol::MessageType::OPERATION_RESPONSE,
                 requestId, payload, length);
     }
 
@@ -266,7 +293,8 @@ private:
         } else if (life.action == HostOperationLifecycle::Action::HOST_RESPONSE_READY) {
             diagnostics_.observeOperationResponse(life.response);
             if (!transport_.hasPendingTx() &&
-                submitOperationResponse(life.requestId, life.response)) {
+                submitOperationResponse(life.responseMinor,
+                    life.requestId, life.response)) {
                 result.action = Action::HOST_RESPONSE_HANDOFF;
             } else if (connected_) {
                 pendingOriginalDelivery_ = true;
