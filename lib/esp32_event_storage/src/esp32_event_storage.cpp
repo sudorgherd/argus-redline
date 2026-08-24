@@ -9,16 +9,26 @@ namespace {
 constexpr char NAMESPACE[] = "red_evt";
 constexpr char META_A[] = "id_a";
 constexpr char META_B[] = "id_b";
+constexpr char HUB_META_A[] = "ho_a";
+constexpr char HUB_META_B[] = "ho_b";
 constexpr char SLOT_KEYS[NodeEventStore::NODE_EVENT_CAPACITY][2][5] = {
     {"e0a", "e0b"}, {"e1a", "e1b"}, {"e2a", "e2b"}, {"e3a", "e3b"},
     {"e4a", "e4b"}, {"e5a", "e5b"}, {"e6a", "e6b"}, {"e7a", "e7b"}
+};
+constexpr char HUB_SLOT_KEYS[HubEventLedger::HUB_EVENT_CAPACITY][2][5] = {
+    {"h0a", "h0b"}, {"h1a", "h1b"}, {"h2a", "h2b"}, {"h3a", "h3b"},
+    {"h4a", "h4b"}, {"h5a", "h5b"}, {"h6a", "h6b"}, {"h7a", "h7b"}
 };
 
 static_assert(sizeof(NAMESPACE) - 1U <= 15U, "Preferences namespace too long");
 static_assert(sizeof(META_A) - 1U <= 15U && sizeof(META_B) - 1U <= 15U,
               "Preferences metadata key too long");
+static_assert(sizeof(HUB_META_A) - 1U <= 15U && sizeof(HUB_META_B) - 1U <= 15U,
+              "Preferences Hub metadata key too long");
 static_assert(EventRecords::NODE_METADATA_SIZE == 28, "metadata geometry changed");
 static_assert(EventRecords::NODE_RECORD_SIZE == 56, "record geometry changed");
+static_assert(EventRecords::HUB_METADATA_SIZE == 24, "Hub metadata geometry changed");
+static_assert(EventRecords::HUB_RECORD_SIZE == 56, "Hub record geometry changed");
 
 const char* metadataKey(EventStorage::CopySlot slot) {
     return slot == EventStorage::CopySlot::A ? META_A : META_B;
@@ -27,6 +37,16 @@ const char* metadataKey(EventStorage::CopySlot slot) {
 const char* eventKey(uint8_t logicalSlot, EventStorage::CopySlot copy) {
     return logicalSlot < NodeEventStore::NODE_EVENT_CAPACITY
         ? SLOT_KEYS[logicalSlot][copy == EventStorage::CopySlot::A ? 0 : 1]
+        : nullptr;
+}
+
+const char* hubMetadataKey(EventStorage::CopySlot slot) {
+    return slot == EventStorage::CopySlot::A ? HUB_META_A : HUB_META_B;
+}
+
+const char* hubEventKey(uint8_t logicalSlot, EventStorage::CopySlot copy) {
+    return logicalSlot < HubEventLedger::HUB_EVENT_CAPACITY
+        ? HUB_SLOT_KEYS[logicalSlot][copy == EventStorage::CopySlot::A ? 0 : 1]
         : nullptr;
 }
 
@@ -108,6 +128,30 @@ EventIdentity::StorageResult PreferencesStore::writeEventCopy(
     uint8_t logicalSlot, EventStorage::CopySlot copy,
     const uint8_t* input, size_t length) {
     return writeBlob(eventKey(logicalSlot, copy), EventRecords::NODE_RECORD_SIZE,
+                     input, length);
+}
+
+EventIdentity::StorageResult PreferencesStore::readHubMetadata(
+    EventStorage::CopySlot copy, uint8_t* output,
+    size_t capacity, size_t& length) {
+    return readBlob(hubMetadataKey(copy), EventRecords::HUB_METADATA_SIZE,
+                    output, capacity, length);
+}
+EventIdentity::StorageResult PreferencesStore::writeHubMetadata(
+    EventStorage::CopySlot copy, const uint8_t* input, size_t length) {
+    return writeBlob(hubMetadataKey(copy), EventRecords::HUB_METADATA_SIZE,
+                     input, length);
+}
+EventIdentity::StorageResult PreferencesStore::readHubEventCopy(
+    uint8_t logicalSlot, EventStorage::CopySlot copy, uint8_t* output,
+    size_t capacity, size_t& length) {
+    return readBlob(hubEventKey(logicalSlot, copy), EventRecords::HUB_RECORD_SIZE,
+                    output, capacity, length);
+}
+EventIdentity::StorageResult PreferencesStore::writeHubEventCopy(
+    uint8_t logicalSlot, EventStorage::CopySlot copy,
+    const uint8_t* input, size_t length) {
+    return writeBlob(hubEventKey(logicalSlot, copy), EventRecords::HUB_RECORD_SIZE,
                      input, length);
 }
 

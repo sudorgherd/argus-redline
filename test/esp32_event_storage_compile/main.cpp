@@ -2,6 +2,10 @@
 
 void setup() {
     Esp32EventStorage::PreferencesStore storage;
+    NodeEventStore::Storage* nodeStorage = &storage;
+    HubEventLedger::Storage* hubStorage = &storage;
+    (void)nodeStorage;
+    (void)hubStorage;
     (void)storage;
 }
 
