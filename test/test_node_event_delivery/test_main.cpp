@@ -461,6 +461,218 @@ void testAbruptShutdownBeforeAndAfterCheckpoint() {
         rebootedAfter.recordAt(second.slot)->remainingActiveSeconds);
 }
 
+class FakeSequence final : public SequenceSource {
+public:
+    uint8_t value = 0x40;
+    unsigned calls = 0;
+    bool succeed = true;
+    bool next(uint8_t& output) override { ++calls; output = value++; return succeed; }
+};
+
+class FakeJitter final : public JitterSource {
+public:
+    uint16_t value = 0;
+    unsigned calls = 0;
+    uint16_t nextMilliseconds() override { ++calls; return value; }
+};
+
+struct DeliveryFixture {
+    FakeStorage storage;
+    FakeEntropy entropy;
+    NodeEventStore::Store store;
+    FakeSequence sequence;
+    FakeJitter jitter;
+    Controller controller;
+
+    void initializeEmpty(uint32_t now = 0) {
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeEventStore::Status::READY),
+            static_cast<uint8_t>(store.recover(storage, entropy, 0x10)));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::NO_ACTIVE_EVENT),
+            static_cast<uint8_t>(controller.recover(store, 0x10, 0x20, sequence, jitter, now).status));
+        storage.clearFault();
+    }
+    uint8_t enqueue(uint32_t lifetime = 300) {
+        const auto result = store.enqueue(event(lifetime));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EnqueueStatus::ENQUEUED), static_cast<uint8_t>(result.status));
+        return result.slot;
+    }
+    void recoverController(uint32_t now = 0) {
+        const ControllerStatus status = controller.recover(store, 0x10, 0x20, sequence, jitter, now).status;
+        TEST_ASSERT_TRUE(status == ControllerStatus::OK || status == ControllerStatus::NO_ACTIVE_EVENT);
+    }
+    ControllerResult ready(uint32_t now = 0) {
+        ControllerResult output = controller.service(now, false);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::READY), static_cast<uint8_t>(controller.state()));
+        return output;
+    }
+    ControllerResult transmit(uint32_t now = 0) { ready(now); return controller.grantTransmit(now); }
+    ControllerResult waitAdmission(uint32_t now = 0) {
+        ControllerResult tx = transmit(now);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::TRANSMIT), static_cast<uint8_t>(tx.action.type));
+        return controller.txCompleted(now);
+    }
+    void response(EventProtocol::AdmissionStatus status, uint8_t* bytes, size_t& length) {
+        const auto admission = EventProtocol::makeAdmissionResponse(controller.attemptEvent(), status);
+        TEST_ASSERT_TRUE(EventProtocol::encodeAdmissionResponse(admission, bytes, Protocol::MAX_PACKET_SIZE, length));
+    }
+};
+
+void testControllerRecoveryArbitrationAndFifo() {
+    DeliveryFixture f; f.initializeEmpty();
+    TEST_ASSERT_FALSE(f.controller.hasActiveEvent());
+    const uint8_t first = f.enqueue(); const uint8_t second = f.enqueue();
+    f.recoverController();
+    TEST_ASSERT_EQUAL_UINT8(first, f.controller.activeSlot());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::QUEUED), static_cast<uint8_t>(f.controller.state()));
+    f.controller.service(0, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::QUEUED), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.recordAt(first)->attemptsUsed);
+    f.ready();
+    f.controller.service(0, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::QUEUED), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::INVALID_STATE), static_cast<uint8_t>(f.controller.grantTransmit(0).status));
+    TEST_ASSERT_NOT_EQUAL(second, f.controller.activeSlot());
+}
+
+void testPrepareWritesAttemptBeforeCanonicalTransmit() {
+    DeliveryFixture f; f.initializeEmpty(); const uint8_t slot = f.enqueue(); f.recoverController();
+    const unsigned before = f.storage.eventWrites;
+    ControllerResult tx = f.transmit(1000);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::TRANSMIT), static_cast<uint8_t>(tx.action.type));
+    TEST_ASSERT_EQUAL_UINT8(1, f.store.recordAt(slot)->attemptsUsed);
+    TEST_ASSERT_TRUE(f.storage.eventWrites > before);
+    TEST_ASSERT_EQUAL_UINT(1, f.sequence.calls);
+    EventProtocol::Event decoded = {};
+    TEST_ASSERT_TRUE(EventProtocol::decodeEvent(tx.action.bytes, tx.action.length, decoded));
+    TEST_ASSERT_EQUAL_UINT32(300, decoded.lifetimeBudgetSeconds);
+    TEST_ASSERT_EQUAL_UINT32(f.store.recordAt(slot)->eventId, decoded.id);
+    TEST_ASSERT_EQUAL_UINT8(0x40, decoded.sequence);
+}
+
+void testAttemptPersistenceFailureExposesNoTransmit() {
+    DeliveryFixture f; f.initializeEmpty(); f.enqueue(); f.recoverController(); f.ready();
+    f.storage.fault = Fault::WRITE;
+    ControllerResult output = f.controller.grantTransmit(0);
+    TEST_ASSERT_NOT_EQUAL(static_cast<uint8_t>(RadioActionType::TRANSMIT), static_cast<uint8_t>(output.action.type));
+    TEST_ASSERT_TRUE(f.controller.degraded());
+    TEST_ASSERT_EQUAL_UINT(0, f.sequence.calls);
+}
+
+void testTxLifecycleTimeoutBackoffAndJitter() {
+    DeliveryFixture f; f.initializeEmpty(); f.enqueue(); f.recoverController();
+    f.jitter.value = 250;
+    ControllerResult tx = f.transmit(100);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::TX), static_cast<uint8_t>(f.controller.state()));
+    f.controller.txStarted(500);
+    TEST_ASSERT_EQUAL_UINT32(0, f.controller.deadlineDuration());
+    ControllerResult done = f.controller.txCompleted(1000);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(done.action.type));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::WAIT_ADMISSION), static_cast<uint8_t>(f.controller.state()));
+    f.controller.service(3499, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::WAIT_ADMISSION), static_cast<uint8_t>(f.controller.state()));
+    ControllerResult timeout = f.controller.service(3500, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(timeout.action.type));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::BACKOFF), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT32(1250, f.controller.deadlineDuration()); TEST_ASSERT_EQUAL_UINT(1, f.jitter.calls);
+    f.controller.service(4749, false); TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::BACKOFF), static_cast<uint8_t>(f.controller.state()));
+    f.controller.service(4750, true); TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::QUEUED), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT(1, f.jitter.calls);
+}
+
+void testAdmissionCorrelationIgnoredWithoutDeadlineChange() {
+    DeliveryFixture f; f.initializeEmpty(); f.enqueue(); f.recoverController(); f.waitAdmission(0);
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0;
+    f.response(EventProtocol::AdmissionStatus::ADMITTED, bytes, length);
+    const uint32_t origin = f.controller.deadlineOrigin();
+    const size_t fields[] = {2, 3, 4, 5, 7, 11};
+    for (size_t i = 0; i < sizeof(fields)/sizeof(fields[0]); ++i) {
+        uint8_t altered[Protocol::MAX_PACKET_SIZE] = {};
+        for (size_t j = 0; j < length; ++j) altered[j] = bytes[j];
+        altered[fields[i]] ^= 1U;
+        ControllerResult ignored = f.controller.admissionCandidate(altered, length, 100 + static_cast<uint32_t>(i));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(ignored.action.type));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::WAIT_ADMISSION), static_cast<uint8_t>(f.controller.state()));
+        TEST_ASSERT_EQUAL_UINT32(origin, f.controller.deadlineOrigin());
+    }
+    f.controller.admissionCandidate(bytes, length - 1, 200);
+    TEST_ASSERT_EQUAL_UINT32(origin, f.controller.deadlineOrigin());
+}
+
+void testAdmittedReleaseAndNextHead() {
+    DeliveryFixture f; f.initializeEmpty(); const uint8_t first = f.enqueue(); const uint8_t second = f.enqueue(); f.recoverController(); f.waitAdmission();
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0; f.response(EventProtocol::AdmissionStatus::ADMITTED, bytes, length);
+    ControllerResult admitted = f.controller.admissionCandidate(bytes, length, 1);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::RELEASED), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeState::FREE), static_cast<uint8_t>(f.store.recordAt(first)->state));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(admitted.action.type));
+    f.controller.service(2, false);
+    TEST_ASSERT_EQUAL_UINT8(second, f.controller.activeSlot());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::READY), static_cast<uint8_t>(f.controller.state()));
+}
+
+void testAdmissionStatusesAndTerminalReclaim() {
+    const EventProtocol::AdmissionStatus terminal[] = {EventProtocol::AdmissionStatus::IDENTITY_CONTENT_MISMATCH,
+        EventProtocol::AdmissionStatus::UNSUPPORTED_EVENT, EventProtocol::AdmissionStatus::MALFORMED_EVENT};
+    for (auto status : terminal) {
+        DeliveryFixture f; f.initializeEmpty(); const uint8_t slot = f.enqueue(); f.recoverController(); f.waitAdmission();
+        uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0; f.response(status, bytes, length);
+        f.controller.admissionCandidate(bytes, length, 1);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::FAILED), static_cast<uint8_t>(f.controller.state()));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeState::FAILED), static_cast<uint8_t>(f.store.recordAt(slot)->state));
+        f.controller.service(2, false); TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::FAILED), static_cast<uint8_t>(f.controller.state()));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::OK), static_cast<uint8_t>(f.controller.reclaimTerminal().status));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeState::FREE), static_cast<uint8_t>(f.store.recordAt(slot)->state));
+    }
+}
+
+void testAttemptFiveFailureAndSuccess() {
+    const bool outcomes[] = {false, true};
+    for (bool admitted : outcomes) {
+        FakeStorage storage; FakeEntropy entropy; seedFree(storage); seedMetadata(storage); seedQueued(storage, 0, 300, 4);
+        NodeEventStore::Store store; TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeEventStore::Status::READY), static_cast<uint8_t>(store.recover(storage, entropy, 0x10)));
+        FakeSequence sequence; FakeJitter jitter; Controller controller;
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::OK), static_cast<uint8_t>(controller.recover(store, 0x10, 0x20, sequence, jitter, 0).status));
+        controller.service(0, false); controller.grantTransmit(0); controller.txCompleted(0);
+        TEST_ASSERT_EQUAL_UINT8(5, store.recordAt(0)->attemptsUsed);
+        if (admitted) {
+            uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0;
+            auto response = EventProtocol::makeAdmissionResponse(controller.attemptEvent(), EventProtocol::AdmissionStatus::ADMITTED);
+            TEST_ASSERT_TRUE(EventProtocol::encodeAdmissionResponse(response, bytes, sizeof(bytes), length));
+            controller.admissionCandidate(bytes, length, 1);
+            TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::RELEASED), static_cast<uint8_t>(controller.state()));
+        } else {
+            controller.service(2500, false);
+            TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::FAILED), static_cast<uint8_t>(controller.state()));
+            TEST_ASSERT_EQUAL_UINT8(5, store.recordAt(0)->attemptsUsed);
+            TEST_ASSERT_EQUAL_UINT(0, jitter.calls);
+        }
+    }
+}
+
+void testExpiryPreemptsTxWaitAndBackoff() {
+    DeliveryFixture f; f.initializeEmpty(); const uint8_t slot = f.enqueue(120); f.recoverController(); f.transmit(0);
+    ControllerResult expired = f.controller.txStarted(60000);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::EXPIRED), static_cast<uint8_t>(f.controller.state()));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeState::EXPIRED), static_cast<uint8_t>(f.store.recordAt(slot)->state));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(expired.action.type));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::OK), static_cast<uint8_t>(f.controller.reclaimTerminal().status));
+}
+
+void testTxStartFailureBackoffAndStorageFailureFailClosed() {
+    DeliveryFixture f; f.initializeEmpty(); f.enqueue(); f.recoverController(); f.transmit(0);
+    ControllerResult failed = f.controller.txStartFailed(10);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(failed.action.type));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RuntimeState::BACKOFF), static_cast<uint8_t>(f.controller.state()));
+
+    DeliveryFixture g; g.initializeEmpty(); g.enqueue(); g.recoverController(); g.waitAdmission();
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0; g.response(EventProtocol::AdmissionStatus::ADMITTED, bytes, length);
+    g.storage.fault = Fault::WRITE;
+    ControllerResult release = g.controller.admissionCandidate(bytes, length, 1);
+    TEST_ASSERT_TRUE(g.controller.degraded());
+    TEST_ASSERT_NOT_EQUAL(static_cast<uint8_t>(RuntimeState::RELEASED), static_cast<uint8_t>(g.controller.state()));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(release.action.type));
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -478,5 +690,15 @@ int main(int, char**) {
     RUN_TEST(testExpiredAndTerminalEventsCannotArm);
     RUN_TEST(testCheckpointAndDebitFailuresBlockEligibility);
     RUN_TEST(testAbruptShutdownBeforeAndAfterCheckpoint);
+    RUN_TEST(testControllerRecoveryArbitrationAndFifo);
+    RUN_TEST(testPrepareWritesAttemptBeforeCanonicalTransmit);
+    RUN_TEST(testAttemptPersistenceFailureExposesNoTransmit);
+    RUN_TEST(testTxLifecycleTimeoutBackoffAndJitter);
+    RUN_TEST(testAdmissionCorrelationIgnoredWithoutDeadlineChange);
+    RUN_TEST(testAdmittedReleaseAndNextHead);
+    RUN_TEST(testAdmissionStatusesAndTerminalReclaim);
+    RUN_TEST(testAttemptFiveFailureAndSuccess);
+    RUN_TEST(testExpiryPreemptsTxWaitAndBackoff);
+    RUN_TEST(testTxStartFailureBackoffAndStorageFailureFailClosed);
     return UNITY_END();
 }
