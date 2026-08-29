@@ -3,6 +3,7 @@
 **Status:** Authoritative roadmap
 **Current release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
 **Next planned milestone:** `v0.7.0` — Node-Originated Events and Reliable Delivery
+**v0.7.0 development status:** Stages 1–12 complete; Stage 13 — Python Host Reference Update is next
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -526,17 +527,36 @@ Allow Nodes to initiate structured traffic and preserve important events through
 - Persist important queued events across reboot.
 - Add queue limits and overflow behavior.
 - Support button and sensor-generated events.
-- Add local compiled policies that may create events.
+- Add one bounded compiled sensor-threshold crossing policy.
 
 ### Initial event sources
 
 ```text
-button press
-sensor threshold
-local status change
-device error
-manual check-in
+BUTTON             0x40
+SENSOR_THRESHOLD   0x41
+MANUAL_CHECK_IN    0x44
 ```
+
+The accepted detailed design closes the v0.7.0 registry to these three
+families. Status change, device error, and local policy remain deferred and
+have no v0.7.0 opcode or body schema.
+
+### Implementation sequence status
+
+```text
+[x] Stages 1–10 — Event protocol, persistence, Host service, and radio integration
+[x] Stage 11 — Event Producers
+[x] Stage 12 — Diagnostics and UI
+[ ] Stage 13 — Python Host Reference Update (next)
+[ ] Stage 14 — Full Native Regression Gate
+[ ] Stage 15 — Production Build Gate
+[ ] Stage 16 — Bench Integration Gate
+[ ] Stage 17 — Physical Qualification
+[ ] Stage 18 — Documentation and Release Closeout
+```
+
+This is development progress, not release completion. The release and physical
+qualification gates below remain open.
 
 ### Release gate
 
@@ -1326,7 +1346,10 @@ Immediate direction:
 [x] Preserve F-02, F-03, and F-04 as authenticated-transport requirements
 [x] Complete v0.6.0 lifecycle and release documentation
 [x] Publish v0.6.0
-[ ] Begin v0.7.0 design and implementation through its own approved scope and gates
+[x] Begin v0.7.0 design and implementation through its own approved scope and gates
+[x] Complete v0.7.0 implementation Stages 1–12
+[ ] Complete Stage 13 — Python Host Reference Update
+[ ] Complete regression, production-build, bench, physical-qualification, and release-closeout gates
 ```
 
 v0.7.0 introduces Node-originated structured traffic and reliable delivery. It does not pull forward persistent identity, authenticated transport, multi-Node networking, routing, repeaters, or mesh behavior.
