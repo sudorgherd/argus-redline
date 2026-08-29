@@ -94,6 +94,9 @@ The production framework is Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4 through pioardui
 Wire Protocol 1 remains unauthenticated and unencrypted. Production unauthenticated RF authority is deliberately restricted; structured SET or procedure operations do not grant general remote side-effect authority.
 
 The next planned milestone is `v0.7.0 — Node-Originated Events and Reliable Delivery`.
+Development is complete through v0.7.0 implementation Stage 12; Stage 13 —
+Python Host Reference Update is next. v0.7.0 remains unreleased and has not
+entered bench or physical qualification.
 
 ### Project Documentation
 
