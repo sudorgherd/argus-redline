@@ -1144,9 +1144,7 @@ void testBuilderFullyReplacesReusedSnapshotAndDoesNotMutateInput() {
     );
     TEST_ASSERT_EQUAL_UINT8(5, snapshot.rowCount);
     snapshot = DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
-    TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
-    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.rows[1].label[0]);
-    TEST_ASSERT_EQUAL_CHAR('\0', snapshot.rows[1].value[0]);
+    TEST_ASSERT_EQUAL_UINT8(5, snapshot.rowCount);
     TEST_ASSERT_EQUAL_UINT8(originalLocalId, input.localId);
 }
 
@@ -1190,7 +1188,7 @@ void testHomeRoleAndAllHealthLabelsAreDeterministic() {
         const DeviceUi::PresentationSnapshot snapshot =
             DeviceUi::buildPresentation(DeviceUi::Screen::HOME, node);
         assertRow(snapshot, 0, "RX", labels[index]);
-        TEST_ASSERT_EQUAL_UINT8(1, snapshot.rowCount);
+        TEST_ASSERT_EQUAL_UINT8(5, snapshot.rowCount);
     }
 }
 
@@ -1646,6 +1644,39 @@ void testHubAndNodePresentationInputsRemainIndependent() {
     );
 }
 
+void testNodeEventHomePresentationIsBoundedAndActionable() {
+    DeviceUi::PresentationInput input = makePresentationInput(RuntimeState::DeviceRole::NODE);
+    input.event.queuedCount = 8;
+    input.event.queueCapacity = 8;
+    input.event.hubUnavailable = true;
+    input.event.persistenceDegraded = true;
+    input.event.counters.attemptsExhausted = 2;
+    input.event.counters.eventsExpired = 3;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
+    assertRow(snapshot, 1, "EVT", "8/8");
+    assertRow(snapshot, 2, "HUB", "UNAVAILABLE");
+    assertRow(snapshot, 3, "EVT STOR", "DEGRADED");
+    assertRow(snapshot, 4, "FAIL/EXP", "2/3");
+    TEST_ASSERT_EQUAL_UINT8(8, input.event.queuedCount);
+}
+
+void testHubEventHomePresentationShowsCustodyAndEvidence() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.event.activeCount = 4;
+    input.event.counters.duplicateRetransmissions = 5;
+    input.event.counters.identityContentMismatches = 6;
+    input.event.counters.hubCapacityRejections = 7;
+    input.event.counters.hostPollsReturnedEvent = 8;
+    input.event.counters.hostConsumptions = 9;
+    const DeviceUi::PresentationSnapshot snapshot =
+        DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
+    assertRow(snapshot, 1, "ACTIVE", "4");
+    assertRow(snapshot, 2, "EVT STOR", "OK");
+    assertRow(snapshot, 3, "DUP/MM/C", "5/6/7");
+    assertRow(snapshot, 4, "POLL/USE", "8/9");
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -1743,5 +1774,7 @@ int main(int, char**) {
     RUN_TEST(testEveryErrorClassAndUnknownFallbackMapsDeterministically);
     RUN_TEST(testAboutUsesSuppliedMetadataExactlyWithoutFutureVersion);
     RUN_TEST(testHubAndNodePresentationInputsRemainIndependent);
+    RUN_TEST(testNodeEventHomePresentationIsBoundedAndActionable);
+    RUN_TEST(testHubEventHomePresentationShowsCustodyAndEvidence);
     return UNITY_END();
 }

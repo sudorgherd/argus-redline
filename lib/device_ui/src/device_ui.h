@@ -118,6 +118,7 @@ struct PresentationInput {
     PeerState peerState = PeerState::UNKNOWN;
     RuntimeState::LastInboundPacket lastInboundPacket = {};
     RuntimeState::DiagnosticCounters counters = {};
+    RuntimeState::EventSnapshot event = {};
     RuntimeState::ErrorClass lastError = RuntimeState::ErrorClass::NONE;
     bool diagnosticsEnabled = true;
     ConfigurationStatus configurationStatus =
@@ -484,6 +485,33 @@ inline PresentationSnapshot buildPresentation(
         case Screen::HOME:
             copyText(snapshot.title, "ARGUS REDLINE");
             addRow(snapshot, roleLabel(input.role), healthLabel(input.health));
+            if (input.role == RuntimeState::DeviceRole::NODE) {
+                snprintf(value, sizeof(value), "%u/%u", input.event.queuedCount,
+                    input.event.queueCapacity);
+                addRow(snapshot, "EVT", value);
+                addRow(snapshot, "HUB",
+                    input.event.hubUnavailable ? "UNAVAILABLE" : "AVAILABLE");
+                addRow(snapshot, "EVT STOR",
+                    input.event.persistenceDegraded ? "DEGRADED" : "OK");
+                snprintf(value, sizeof(value), "%lu/%lu",
+                    static_cast<unsigned long>(input.event.counters.attemptsExhausted),
+                    static_cast<unsigned long>(input.event.counters.eventsExpired));
+                addRow(snapshot, "FAIL/EXP", value);
+            } else {
+                snprintf(value, sizeof(value), "%u", input.event.activeCount);
+                addRow(snapshot, "ACTIVE", value);
+                addRow(snapshot, "EVT STOR",
+                    input.event.persistenceDegraded ? "DEGRADED" : "OK");
+                snprintf(value, sizeof(value), "%lu/%lu/%lu",
+                    static_cast<unsigned long>(input.event.counters.duplicateRetransmissions),
+                    static_cast<unsigned long>(input.event.counters.identityContentMismatches),
+                    static_cast<unsigned long>(input.event.counters.hubCapacityRejections));
+                addRow(snapshot, "DUP/MM/C", value);
+                snprintf(value, sizeof(value), "%lu/%lu",
+                    static_cast<unsigned long>(input.event.counters.hostPollsReturnedEvent),
+                    static_cast<unsigned long>(input.event.counters.hostConsumptions));
+                addRow(snapshot, "POLL/USE", value);
+            }
             break;
 
         case Screen::RADIO:

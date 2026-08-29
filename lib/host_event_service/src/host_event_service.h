@@ -9,7 +9,9 @@ namespace HostEventService {
 
 class Service {
 public:
-    explicit Service(HubEventLedger::Ledger& ledger) : ledger_(ledger) {}
+    explicit Service(HubEventLedger::Ledger& ledger,
+                     RuntimeState::State* diagnostics = nullptr) :
+        ledger_(ledger), diagnostics_(diagnostics) {}
 
     HostOperationService::Result handle(
         uint16_t requestId,
@@ -106,6 +108,10 @@ private:
             return result;
         }
         result.response.value.length = static_cast<uint8_t>(length);
+        if (event.available == 1 && diagnostics_ != nullptr) {
+            diagnostics_->incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::HOST_POLL_RETURNED_EVENT);
+        }
         return result;
     }
 
@@ -140,6 +146,7 @@ private:
     }
 
     HubEventLedger::Ledger& ledger_;
+    RuntimeState::State* diagnostics_;
 };
 
 }  // namespace HostEventService

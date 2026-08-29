@@ -34,7 +34,8 @@ class HubAdapter {
 public:
     HubResult process(const uint8_t* bytes, size_t length,
                       uint8_t hubDeviceId, uint8_t nodeDeviceId,
-                      HubEventLedger::Ledger& ledger) const {
+                      HubEventLedger::Ledger& ledger,
+                      RuntimeState::State* diagnostics = nullptr) const {
         HubResult out = {};
         out.action = HubAction::DISCARD;
         Protocol::Packet packet = {};
@@ -95,6 +96,11 @@ public:
         out.action = HubAction::START_EVENT_ACK;
         out.ledgerMutated = mutated;
         out.status = wireStatus;
+        if (wireStatus == EventProtocol::AdmissionStatus::CAPACITY &&
+            diagnostics != nullptr) {
+            diagnostics->incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::HUB_CAPACITY_REJECTION);
+        }
         return out;
     }
 };

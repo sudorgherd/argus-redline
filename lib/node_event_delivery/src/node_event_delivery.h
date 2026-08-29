@@ -250,8 +250,10 @@ class Controller {
 public:
     ControllerResult recover(NodeEventStore::Store& store, uint8_t sourceDeviceId,
                              uint8_t hubDeviceId, SequenceSource& sequences,
-                             JitterSource& jitter, uint32_t nowMilliseconds) {
+                             JitterSource& jitter, uint32_t nowMilliseconds,
+                             ::RuntimeState::State* diagnostics = nullptr) {
         reset();
+        diagnostics_ = diagnostics;
         if (!EventProtocol::hasValidEndpoints(sourceDeviceId, hubDeviceId))
             return result(ControllerStatus::INVALID_CONFIGURATION);
         store_ = &store; sequences_ = &sequences; jitter_ = &jitter;
@@ -284,7 +286,7 @@ public:
                 break;
             case RuntimeState::WAIT_ADMISSION:
                 if (elapsed(nowMilliseconds, deadlineOrigin_) >= ADMISSION_TIMEOUT_MILLISECONDS)
-                    return failedAttempt(nowMilliseconds);
+                    return failedAttempt(nowMilliseconds, true);
                 break;
             case RuntimeState::BACKOFF:
                 if (elapsed(nowMilliseconds, deadlineOrigin_) >= deadlineDuration_)
@@ -336,7 +338,7 @@ public:
     ControllerResult txStartFailed(uint32_t nowMilliseconds) {
         if (!usable() || state_ != RuntimeState::TX) return result(ControllerStatus::INVALID_STATE);
         if (!serviceLifetime(nowMilliseconds)) return degradedResult_;
-        if (state_ != RuntimeState::EXPIRED) return failedAttempt(nowMilliseconds);
+        if (state_ != RuntimeState::EXPIRED) return failedAttempt(nowMilliseconds, false);
         return receiveResult();
     }
     ControllerResult txCompleted(uint32_t nowMilliseconds) {
@@ -363,9 +365,14 @@ public:
             case EventProtocol::AdmissionStatus::ADMITTED:
                 if (store_->releaseQueued(activeSlot_) != NodeEventStore::MutationStatus::OK)
                     return degrade(ControllerStatus::STORAGE_FAILURE, true);
+                if (diagnostics_ != nullptr) {
+                    diagnostics_->incrementEventDiagnostic(
+                        ::RuntimeState::EventDiagnostic::ADMISSION_ACKNOWLEDGED);
+                    diagnostics_->setHubUnavailable(false);
+                }
                 state_ = RuntimeState::RELEASED; clearAttempt(); return receiveResult();
             case EventProtocol::AdmissionStatus::CAPACITY:
-                return failedAttempt(nowMilliseconds);
+                return failedAttempt(nowMilliseconds, true);
             case EventProtocol::AdmissionStatus::IDENTITY_CONTENT_MISMATCH:
             case EventProtocol::AdmissionStatus::UNSUPPORTED_EVENT:
             case EventProtocol::AdmissionStatus::MALFORMED_EVENT:
@@ -392,6 +399,9 @@ public:
     uint32_t deadlineOrigin() const { return deadlineOrigin_; }
     uint32_t deadlineDuration() const { return deadlineDuration_; }
     const EventProtocol::Event& attemptEvent() const { return attemptEvent_; }
+    void successfulHubExchange() {
+        if (diagnostics_ != nullptr) diagnostics_->setHubUnavailable(false);
+    }
 
 private:
     static uint32_t elapsed(uint32_t now, uint32_t then) { return now - then; }
@@ -420,7 +430,9 @@ private:
         if (store_->markFailed(activeSlot_) != NodeEventStore::MutationStatus::OK) return false;
         state_ = RuntimeState::FAILED; clearAttempt(); return true;
     }
-    ControllerResult failedAttempt(uint32_t now) {
+    ControllerResult failedAttempt(uint32_t now, bool hubUnavailableEvidence) {
+        if (hubUnavailableEvidence && diagnostics_ != nullptr)
+            diagnostics_->setHubUnavailable(true);
         const EventRecords::NodeRecord* current = record();
         if (!current || current->attemptsUsed >= EventRecords::MAX_ATTEMPTS) {
             if (!markFailed()) return degrade(ControllerStatus::STORAGE_FAILURE, true);
@@ -460,6 +472,7 @@ private:
     uint32_t deadlineOrigin_ = 0, deadlineDuration_ = 0;
     EventProtocol::Event attemptEvent_ = {};
     ControllerResult degradedResult_ = {};
+    ::RuntimeState::State* diagnostics_ = nullptr;
 };
 
 }  // namespace NodeEventDelivery

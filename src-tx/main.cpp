@@ -94,7 +94,7 @@ unsigned long nextTransmitAt = 0;
 TransactionEngine::HubTransactionState transactionState;
 Esp32EventStorage::PreferencesStore eventStorage;
 HubEventLedger::Ledger hubEventLedger;
-HostEventService::Service hostEventService(hubEventLedger);
+HostEventService::Service hostEventService(hubEventLedger, &runtimeState);
 EventRadioIntegration::HubAdapter hubEventAdapter;
 EventRadioIntegration::HubArbiter hubRadioArbiter;
 bool hubEventLedgerRecovered = false;
@@ -190,6 +190,7 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.peerState = peerState;
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
+    input.event = runtimeState.eventSnapshot();
     input.lastError = runtimeState.lastError();
     input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
     input.configurationStatus = configurationState.status;
@@ -909,7 +910,8 @@ bool processEventBytes(const uint8_t* bytes, size_t length,
                        RuntimeState::RuntimePhase priorPhase) {
     if (!hubEventLedgerRecovered) return false;
     const EventRadioIntegration::HubResult result = hubEventAdapter.process(
-        bytes, length, runtimeState.localId(), runtimeState.peerId(), hubEventLedger);
+        bytes, length, runtimeState.localId(), runtimeState.peerId(), hubEventLedger,
+        &runtimeState);
     if (result.action != EventRadioIntegration::HubAction::START_EVENT_ACK) return false;
     (void)startEventAdmissionAck(result, priorPhase);
     return true;
@@ -1357,9 +1359,23 @@ void setup() {
 
     loadSettings(static_cast<uint32_t>(millis()));
 
-    (void)hubEventLedger.recover(
+    hubEventLedger.setDiagnostics(&runtimeState);
+    const HubEventLedger::Status eventRecoveryStatus = hubEventLedger.recover(
         eventStorage, DeviceConfig::LOCAL_ID, DeviceConfig::PEER_ID);
     hubEventLedgerRecovered = hubEventLedger.healthy();
+    runtimeState.setActiveEventCount(
+        static_cast<uint8_t>(hubEventLedger.activeCount()));
+    if (!hubEventLedgerRecovered) {
+        runtimeState.setEventPersistenceDegraded(true);
+        runtimeState.incrementEventDiagnostic(
+            RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
+        if (eventRecoveryStatus == HubEventLedger::Status::INDETERMINATE_SLOT ||
+            eventRecoveryStatus == HubEventLedger::Status::RECORD_CONFLICT ||
+            eventRecoveryStatus == HubEventLedger::Status::GENERATION_AMBIGUOUS) {
+            runtimeState.incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::STORAGE_CORRUPTION);
+        }
+    }
 #if defined(ARGUS_HOST_MACHINE_STREAM)
     hostStack.setEventService(&hostEventService);
 #endif

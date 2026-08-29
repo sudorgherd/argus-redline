@@ -668,6 +668,56 @@ void testCapabilitySummaryPreservesRuntimeAndTransportState() {
 #undef ASSERT_TRANSPORT_UNCHANGED
 }
 
+void testEventDiagnosticsIncrementOnceAndSaturateIndependently() {
+    RuntimeState::State state(RuntimeState::DeviceRole::NODE, NODE_ID, HUB_ID);
+    const RuntimeState::EventDiagnostic diagnostics[] = {
+        RuntimeState::EventDiagnostic::ENQUEUE_ACCEPTED,
+        RuntimeState::EventDiagnostic::QUEUE_FULL_REJECTED,
+        RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE,
+        RuntimeState::EventDiagnostic::EVENT_RECOVERED,
+        RuntimeState::EventDiagnostic::STORAGE_CORRUPTION,
+        RuntimeState::EventDiagnostic::EVENT_ATTEMPT,
+        RuntimeState::EventDiagnostic::EVENT_EXPIRED,
+        RuntimeState::EventDiagnostic::ATTEMPT_EXHAUSTED,
+        RuntimeState::EventDiagnostic::HUB_CAPACITY_REJECTION,
+        RuntimeState::EventDiagnostic::IDENTITY_CONTENT_MISMATCH,
+        RuntimeState::EventDiagnostic::DUPLICATE_RETRANSMISSION,
+        RuntimeState::EventDiagnostic::SUCCESSFUL_ADMISSION,
+        RuntimeState::EventDiagnostic::ADMISSION_ACKNOWLEDGED,
+        RuntimeState::EventDiagnostic::HOST_POLL_RETURNED_EVENT,
+        RuntimeState::EventDiagnostic::HOST_CONSUMPTION
+    };
+    for (RuntimeState::EventDiagnostic diagnostic : diagnostics) {
+        state.incrementEventDiagnostic(diagnostic);
+        state.incrementEventDiagnostic(diagnostic, UINT32_MAX);
+    }
+    const RuntimeState::EventDiagnosticCounters& c = state.eventSnapshot().counters;
+#define ASSERT_SATURATED(field) TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, c.field)
+    ASSERT_SATURATED(enqueueAccepted); ASSERT_SATURATED(queueFullRejected);
+    ASSERT_SATURATED(persistenceFailures); ASSERT_SATURATED(eventsRecovered);
+    ASSERT_SATURATED(storageCorruptions); ASSERT_SATURATED(eventAttempts);
+    ASSERT_SATURATED(eventsExpired); ASSERT_SATURATED(attemptsExhausted);
+    ASSERT_SATURATED(hubCapacityRejections); ASSERT_SATURATED(identityContentMismatches);
+    ASSERT_SATURATED(duplicateRetransmissions); ASSERT_SATURATED(successfulAdmissions);
+    ASSERT_SATURATED(admissionsAcknowledged); ASSERT_SATURATED(hostPollsReturnedEvent);
+    ASSERT_SATURATED(hostConsumptions);
+#undef ASSERT_SATURATED
+    TEST_ASSERT_EQUAL_UINT32(0, state.counters().radioErrors);
+}
+
+void testEventSnapshotBoundsQueueAndStoresOnlyObservableFacts() {
+    RuntimeState::State state(RuntimeState::DeviceRole::NODE, NODE_ID, HUB_ID);
+    state.setEventQueue(9, 8);
+    state.setActiveEventCount(3);
+    state.setHubUnavailable(true);
+    state.setEventPersistenceDegraded(true);
+    TEST_ASSERT_EQUAL_UINT8(8, state.eventSnapshot().queuedCount);
+    TEST_ASSERT_EQUAL_UINT8(8, state.eventSnapshot().queueCapacity);
+    TEST_ASSERT_EQUAL_UINT8(3, state.eventSnapshot().activeCount);
+    TEST_ASSERT_TRUE(state.eventSnapshot().hubUnavailable);
+    TEST_ASSERT_TRUE(state.eventSnapshot().persistenceDegraded);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -696,5 +746,7 @@ int main(int, char**) {
     RUN_TEST(testCapabilitySummaryCopiesAndReplacesExplicitly);
     RUN_TEST(testInvalidCapabilitySummaryPreservesPriorCopy);
     RUN_TEST(testCapabilitySummaryPreservesRuntimeAndTransportState);
+    RUN_TEST(testEventDiagnosticsIncrementOnceAndSaturateIndependently);
+    RUN_TEST(testEventSnapshotBoundsQueueAndStoresOnlyObservableFacts);
     return UNITY_END();
 }

@@ -68,6 +68,41 @@ struct DiagnosticCounters {
     uint32_t radioErrors = 0;
 };
 
+struct EventDiagnosticCounters {
+    uint32_t enqueueAccepted = 0;
+    uint32_t queueFullRejected = 0;
+    uint32_t persistenceFailures = 0;
+    uint32_t eventsRecovered = 0;
+    uint32_t storageCorruptions = 0;
+    uint32_t eventAttempts = 0;
+    uint32_t eventsExpired = 0;
+    uint32_t attemptsExhausted = 0;
+    uint32_t hubCapacityRejections = 0;
+    uint32_t identityContentMismatches = 0;
+    uint32_t duplicateRetransmissions = 0;
+    uint32_t successfulAdmissions = 0;
+    uint32_t admissionsAcknowledged = 0;
+    uint32_t hostPollsReturnedEvent = 0;
+    uint32_t hostConsumptions = 0;
+};
+
+struct EventSnapshot {
+    EventDiagnosticCounters counters = {};
+    uint8_t queuedCount = 0;
+    uint8_t queueCapacity = 0;
+    uint8_t activeCount = 0;
+    bool hubUnavailable = false;
+    bool persistenceDegraded = false;
+};
+
+enum class EventDiagnostic : uint8_t {
+    ENQUEUE_ACCEPTED, QUEUE_FULL_REJECTED, PERSISTENCE_FAILURE,
+    EVENT_RECOVERED, STORAGE_CORRUPTION, EVENT_ATTEMPT, EVENT_EXPIRED,
+    ATTEMPT_EXHAUSTED, HUB_CAPACITY_REJECTION, IDENTITY_CONTENT_MISMATCH,
+    DUPLICATE_RETRANSMISSION, SUCCESSFUL_ADMISSION, ADMISSION_ACKNOWLEDGED,
+    HOST_POLL_RETURNED_EVENT, HOST_CONSUMPTION
+};
+
 class State {
 public:
     // localId and peerId are immutable snapshots supplied by DeviceConfig.
@@ -189,6 +224,39 @@ public:
         return counters_;
     }
 
+    const EventSnapshot& eventSnapshot() const { return eventSnapshot_; }
+    void setEventQueue(uint8_t count, uint8_t capacity) {
+        eventSnapshot_.queuedCount = count > capacity ? capacity : count;
+        eventSnapshot_.queueCapacity = capacity;
+    }
+    void setActiveEventCount(uint8_t count) { eventSnapshot_.activeCount = count; }
+    void setHubUnavailable(bool unavailable) { eventSnapshot_.hubUnavailable = unavailable; }
+    void setEventPersistenceDegraded(bool degraded) {
+        eventSnapshot_.persistenceDegraded = degraded;
+    }
+    void incrementEventDiagnostic(EventDiagnostic diagnostic, uint32_t amount = 1) {
+        uint32_t* value = nullptr;
+        EventDiagnosticCounters& c = eventSnapshot_.counters;
+        switch (diagnostic) {
+            case EventDiagnostic::ENQUEUE_ACCEPTED: value = &c.enqueueAccepted; break;
+            case EventDiagnostic::QUEUE_FULL_REJECTED: value = &c.queueFullRejected; break;
+            case EventDiagnostic::PERSISTENCE_FAILURE: value = &c.persistenceFailures; break;
+            case EventDiagnostic::EVENT_RECOVERED: value = &c.eventsRecovered; break;
+            case EventDiagnostic::STORAGE_CORRUPTION: value = &c.storageCorruptions; break;
+            case EventDiagnostic::EVENT_ATTEMPT: value = &c.eventAttempts; break;
+            case EventDiagnostic::EVENT_EXPIRED: value = &c.eventsExpired; break;
+            case EventDiagnostic::ATTEMPT_EXHAUSTED: value = &c.attemptsExhausted; break;
+            case EventDiagnostic::HUB_CAPACITY_REJECTION: value = &c.hubCapacityRejections; break;
+            case EventDiagnostic::IDENTITY_CONTENT_MISMATCH: value = &c.identityContentMismatches; break;
+            case EventDiagnostic::DUPLICATE_RETRANSMISSION: value = &c.duplicateRetransmissions; break;
+            case EventDiagnostic::SUCCESSFUL_ADMISSION: value = &c.successfulAdmissions; break;
+            case EventDiagnostic::ADMISSION_ACKNOWLEDGED: value = &c.admissionsAcknowledged; break;
+            case EventDiagnostic::HOST_POLL_RETURNED_EVENT: value = &c.hostPollsReturnedEvent; break;
+            case EventDiagnostic::HOST_CONSUMPTION: value = &c.hostConsumptions; break;
+        }
+        if (value != nullptr) saturatingIncrement(*value, amount);
+    }
+
     bool hasCapabilityDiagnostics() const {
         return capabilityDiagnosticsAvailable_;
     }
@@ -273,6 +341,7 @@ private:
     bool lastActivityAvailable_ = false;
     uint32_t lastActivityAtMs_ = 0;
     DiagnosticCounters counters_;
+    EventSnapshot eventSnapshot_;
     bool capabilityDiagnosticsAvailable_ = false;
     DeviceCapabilities::CapabilityDiagnosticsSnapshot
         capabilityDiagnostics_ = {};
