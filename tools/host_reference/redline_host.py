@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Developmental Host Protocol 0.1 reference/qualification utility.
+"""Developmental Host Protocol 0.1/0.2 reference/qualification utility.
 
 This is deliberately a small protocol tool, not an SDK or application API.
 """
@@ -16,26 +16,33 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 MAJOR, MINOR = 0, 1
+SUPPORTED_MINORS = (1, 2)
 MAX_PAYLOAD = 128
 MAX_DECODED = 138
 MAX_CANDIDATE = 139
 MAX_ENCODED = 140
 
 MESSAGE_TYPES = {1: "HELLO_REQUEST", 2: "HELLO_RESPONSE", 0x10: "OPERATION_REQUEST", 0x11: "OPERATION_RESPONSE", 0x7F: "PROTOCOL_ERROR"}
-CATEGORIES = {1: "DEVICE", 2: "CAPABILITY", 3: "PROCEDURE", 4: "DIAGNOSTIC"}
-OPERATIONS = {0x20: "PING", 0x21: "GET_DEVICE_INFO", 0x22: "GET_STATUS", 0x23: "GET_CAPABILITIES", 0x24: "DESCRIBE_CAPABILITY", 0x25: "READ_CAPABILITY", 0x26: "SET_INDICATOR", 0x27: "RUN_PROCEDURE", 0x28: "GET_DIAGNOSTICS"}
+CATEGORIES = {1: "DEVICE", 2: "CAPABILITY", 3: "PROCEDURE", 4: "DIAGNOSTIC", 5: "EVENT"}
+OPERATIONS = {0x20: "PING", 0x21: "GET_DEVICE_INFO", 0x22: "GET_STATUS", 0x23: "GET_CAPABILITIES", 0x24: "DESCRIBE_CAPABILITY", 0x25: "READ_CAPABILITY", 0x26: "SET_INDICATOR", 0x27: "RUN_PROCEDURE", 0x28: "GET_DIAGNOSTICS", 0x29: "POLL_EVENTS", 0x2A: "CONSUME_EVENT"}
 VALUE_TYPES = {0: "NONE", 1: "BOOLEAN", 2: "UNSIGNED_32", 3: "SIGNED_32", 4: "NORMALIZED_U16", 5: "FIXED_Q16_16", 6: "ENUM_U16", 0x7F: "STRUCTURE"}
-RESULT_CLASSES = {0: "SUCCESS", 1: "REQUEST_REJECTED", 2: "OPERATION_RESULT", 3: "RADIO_RESULT", 4: "LOCAL_RUNTIME_RESULT"}
+RESULT_CLASSES = {0: "SUCCESS", 1: "REQUEST_REJECTED", 2: "OPERATION_RESULT", 3: "RADIO_RESULT", 4: "LOCAL_RUNTIME_RESULT", 5: "EVENT_RESULT"}
 RESULT_CODES = {
     0: {0: "OK"},
     1: {1: "MALFORMED_REQUEST", 2: "UNSUPPORTED_OPERATION", 3: "BAD_TARGET", 4: "BUSY", 8: "MISMATCH"},
     2: {0: "OK", 1: "CAPABILITY_NOT_FOUND", 2: "UNSUPPORTED_OPERATION", 3: "INVALID_VALUE_TYPE", 4: "VALUE_OUT_OF_RANGE", 5: "UNAUTHORIZED", 6: "INTERLOCK_ACTIVE", 7: "HARDWARE_UNAVAILABLE", 8: "OPERATION_FAILED", 9: "BUSY", 10: "INVALID_DESCRIPTOR"},
     3: {6: "TIMEOUT", 7: "REMOTE_REJECTED", 8: "MISMATCH"},
     4: {4: "BUSY", 10: "OPERATION_FAILED"},
+    5: {1: "NOT_FOUND", 2: "STORAGE_FAILURE"},
 }
 PROTOCOL_ERRORS = {1: "UNSUPPORTED_MAJOR", 2: "UNSUPPORTED_MINOR", 3: "UNSUPPORTED_MESSAGE_TYPE", 4: "UNSUPPORTED_FLAGS", 5: "MALFORMED_PAYLOAD", 6: "INVALID_REQUEST_ID"}
 METRICS = {1: "transmissionsCompleted", 2: "decodedPacketsReceived", 3: "successfulTransactions", 4: "acceptedCommands", 5: "retransmissions", 6: "acknowledgmentTimeouts", 7: "duplicates", 8: "malformedPackets", 9: "ignoredPackets", 10: "radioErrors"}
 STATUS_FLAGS = {1: "READY", 2: "RADIO_OPERATIONAL", 4: "TRANSACTION_ACTIVE", 8: "DEGRADED", 16: "ERROR"}
+EVENT_FAMILIES = {0x40: "BUTTON", 0x41: "SENSOR_THRESHOLD", 0x44: "MANUAL_CHECK_IN"}
+BUTTON_EVENTS = {1: "PRESS", 2: "RELEASE", 3: "SHORT_PRESS", 4: "LONG_PRESS", 5: "VERY_LONG_PRESS"}
+THRESHOLD_VALUE_TYPES = {2: "UNSIGNED_32", 3: "SIGNED_32", 4: "NORMALIZED_U16", 5: "FIXED_Q16_16", 6: "ENUM_U16"}
+THRESHOLD_RELATIONS = {1: "CROSSED_BELOW", 2: "CROSSED_ABOVE"}
+EVENT_MIN_LIFETIME, EVENT_MAX_LIFETIME = 60, 86400
 
 EXIT_OK, EXIT_DEVICE_RESULT, EXIT_TIMEOUT, EXIT_MALFORMED, EXIT_LOCAL = 0, 2, 3, 4, 5
 
@@ -101,7 +108,7 @@ def decode_frame(encoded: bytes, *, require_supported=True) -> Frame:
     if length > MAX_PAYLOAD or len(decoded) != 10 + length: raise ProtocolFailure("declared payload length mismatch")
     if crc16(decoded[:-2]) != struct.unpack_from("<H", decoded, len(decoded)-2)[0]: raise ProtocolFailure("CRC mismatch")
     if require_supported:
-        if (major, minor) != (MAJOR, MINOR): raise ProtocolFailure("unsupported Host Protocol version")
+        if major != MAJOR or minor not in SUPPORTED_MINORS: raise ProtocolFailure("unsupported Host Protocol version")
         if msg not in MESSAGE_TYPES: raise ProtocolFailure("unsupported message type")
         if flags: raise ProtocolFailure("unsupported flags")
         if request_id == 0 and msg != 0x7F: raise ProtocolFailure("invalid request ID")
@@ -118,14 +125,31 @@ def typed_value(kind: int, value=None) -> bytes:
     else: raise ProtocolFailure("unknown/request-prohibited value type")
     return bytes([kind, len(raw)]) + raw
 
-def operation_payload(category: int, operation: int, target_device: int, target_id: int, value_type=0, value=None) -> bytes:
+def encode_event_identity(source_device_id: int, event_epoch: int, event_id: int) -> bytes:
+    if not 1 <= source_device_id <= 0xFF or not 1 <= event_epoch <= 0xFFFFFFFF or not 1 <= event_id <= 0xFFFFFFFF:
+        raise ProtocolFailure("Event identity fields must be nonzero and in range")
+    return struct.pack("<BII", source_device_id, event_epoch, event_id)
+
+def decode_event_identity(raw: bytes) -> dict:
+    if len(raw) != 9: raise ProtocolFailure("invalid Host Event identity length")
+    source, epoch, event_id = struct.unpack("<BII", raw)
+    encode_event_identity(source, epoch, event_id)
+    return {"source_device_id":source,"event_epoch":epoch,"event_id":event_id}
+
+def operation_payload(category: int, operation: int, target_device: int, target_id: int, value_type=0, value=None, *, minor=MINOR) -> bytes:
     pairs = {1:{0x20,0x21,0x22}, 2:{0x23,0x24,0x25,0x26}, 3:{0x27}, 4:{0x28}}
+    if minor == 2: pairs[5] = {0x29, 0x2A}
     if operation not in pairs.get(category, set()): raise ProtocolFailure("invalid category/operation pair")
-    if (category in (1,4) or operation == 0x23) and target_id != 0: raise ProtocolFailure("operation requires target ID zero")
+    if (category in (1,4,5) or operation == 0x23) and target_id != 0: raise ProtocolFailure("operation requires target ID zero")
     if operation in (0x24,0x25,0x26,0x27) and target_id == 0: raise ProtocolFailure("operation requires nonzero target ID")
-    allowed = {0x20:{0},0x21:{0},0x22:{0},0x23:{0,2},0x24:{0},0x25:{0},0x26:{1},0x27:{0,1,2,3,4,5,6},0x28:{0,2}}
+    allowed = {0x20:{0},0x21:{0},0x22:{0},0x23:{0,2},0x24:{0},0x25:{0},0x26:{1},0x27:{0,1,2,3,4,5,6},0x28:{0,2},0x29:{0},0x2A:{0x7F}}
     if value_type not in allowed[operation]: raise ProtocolFailure("value type invalid for operation")
-    return struct.pack("<BBBH", category, operation, target_device, target_id) + typed_value(value_type, value)
+    if operation == 0x2A:
+        if not isinstance(value, bytes) or len(value) != 9: raise ProtocolFailure("CONSUME_EVENT requires exact Event identity")
+        decode_event_identity(value)
+        typed = bytes([0x7F, 9]) + value
+    else: typed = typed_value(value_type, value)
+    return struct.pack("<BBBH", category, operation, target_device, target_id) + typed
 
 def decode_typed(kind: int, raw: bytes):
     widths = {0:0,1:1,2:4,3:4,4:2,5:4,6:2}
@@ -140,6 +164,7 @@ def decode_typed(kind: int, raw: bytes):
     raise ProtocolFailure("unknown value type")
 
 def decode_record(operation: int, raw: bytes):
+    if operation == 0x29: return decode_event_record(raw)
     if operation == 0x21:
         if len(raw) != 8 or raw[5] != 1 or raw[6] not in (1,2): raise ProtocolFailure("invalid DEVICE_INFO")
         return dict(zip(("firmware_major","firmware_minor","firmware_patch","wire_protocol","configuration_schema","hardware_profile","role","device_id"), raw))
@@ -170,24 +195,72 @@ def decode_record(operation: int, raw: bytes):
         return {"next_cursor":cursor,"count":count,"entries":entries}
     raise ProtocolFailure("STRUCTURE not valid for this operation")
 
+def decode_event_body(family: int, body: bytes) -> dict:
+    if family == 0x40:
+        if len(body) != 1 or body[0] not in BUTTON_EVENTS: raise ProtocolFailure("invalid BUTTON body")
+        return {"button_event":BUTTON_EVENTS[body[0]],"button_event_raw":body[0]}
+    if family == 0x41:
+        if len(body) != 8: raise ProtocolFailure("invalid SENSOR_THRESHOLD body length")
+        capability, value_type, bits, relation = struct.unpack("<HBIB", body)
+        if capability == 0 or value_type not in THRESHOLD_VALUE_TYPES or relation not in THRESHOLD_RELATIONS:
+            raise ProtocolFailure("invalid SENSOR_THRESHOLD body")
+        if value_type in (4, 6) and bits >> 16: raise ProtocolFailure("noncanonical 16-bit threshold value")
+        decoded = bits
+        if value_type in (3, 5): decoded = struct.unpack("<i", struct.pack("<I", bits))[0]
+        return {"capability_id":capability,"value_type":THRESHOLD_VALUE_TYPES[value_type],"value_type_raw":value_type,"observed_value_bits":bits,"observed_value":decoded,"relation":THRESHOLD_RELATIONS[relation],"relation_raw":relation}
+    if family == 0x44:
+        if body != b"\x01": raise ProtocolFailure("invalid MANUAL_CHECK_IN body")
+        return {"reason":"USER_REQUEST","reason_raw":1}
+    raise ProtocolFailure("unknown Event family")
+
+def decode_event_record(raw: bytes) -> dict:
+    if len(raw) != 29: raise ProtocolFailure("invalid Host Event record length")
+    available = raw[0]
+    if available == 0:
+        if any(raw[1:]): raise ProtocolFailure("noncanonical empty Host Event record")
+        return {"available":False}
+    if available != 1: raise ProtocolFailure("invalid Host Event availability")
+    source, family, flags = raw[1:4]
+    epoch, event_id, lifetime = struct.unpack_from("<III", raw, 4)
+    length = raw[16]; body, tail = raw[17:17+length], raw[17+length:]
+    if source == 0 or epoch == 0 or event_id == 0: raise ProtocolFailure("zero Host Event identity")
+    if family not in EVENT_FAMILIES or flags & 0xFE: raise ProtocolFailure("invalid Host Event family or flags")
+    if not EVENT_MIN_LIFETIME <= lifetime <= EVENT_MAX_LIFETIME or length > 12 or any(tail):
+        raise ProtocolFailure("noncanonical Host Event record")
+    decoded_body = decode_event_body(family, body)
+    return {"available":True,"source_device_id":source,"family":EVENT_FAMILIES[family],"family_raw":family,"flags":flags,"event_epoch":epoch,"event_id":event_id,"lifetime_budget_seconds":lifetime,"body_length":length,"body":decoded_body,"body_hex":body.hex(" ")}
+
 def decode_payload(frame: Frame) -> dict:
-    base={"request_id":frame.request_id,"message_type":MESSAGE_TYPES.get(frame.message_type,f"UNKNOWN_0x{frame.message_type:02X}"),"message_type_raw":frame.message_type,"raw_payload_hex":frame.payload.hex(" ")}
+    base={"frame_minor":frame.minor,"request_id":frame.request_id,"message_type":MESSAGE_TYPES.get(frame.message_type,f"UNKNOWN_0x{frame.message_type:02X}"),"message_type_raw":frame.message_type,"raw_payload_hex":frame.payload.hex(" ")}
     p=frame.payload
     if frame.message_type==2:
         if len(p)!=16: raise ProtocolFailure("invalid HELLO_RESPONSE length")
         selected,fmaj,fmin,fpatch,wire,schema,profile,role,device,maxpayload,cat,feat,maxops,res=struct.unpack("<10BHH2B",p)
-        if selected!=1 or maxpayload!=128 or maxops!=1 or res or cat&0xFFF0 or feat&0xFFFC or profile!=1 or role not in (1,2): raise ProtocolFailure("invalid HELLO_RESPONSE fields")
-        base.update({"selected_minor":selected,"firmware":f"{fmaj}.{fmin}.{fpatch}","wire_protocol":wire,"configuration_schema":schema,"hardware_profile":profile,"role":role,"device_id":device,"maximum_host_payload":maxpayload,"category_bitmap":cat,"categories":[CATEGORIES[x] for x in CATEGORIES if cat&(1<<(x-1))],"feature_bitmap":feat,"features":[name for bit,name in ((1,"local_operations"),(2,"radio_bridge")) if feat&bit],"maximum_outstanding_operations":maxops})
+        reserved_categories = 0xFFF0 if selected == 1 else 0xFFE0
+        reserved_features = 0xFFFC if selected == 1 else 0xFFF8
+        event_advertised = bool(cat & 0x10); event_feature = bool(feat & 0x04)
+        if selected not in SUPPORTED_MINORS or (frame.minor == 1 and selected != 1) or maxpayload!=128 or maxops!=1 or res or cat&reserved_categories or feat&reserved_features or profile!=1 or role not in (1,2): raise ProtocolFailure("invalid HELLO_RESPONSE fields")
+        if event_advertised != event_feature or (event_advertised and (selected != 2 or role != 1)): raise ProtocolFailure("invalid Event-service advertisement")
+        features=((1,"local_operations"),(2,"radio_bridge"),(4,"event_service"))
+        base.update({"selected_minor":selected,"next_request_minor":selected,"firmware":f"{fmaj}.{fmin}.{fpatch}","wire_protocol":wire,"configuration_schema":schema,"hardware_profile":profile,"role":role,"device_id":device,"maximum_host_payload":maxpayload,"category_bitmap":cat,"categories":[CATEGORIES[x] for x in CATEGORIES if cat&(1<<(x-1))],"feature_bitmap":feat,"features":[name for bit,name in features if feat&bit],"event_service_available":event_advertised,"maximum_outstanding_operations":maxops})
     elif frame.message_type==0x11:
         if len(p)<9: raise ProtocolFailure("invalid OPERATION_RESPONSE length")
         category,operation,target_device,target_id,result_class,result_code,kind,length=struct.unpack_from("<BBBHBBBB",p)
         raw=p[9:]
+        event_operation = category == 5 and operation in (0x29, 0x2A)
         if len(raw)!=length or category not in CATEGORIES or operation not in OPERATIONS or result_class not in RESULT_CLASSES or result_code not in RESULT_CODES[result_class]: raise ProtocolFailure("invalid OPERATION_RESPONSE fields")
-        if result_class!=2 or result_code!=0:
-            if kind!=0 or raw: raise ProtocolFailure("non-success result must carry NONE")
+        if frame.minor == 1 and (category == 5 or operation in (0x29,0x2A) or result_class == 5): raise ProtocolFailure("Host Protocol 0.2 vocabulary in minor-1 frame")
+        if frame.minor == 2 and ((category == 5) != (operation in (0x29,0x2A))): raise ProtocolFailure("invalid category/operation pair")
+        if event_operation and target_id != 0: raise ProtocolFailure("Event operation requires target ID zero")
+        if event_operation and result_class not in (0,1,5): raise ProtocolFailure("invalid Event operation result class")
+        if result_class == 5 and (not event_operation or (result_code == 1 and operation != 0x2A)): raise ProtocolFailure("invalid EVENT_RESULT scope")
+        success = (result_class == 0 and result_code == 0) if event_operation else (result_class == 2 and result_code == 0)
+        if not success and (kind!=0 or raw): raise ProtocolFailure("non-success result must carry NONE")
         value=decode_record(operation,raw) if kind==0x7F else decode_typed(kind,raw)
-        if result_class==2 and result_code==0:
-            valid = ((operation==0x20 and kind==2) or
+        if success:
+            valid = ((operation==0x29 and kind==0x7F and length==29) or
+                     (operation==0x2A and kind==0 and length==0) or
+                     (operation==0x20 and kind==2) or
                      (operation in (0x21,0x22,0x23,0x24,0x28) and kind==0x7F) or
                      (operation==0x25 and kind in range(1,7)) or
                      (operation==0x26 and kind==0) or
@@ -236,9 +309,23 @@ def named_vectors()->dict[str,bytes]:
         body=struct.pack("<BBBBHH",major,minor,msg,flags,rid,n)+payload
         return cobs_encode(body+struct.pack("<H",crc16(body)))+b"\0"
     bad_crc=bytearray(good); bad_crc[-2]^=1
-    return {"hello":good,"bad_cobs":b"\x05\x01\x00","bad_crc":bytes(bad_crc),"declared_length_mismatch":raw(declared=3),"unsupported_major":raw(major=1),"unsupported_minor":raw(minor=2),"unknown_message_type":raw(msg=0x55),"nonzero_flags":raw(flags=1),"invalid_request_id":raw(rid=0),"malformed_operation_request":raw(msg=0x10,payload=b"\x01\x20"),"oversized_candidate":b"\x01"*140+b"\0","hello_decoded":hello_decoded}
+    vectors={"hello":good,"bad_cobs":b"\x05\x01\x00","bad_crc":bytes(bad_crc),"declared_length_mismatch":raw(declared=3),"unsupported_major":raw(major=1),"unsupported_minor":raw(minor=3),"unknown_message_type":raw(msg=0x55),"nonzero_flags":raw(flags=1),"invalid_request_id":raw(rid=0),"malformed_operation_request":raw(msg=0x10,payload=b"\x01\x20"),"oversized_candidate":b"\x01"*140+b"\0","hello_decoded":hello_decoded}
+    normative={
+        "hello_0_2": "01 03 02 01 04 34 12 02 05 01 02 62 F7 00",
+        "hello_response_0_2": "01 03 02 02 04 34 12 10 02 02 02 07 08 01 01 01 01 01 80 1F 02 07 02 01 03 2C C5 00",
+        "poll_events": "01 03 02 10 04 01 10 07 04 05 29 01 01 01 01 03 DD FD 00",
+        "poll_events_empty": "01 03 02 11 04 01 10 26 04 05 29 01 01 01 01 03 7F 1D 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 03 02 36 00",
+        "poll_events_present": "01 03 02 11 04 01 10 26 04 05 29 01 01 01 01 11 7F 1D 01 02 40 01 44 33 22 11 04 03 02 01 10 0E 01 03 01 02 01 01 01 01 01 01 01 01 01 01 03 0B 49 00",
+        "consume_event": "01 03 02 10 04 02 10 10 04 05 2A 01 01 0E 7F 09 02 44 33 22 11 04 03 02 01 DA CB 00",
+        "consume_event_success": "01 03 02 11 04 02 10 09 04 05 2A 01 01 01 01 01 01 03 1B 85 00",
+        "consume_event_not_found": "01 03 02 11 04 02 10 09 04 05 2A 01 01 03 05 01 01 03 6E 0E 00",
+    }
+    vectors.update({name:bytes.fromhex(value) for name,value in normative.items()})
+    storage_payload=struct.pack("<BBBHBBBB",5,0x29,1,0,5,2,0,0)
+    vectors["poll_events_storage_failure"]=build_frame(0x11,0x1001,storage_payload,minor=2)[1]
+    return vectors
 
-COMMANDS={"ping":(1,0x20),"device-info":(1,0x21),"status":(1,0x22),"capabilities":(2,0x23),"describe":(2,0x24),"read":(2,0x25),"set-indicator":(2,0x26),"run-procedure":(3,0x27),"diagnostics":(4,0x28)}
+COMMANDS={"ping":(1,0x20),"device-info":(1,0x21),"status":(1,0x22),"capabilities":(2,0x23),"describe":(2,0x24),"read":(2,0x25),"set-indicator":(2,0x26),"run-procedure":(3,0x27),"diagnostics":(4,0x28),"poll-events":(5,0x29),"consume-event":(5,0x2A)}
 def parse_int(text): return int(text,0)
 def parse_bool(text):
     if text.lower() in ("true","1"): return True
@@ -247,15 +334,22 @@ def parse_bool(text):
 
 def request_for_args(args)->tuple[int,bytes,bytes]:
     rid=args.request_id if args.request_id is not None else secrets.randbelow(0xFFFF)+1
-    if args.command=="hello": payload=b"\x01\x01"; msg=1
+    minor=args.minor
+    if args.command=="hello":
+        minimum=args.minimum_minor if args.minimum_minor is not None else 1
+        maximum=args.maximum_minor if args.maximum_minor is not None else minor
+        if minor==1 and (minimum,maximum)!=(1,1): raise ProtocolFailure("minor-1 HELLO requires range 1..1")
+        if minor==2 and not (1<=minimum<=maximum<=2): raise ProtocolFailure("minor-2 HELLO range must be within 1..2")
+        payload=bytes([minimum,maximum]); msg=1
     else:
         category,op=COMMANDS[args.command]; target_id=getattr(args,"capability_id",None) or getattr(args,"procedure_id",None) or 0
         kind=0; value=None
         if args.command in ("capabilities","diagnostics") and args.cursor is not None: kind,value=2,args.cursor
         elif args.command=="set-indicator": kind,value=1,args.value
         elif args.command=="run-procedure": kind,value=args.value_type,args.value
-        payload=operation_payload(category,op,args.target_device,target_id,kind,value); msg=0x10
-    decoded,encoded=build_frame(msg,rid,payload)
+        elif args.command=="consume-event": kind,value=0x7F,encode_event_identity(args.source_device_id,args.event_epoch,args.event_id)
+        payload=operation_payload(category,op,args.target_device,target_id,kind,value,minor=minor); msg=0x10
+    decoded,encoded=build_frame(msg,rid,payload,minor=minor)
     return rid,decoded,encoded
 
 def print_result(data:dict,as_json=False):
@@ -264,6 +358,7 @@ def print_result(data:dict,as_json=False):
         for key,value in data.items(): print(f"{key}={value}")
 
 def add_common(parser):
+    parser.add_argument("--minor",type=int,choices=SUPPORTED_MINORS,default=MINOR)
     parser.add_argument("--request-id",type=parse_int)
     parser.add_argument("--port")
     parser.add_argument("--baud",type=int,default=115200)
@@ -273,16 +368,23 @@ def add_common(parser):
     parser.add_argument("--json",action="store_true")
 
 def make_parser():
-    p=argparse.ArgumentParser(description="Developmental REDLINE Host Protocol 0.1 qualification utility")
+    p=argparse.ArgumentParser(description="Developmental REDLINE Host Protocol 0.1/0.2 qualification utility")
     sub=p.add_subparsers(dest="command",required=True)
     for name in ["hello",*COMMANDS]:
         q=sub.add_parser(name); add_common(q)
+        if name=="hello":
+            q.add_argument("--minimum-minor",type=int,choices=SUPPORTED_MINORS)
+            q.add_argument("--maximum-minor",type=int,choices=SUPPORTED_MINORS)
         if name!="hello": q.add_argument("--target-device",type=parse_int,required=True)
         if name in ("describe","read","set-indicator"): q.add_argument("--capability-id",type=parse_int,required=True)
         if name=="set-indicator": q.add_argument("--value",type=parse_bool,required=True)
         if name=="run-procedure":
             q.add_argument("--procedure-id",type=parse_int,required=True); q.add_argument("--value-type",type=parse_int,default=0); q.add_argument("--value",type=parse_int)
         if name in ("capabilities","diagnostics"): q.add_argument("--cursor",type=parse_int)
+        if name=="consume-event":
+            q.add_argument("--source-device-id",type=parse_int,required=True)
+            q.add_argument("--event-epoch",type=parse_int,required=True)
+            q.add_argument("--event-id",type=parse_int,required=True)
     q=sub.add_parser("decode"); q.add_argument("hex"); q.add_argument("--json",action="store_true")
     q=sub.add_parser("vectors"); q.add_argument("name",nargs="?"); q.add_argument("--port"); q.add_argument("--baud",type=int,default=115200)
     return p
