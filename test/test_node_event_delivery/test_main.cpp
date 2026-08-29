@@ -12,6 +12,8 @@ using NodeEventStore::MutationStatus;
 
 namespace {
 
+using RuntimeState = NodeEventDelivery::RuntimeState;
+
 enum class Fault : uint8_t { NONE, WRITE, COMMIT, READ_MISSING, READ_UNAVAILABLE, MISMATCH, BAD_CRC };
 
 class FakeStorage final : public NodeEventStore::Storage {
@@ -483,12 +485,15 @@ struct DeliveryFixture {
     FakeSequence sequence;
     FakeJitter jitter;
     Controller controller;
+    ::RuntimeState::State diagnostics{::RuntimeState::DeviceRole::NODE, 0x10, 0x20};
 
     void initializeEmpty(uint32_t now = 0) {
+        store.setDiagnostics(&diagnostics);
         TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NodeEventStore::Status::READY),
             static_cast<uint8_t>(store.recover(storage, entropy, 0x10)));
         TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControllerStatus::NO_ACTIVE_EVENT),
-            static_cast<uint8_t>(controller.recover(store, 0x10, 0x20, sequence, jitter, now).status));
+            static_cast<uint8_t>(controller.recover(store, 0x10, 0x20, sequence, jitter,
+                now, &diagnostics).status));
         storage.clearFault();
     }
     uint8_t enqueue(uint32_t lifetime = 300) {
@@ -497,7 +502,8 @@ struct DeliveryFixture {
         return result.slot;
     }
     void recoverController(uint32_t now = 0) {
-        const ControllerStatus status = controller.recover(store, 0x10, 0x20, sequence, jitter, now).status;
+        const ControllerStatus status = controller.recover(store, 0x10, 0x20, sequence,
+            jitter, now, &diagnostics).status;
         TEST_ASSERT_TRUE(status == ControllerStatus::OK || status == ControllerStatus::NO_ACTIVE_EVENT);
     }
     ControllerResult ready(uint32_t now = 0) {
@@ -673,6 +679,41 @@ void testTxStartFailureBackoffAndStorageFailureFailClosed() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RadioActionType::RECEIVE), static_cast<uint8_t>(release.action.type));
 }
 
+void testHubUnavailableUsesOnlyFrozenEvidencePaths() {
+    DeliveryFixture timeout; timeout.initializeEmpty(); timeout.enqueue();
+    timeout.recoverController(); timeout.waitAdmission(0);
+    TEST_ASSERT_FALSE(timeout.diagnostics.eventSnapshot().hubUnavailable);
+    timeout.controller.service(2499, false);
+    TEST_ASSERT_FALSE(timeout.diagnostics.eventSnapshot().hubUnavailable);
+    timeout.controller.service(2500, false);
+    TEST_ASSERT_TRUE(timeout.diagnostics.eventSnapshot().hubUnavailable);
+    timeout.controller.service(3000, false);
+    TEST_ASSERT_TRUE(timeout.diagnostics.eventSnapshot().hubUnavailable);
+    timeout.controller.successfulHubExchange();
+    TEST_ASSERT_FALSE(timeout.diagnostics.eventSnapshot().hubUnavailable);
+
+    DeliveryFixture capacity; capacity.initializeEmpty(); capacity.enqueue();
+    capacity.recoverController(); capacity.waitAdmission(0);
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0;
+    capacity.response(EventProtocol::AdmissionStatus::CAPACITY, bytes, length);
+    capacity.controller.admissionCandidate(bytes, length, 1);
+    TEST_ASSERT_TRUE(capacity.diagnostics.eventSnapshot().hubUnavailable);
+    capacity.controller.service(1001, false);
+    capacity.controller.service(1001, false);
+    capacity.controller.grantTransmit(1001);
+    capacity.controller.txCompleted(1001);
+    capacity.response(EventProtocol::AdmissionStatus::ADMITTED, bytes, length);
+    capacity.controller.admissionCandidate(bytes, length, 1002);
+    TEST_ASSERT_FALSE(capacity.diagnostics.eventSnapshot().hubUnavailable);
+    TEST_ASSERT_EQUAL_UINT32(1,
+        capacity.diagnostics.eventSnapshot().counters.admissionsAcknowledged);
+
+    DeliveryFixture localFailure; localFailure.initializeEmpty(); localFailure.enqueue();
+    localFailure.recoverController(); localFailure.transmit(0);
+    localFailure.controller.txStartFailed(1);
+    TEST_ASSERT_FALSE(localFailure.diagnostics.eventSnapshot().hubUnavailable);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -700,5 +741,6 @@ int main(int, char**) {
     RUN_TEST(testAttemptFiveFailureAndSuccess);
     RUN_TEST(testExpiryPreemptsTxWaitAndBackoff);
     RUN_TEST(testTxStartFailureBackoffAndStorageFailureFailClosed);
+    RUN_TEST(testHubUnavailableUsesOnlyFrozenEvidencePaths);
     return UNITY_END();
 }

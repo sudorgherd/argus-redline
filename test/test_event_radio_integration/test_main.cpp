@@ -129,13 +129,18 @@ void testHubUnsupportedMalformedAndUncorrelatable() {
 
 void testHubCapacityAndMismatch() {
     HubStorage s; HubEventLedger::Ledger l; l.recover(s,1,2); HubAdapter a; uint8_t b[32];
-    for(uint32_t id=1;id<=8;++id){auto e=event(id);size_t n=encode(e,b);a.process(b,n,1,2,l);}
+    RuntimeState::State diagnostics(RuntimeState::DeviceRole::HUB, 1, 2);
+    l.setDiagnostics(&diagnostics);
+    for(uint32_t id=1;id<=8;++id){auto e=event(id);size_t n=encode(e,b);a.process(b,n,1,2,l,&diagnostics);}
     auto ninth=event(9);size_t n=encode(ninth,b);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProtocol::AdmissionStatus::CAPACITY,
-        (uint8_t)a.process(b,n,1,2,l).status);
+        (uint8_t)a.process(b,n,1,2,l,&diagnostics).status);
     auto mismatch=event(1);mismatch.body[0]=0x03;n=encode(mismatch,b);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProtocol::AdmissionStatus::IDENTITY_CONTENT_MISMATCH,
-        (uint8_t)a.process(b,n,1,2,l).status);
+        (uint8_t)a.process(b,n,1,2,l,&diagnostics).status);
+    TEST_ASSERT_EQUAL_UINT32(8, diagnostics.eventSnapshot().counters.successfulAdmissions);
+    TEST_ASSERT_EQUAL_UINT32(1, diagnostics.eventSnapshot().counters.hubCapacityRejections);
+    TEST_ASSERT_EQUAL_UINT32(1, diagnostics.eventSnapshot().counters.identityContentMismatches);
 }
 
 void testHubArbiterPreservesOwnerAndDeadline() {

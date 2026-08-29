@@ -17,6 +17,7 @@
 #include "esp32_event_storage.h"
 #include "node_event_delivery.h"
 #include "node_event_radio.h"
+#include "event_producers.h"
 #include <esp_system.h>
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 #include "host_role_integration.h"
@@ -103,6 +104,18 @@ public:
 Esp32EventStorage::PreferencesStore eventStorage;
 EspEventEntropy eventEntropy;
 NodeEventStore::Store nodeEventStore;
+EventProducers::StoreCreationSink eventCreationSink(nodeEventStore);
+EventProducers::ButtonProducer buttonEventProducer;
+const EventProducers::ThresholdPolicy analogThresholdPolicy = {
+    HeltecV4Capabilities::ANALOG_INPUT_0_ID,
+    EventProtocol::SensorValueType::NORMALIZED_U16,
+    0xC000U,
+    0x1000U,
+    EventProtocol::ThresholdRelation::CROSSED_ABOVE
+};
+EventProducers::SensorThresholdProducer analogThresholdProducer(
+    analogThresholdPolicy
+);
 EventSequence eventSequence;
 EventJitter eventJitter;
 NodeEventDelivery::Controller eventDelivery;
@@ -203,6 +216,7 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.peerState = peerState;
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
+    input.event = runtimeState.eventSnapshot();
     input.lastError = runtimeState.lastError();
     input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
     input.configurationStatus = configurationState.status;
@@ -307,11 +321,39 @@ void serviceButton(uint32_t nowMs) {
         applicationButton.snapshot();
     capabilityState.digitalInputAvailable = snapshot.available;
     capabilityState.digitalInputActive = snapshot.pressed;
+    if (eventSubsystemReady) {
+        const EventProducers::ButtonContext producerContext = {
+            uiController.displayAwake(),
+            uiController.editorActive(),
+            uiController.screen() == DeviceUi::Screen::HOME
+        };
+        const EventProducers::ButtonProductionResult produced =
+            buttonEventProducer.observe(events, producerContext, eventCreationSink);
+        if ((produced.button.attempted &&
+                produced.button.result == EventProducers::CreationResult::STORAGE_FAILURE) ||
+            (produced.manualCheckIn.attempted &&
+                produced.manualCheckIn.result == EventProducers::CreationResult::STORAGE_FAILURE)) {
+            eventSubsystemReady = false;
+        }
+    }
     uiController.handle(events.first, nowMs);
     requestButtonFeedback(events.first, nowMs);
     uiController.handle(events.second, nowMs);
     requestButtonFeedback(events.second, nowMs);
     queueEditorAction();
+}
+
+void serviceSensorThresholdProducer() {
+    if (!eventSubsystemReady) return;
+    const EventProducers::Emission produced = analogThresholdProducer.observe(
+        capabilityState.analogInputAvailable,
+        capabilityState.analogInputNormalized,
+        eventCreationSink
+    );
+    if (produced.attempted &&
+        produced.result == EventProducers::CreationResult::STORAGE_FAILURE) {
+        eventSubsystemReady = false;
+    }
 }
 
 bool capabilitySafe(
@@ -945,6 +987,9 @@ void finishAcknowledgment() {
     radioLedActive = false;
     updateLedOutput();
     const int standbyState = radio.standby();
+    // A completed ACK is evidence of a successful exchange initiated by the
+    // configured Hub; unrelated receive activity never reaches this boundary.
+    eventDelivery.successfulHubExchange();
 
     logPacket("TX", pendingAcknowledgment);
 
@@ -1197,15 +1242,27 @@ void setup() {
 
     loadSettings(static_cast<uint32_t>(millis()));
 
+    nodeEventStore.setDiagnostics(&runtimeState);
     const NodeEventStore::Status eventStoreStatus = nodeEventStore.recover(
         eventStorage, eventEntropy, DeviceConfig::LOCAL_ID);
     if (eventStoreStatus == NodeEventStore::Status::READY) {
         const NodeEventDelivery::ControllerResult recovered = eventDelivery.recover(
             nodeEventStore, DeviceConfig::LOCAL_ID, DeviceConfig::PEER_ID,
-            eventSequence, eventJitter, static_cast<uint32_t>(millis()));
+            eventSequence, eventJitter, static_cast<uint32_t>(millis()),
+            &runtimeState);
         eventSubsystemReady =
             recovered.status == NodeEventDelivery::ControllerStatus::OK ||
             recovered.status == NodeEventDelivery::ControllerStatus::NO_ACTIVE_EVENT;
+    } else {
+        runtimeState.setEventPersistenceDegraded(true);
+        runtimeState.incrementEventDiagnostic(
+            RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
+        if (eventStoreStatus == NodeEventStore::Status::INDETERMINATE_SLOT ||
+            eventStoreStatus == NodeEventStore::Status::RECORD_CONFLICT ||
+            eventStoreStatus == NodeEventStore::Status::GENERATION_AMBIGUOUS) {
+            runtimeState.incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::STORAGE_CORRUPTION);
+        }
     }
 
     radioSPI.begin(9, 11, 10, 8);
@@ -1305,6 +1362,7 @@ void serviceNodeEvents(uint32_t nowMs) {
 void loop() {
     const uint32_t nowMs = static_cast<uint32_t>(millis());
     serviceButton(nowMs);
+    serviceSensorThresholdProducer();
     serviceButtonFeedback(nowMs);
     serviceCommandPreAck(nowMs);
 

@@ -477,6 +477,35 @@ void testBoundsAreRejected() {
                             static_cast<uint8_t>(store.markFailed(NODE_EVENT_CAPACITY)));
 }
 
+void testStage12DiagnosticsOwnEnqueueRecoveryQueueAndStorageFacts() {
+    FakeStorage storage; FakeEntropy entropy; Store store;
+    RuntimeState::State diagnostics(RuntimeState::DeviceRole::NODE, 2, 1);
+    store.setDiagnostics(&diagnostics);
+    assertReady(store, storage, entropy);
+    for (uint8_t i = 0; i < NODE_EVENT_CAPACITY; ++i)
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EnqueueStatus::ENQUEUED),
+            static_cast<uint8_t>(store.enqueue(button()).status));
+    TEST_ASSERT_EQUAL_UINT32(8, diagnostics.eventSnapshot().counters.enqueueAccepted);
+    TEST_ASSERT_EQUAL_UINT8(8, diagnostics.eventSnapshot().queuedCount);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EnqueueStatus::QUEUE_FULL),
+        static_cast<uint8_t>(store.enqueue(button()).status));
+    TEST_ASSERT_EQUAL_UINT32(1, diagnostics.eventSnapshot().counters.queueFullRejected);
+
+    RuntimeState::State recoveredDiagnostics(RuntimeState::DeviceRole::NODE, 2, 1);
+    Store recovered; recovered.setDiagnostics(&recoveredDiagnostics);
+    assertReady(recovered, storage, entropy);
+    TEST_ASSERT_EQUAL_UINT32(8,
+        recoveredDiagnostics.eventSnapshot().counters.eventsRecovered);
+
+    FakeStorage failingStorage; Store failing; failing.setDiagnostics(&diagnostics);
+    assertReady(failing, failingStorage, entropy);
+    failingStorage.clearFault(); failingStorage.fault = Fault::WRITE;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EnqueueStatus::IDENTITY_FAILURE),
+        static_cast<uint8_t>(failing.enqueue(button()).status));
+    TEST_ASSERT_EQUAL_UINT32(1, diagnostics.eventSnapshot().counters.persistenceFailures);
+    TEST_ASSERT_TRUE(diagnostics.eventSnapshot().persistenceDegraded);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -496,5 +525,6 @@ int main(int, char**) {
     RUN_TEST(testTerminalTransitionsReclaimReleaseAndReuse);
     RUN_TEST(testExpiredTransitionAndFailedMutationPreserveAuthority);
     RUN_TEST(testBoundsAreRejected);
+    RUN_TEST(testStage12DiagnosticsOwnEnqueueRecoveryQueueAndStorageFacts);
     return UNITY_END();
 }

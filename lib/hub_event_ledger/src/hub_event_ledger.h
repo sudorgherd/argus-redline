@@ -7,6 +7,7 @@
 #include "event_records.h"
 #include "event_store.h"
 #include "event_identity.h"
+#include "runtime_state.h"
 
 namespace HubEventLedger {
 
@@ -77,6 +78,7 @@ public:
 
 class Ledger {
 public:
+    void setDiagnostics(RuntimeState::State* state) { diagnostics_ = state; }
     Status recover(Storage& storage, uint8_t hubDeviceId, uint8_t nodeDeviceId) {
         reset();
         storage_ = &storage;
@@ -156,6 +158,9 @@ public:
             result.status = sameCanonical(slots_[slot].record, event)
                 ? AdmissionStatus::EXACT_DUPLICATE
                 : AdmissionStatus::IDENTITY_CONTENT_MISMATCH;
+            note(result.status == AdmissionStatus::EXACT_DUPLICATE
+                ? RuntimeState::EventDiagnostic::DUPLICATE_RETRANSMISSION
+                : RuntimeState::EventDiagnostic::IDENTITY_CONTENT_MISMATCH);
             return result;
         }
 
@@ -167,11 +172,13 @@ public:
         }
         if (!ordinalReady_) {
             result.status = AdmissionStatus::STORAGE_FAILURE;
+            persistenceFailure();
             return result;
         }
         uint32_t ordinal = 0;
         if (!allocateOrdinal(ordinal)) {
             result.status = AdmissionStatus::STORAGE_FAILURE;
+            persistenceFailure();
             return result;
         }
 
@@ -189,11 +196,14 @@ public:
         for (uint8_t i = 0; i < event.bodyLength; ++i) next.body[i] = event.body[i];
         if (!commitRecord(target, next)) {
             result.status = AdmissionStatus::STORAGE_FAILURE;
+            persistenceFailure();
             return result;
         }
         result.status = AdmissionStatus::DURABLE_NEW_ADMISSION;
         result.slot = target;
         result.admissionOrdinal = ordinal;
+        note(RuntimeState::EventDiagnostic::SUCCESSFUL_ADMISSION);
+        updateActiveSnapshot();
         return result;
     }
 
@@ -217,6 +227,10 @@ public:
             next.state = EventRecords::HubState::CONSUMED;
             result.status = commitRecord(slot, next)
                 ? ConsumeStatus::CONSUMED : ConsumeStatus::STORAGE_FAILURE;
+            if (result.status == ConsumeStatus::CONSUMED) {
+                note(RuntimeState::EventDiagnostic::HOST_CONSUMPTION);
+                updateActiveSnapshot();
+            } else persistenceFailure();
             return result;
         }
         return result;
@@ -263,6 +277,17 @@ public:
     }
 
 private:
+    void note(RuntimeState::EventDiagnostic event, uint32_t amount = 1) {
+        if (diagnostics_ != nullptr) diagnostics_->incrementEventDiagnostic(event, amount);
+    }
+    void persistenceFailure() {
+        note(RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
+        if (diagnostics_ != nullptr) diagnostics_->setEventPersistenceDegraded(true);
+    }
+    void updateActiveSnapshot() {
+        if (diagnostics_ != nullptr)
+            diagnostics_->setActiveEventCount(static_cast<uint8_t>(activeCount()));
+    }
     struct SlotState {
         bool present;
         EventStorage::CopySlot activeCopy;
@@ -622,6 +647,7 @@ private:
     bool ledgerHealthy_ = false;
     bool ordinalReady_ = false;
     Status status_ = Status::INDETERMINATE_SLOT;
+    RuntimeState::State* diagnostics_ = nullptr;
 };
 
 }  // namespace HubEventLedger

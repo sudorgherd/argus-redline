@@ -7,6 +7,7 @@
 #include "event_protocol.h"
 #include "event_records.h"
 #include "event_store.h"
+#include "runtime_state.h"
 
 namespace NodeEventStore {
 
@@ -87,6 +88,7 @@ public:
 
 class Store {
 public:
+    void setDiagnostics(RuntimeState::State* state) { diagnostics_ = state; }
     Status recover(
         Storage& storage,
         EventIdentity::EntropySource& entropy,
@@ -154,6 +156,13 @@ public:
         if (!rebuildIndex()) return status_;
         healthy_ = true;
         status_ = Status::READY;
+        if (diagnostics_ != nullptr) {
+            diagnostics_->incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::EVENT_RECOVERED,
+                static_cast<uint32_t>(queueCount_));
+            diagnostics_->setEventQueue(static_cast<uint8_t>(queueCount_),
+                static_cast<uint8_t>(NODE_EVENT_CAPACITY));
+        }
         return status_;
     }
 
@@ -175,6 +184,7 @@ public:
         }
         if (freeSlot == 0xFF) {
             result.status = EnqueueStatus::QUEUE_FULL;
+            note(RuntimeState::EventDiagnostic::QUEUE_FULL_REJECTED);
             return result;
         }
 
@@ -184,6 +194,7 @@ public:
             healthy_ = false;
             status_ = Status::IDENTITY_FAILURE;
             result.status = EnqueueStatus::IDENTITY_FAILURE;
+            persistenceFailure();
             return result;
         }
 
@@ -202,25 +213,37 @@ public:
 
         if (!commitMutation(freeSlot, record)) {
             result.status = EnqueueStatus::STORAGE_FAILURE;
+            persistenceFailure();
             return result;
         }
         if (!rebuildIndex()) {
             result.status = EnqueueStatus::STORAGE_FAILURE;
+            persistenceFailure();
             return result;
         }
         result.status = EnqueueStatus::ENQUEUED;
         result.identity = allocation.identity;
         result.slot = freeSlot;
+        note(RuntimeState::EventDiagnostic::ENQUEUE_ACCEPTED);
+        updateQueueSnapshot();
         return result;
     }
 
     MutationStatus markFailed(uint8_t slot) {
-        return transition(slot, EventRecords::NodeState::QUEUED,
+        const MutationStatus result = transition(slot, EventRecords::NodeState::QUEUED,
             EventRecords::NodeState::FAILED);
+        if (result == MutationStatus::OK)
+            { note(RuntimeState::EventDiagnostic::ATTEMPT_EXHAUSTED); updateQueueSnapshot(); }
+        else if (result == MutationStatus::STORAGE_FAILURE) persistenceFailure();
+        return result;
     }
     MutationStatus markExpired(uint8_t slot) {
-        return transition(slot, EventRecords::NodeState::QUEUED,
+        const MutationStatus result = transition(slot, EventRecords::NodeState::QUEUED,
             EventRecords::NodeState::EXPIRED);
+        if (result == MutationStatus::OK)
+            { note(RuntimeState::EventDiagnostic::EVENT_EXPIRED); updateQueueSnapshot(); }
+        else if (result == MutationStatus::STORAGE_FAILURE) persistenceFailure();
+        return result;
     }
     MutationStatus reclaim(uint8_t slot) {
         if (!healthy_) return MutationStatus::DEGRADED;
@@ -230,7 +253,9 @@ public:
             state != EventRecords::NodeState::EXPIRED) {
             return MutationStatus::INVALID_TRANSITION;
         }
-        return makeFree(slot);
+        const MutationStatus result = makeFree(slot);
+        if (result == MutationStatus::STORAGE_FAILURE) persistenceFailure();
+        return result;
     }
     MutationStatus releaseQueued(uint8_t slot) {
         if (!healthy_) return MutationStatus::DEGRADED;
@@ -238,7 +263,10 @@ public:
         if (slots_[slot].record.state != EventRecords::NodeState::QUEUED) {
             return MutationStatus::INVALID_TRANSITION;
         }
-        return makeFree(slot);
+        const MutationStatus result = makeFree(slot);
+        if (result == MutationStatus::OK) updateQueueSnapshot();
+        else if (result == MutationStatus::STORAGE_FAILURE) persistenceFailure();
+        return result;
     }
 
     MutationStatus checkpointRemaining(
@@ -256,7 +284,10 @@ public:
         EventRecords::NodeRecord next = current;
         next.generation += 1U;
         next.remainingActiveSeconds = remainingActiveSeconds;
-        if (!commitMutation(slot, next)) return MutationStatus::STORAGE_FAILURE;
+        if (!commitMutation(slot, next)) {
+            persistenceFailure();
+            return MutationStatus::STORAGE_FAILURE;
+        }
         return MutationStatus::OK;
     }
 
@@ -273,7 +304,11 @@ public:
         EventRecords::NodeRecord next = current;
         next.generation += 1U;
         next.attemptsUsed += 1U;
-        if (!commitMutation(slot, next)) return AttemptStatus::STORAGE_FAILURE;
+        if (!commitMutation(slot, next)) {
+            persistenceFailure();
+            return AttemptStatus::STORAGE_FAILURE;
+        }
+        note(RuntimeState::EventDiagnostic::EVENT_ATTEMPT);
         return AttemptStatus::ARMED;
     }
 
@@ -299,6 +334,17 @@ public:
     }
 
 private:
+    void note(RuntimeState::EventDiagnostic event, uint32_t amount = 1) {
+        if (diagnostics_ != nullptr) diagnostics_->incrementEventDiagnostic(event, amount);
+    }
+    void persistenceFailure() {
+        note(RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
+        if (diagnostics_ != nullptr) diagnostics_->setEventPersistenceDegraded(true);
+    }
+    void updateQueueSnapshot() {
+        if (diagnostics_ != nullptr) diagnostics_->setEventQueue(
+            static_cast<uint8_t>(queueCount_), static_cast<uint8_t>(NODE_EVENT_CAPACITY));
+    }
     struct SlotState {
         bool present;
         EventRecords::NodeRecord record;
@@ -508,6 +554,7 @@ private:
     size_t queueCount_ = 0;
     bool healthy_ = false;
     Status status_ = Status::INDETERMINATE_SLOT;
+    RuntimeState::State* diagnostics_ = nullptr;
     EventIdentity::Status identityStatus_ = EventIdentity::Status::IDENTITY_RECOVERY_REQUIRED;
 };
 

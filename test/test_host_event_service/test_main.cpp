@@ -98,8 +98,10 @@ HostProtocol::OperationRequest consumeRequest(uint32_t id) {
 struct Fixture {
     FakeStorage storage;
     HubEventLedger::Ledger ledger;
+    RuntimeState::State diagnostics{RuntimeState::DeviceRole::HUB, 1, 2};
     HostEventService::Service service;
-    Fixture() : service(ledger) {
+    Fixture() : service(ledger, &diagnostics) {
+        ledger.setDiagnostics(&diagnostics);
         TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(HubEventLedger::Status::READY),
             static_cast<uint8_t>(ledger.recover(storage, 1, 2)));
     }
@@ -237,6 +239,23 @@ void testLedgerCustodyRemainsUsableWhenOrdinalAllocatorIsUnavailable() {
     TEST_ASSERT_EQUAL_UINT(writes, storage.recordWrites);
 }
 
+void testEventServiceDiagnosticsCountOnlyNewDurableFacts() {
+    Fixture f;
+    f.poll();
+    TEST_ASSERT_EQUAL_UINT32(0,
+        f.diagnostics.eventSnapshot().counters.hostPollsReturnedEvent);
+    f.ledger.admit(event(1));
+    f.poll();
+    TEST_ASSERT_EQUAL_UINT32(1,
+        f.diagnostics.eventSnapshot().counters.hostPollsReturnedEvent);
+    f.consume(1);
+    TEST_ASSERT_EQUAL_UINT32(1,
+        f.diagnostics.eventSnapshot().counters.hostConsumptions);
+    f.consume(1);
+    TEST_ASSERT_EQUAL_UINT32(1,
+        f.diagnostics.eventSnapshot().counters.hostConsumptions);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -249,5 +268,6 @@ int main(int, char**) {
     RUN_TEST(testRoleTargetAndMalformedRejectBeforeCustody);
     RUN_TEST(testRebootPreservesActiveAndConsumedProof);
     RUN_TEST(testLedgerCustodyRemainsUsableWhenOrdinalAllocatorIsUnavailable);
+    RUN_TEST(testEventServiceDiagnosticsCountOnlyNewDurableFacts);
     return UNITY_END();
 }
