@@ -3,7 +3,7 @@
 **Status:** Authoritative roadmap
 **Current release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
 **Next planned milestone:** `v0.7.0` — Node-Originated Events and Reliable Delivery
-**v0.7.0 development status:** Stages 1–12 complete; Stage 13 — Python Host Reference Update is next
+**v0.7.0 development status:** Stages 1–15 complete; Stage 16 — Bench Integration Gate is next and has not started
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
@@ -547,10 +547,10 @@ have no v0.7.0 opcode or body schema.
 [x] Stages 1–10 — Event protocol, persistence, Host service, and radio integration
 [x] Stage 11 — Event Producers
 [x] Stage 12 — Diagnostics and UI
-[ ] Stage 13 — Python Host Reference Update (next)
-[ ] Stage 14 — Full Native Regression Gate
-[ ] Stage 15 — Production Build Gate
-[ ] Stage 16 — Bench Integration Gate
+[x] Stage 13 — Python Host Reference Update
+[x] Stage 14 — Full Native Regression Gate
+[x] Stage 15 — Production Build Gate
+[ ] Stage 16 — Bench Integration Gate (next; not started)
 [ ] Stage 17 — Physical Qualification
 [ ] Stage 18 — Documentation and Release Closeout
 ```
@@ -1347,9 +1347,9 @@ Immediate direction:
 [x] Complete v0.6.0 lifecycle and release documentation
 [x] Publish v0.6.0
 [x] Begin v0.7.0 design and implementation through its own approved scope and gates
-[x] Complete v0.7.0 implementation Stages 1–12
-[ ] Complete Stage 13 — Python Host Reference Update
-[ ] Complete regression, production-build, bench, physical-qualification, and release-closeout gates
+[x] Complete v0.7.0 implementation Stages 1–15
+[ ] Complete Stage 16 — Bench Integration Gate
+[ ] Complete physical-qualification and release-closeout gates
 ```
 
 v0.7.0 introduces Node-originated structured traffic and reliable delivery. It does not pull forward persistent identity, authenticated transport, multi-Node networking, routing, repeaters, or mesh behavior.
