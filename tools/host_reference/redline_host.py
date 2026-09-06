@@ -24,7 +24,7 @@ MAX_ENCODED = 140
 
 MESSAGE_TYPES = {1: "HELLO_REQUEST", 2: "HELLO_RESPONSE", 0x10: "OPERATION_REQUEST", 0x11: "OPERATION_RESPONSE", 0x7F: "PROTOCOL_ERROR"}
 CATEGORIES = {1: "DEVICE", 2: "CAPABILITY", 3: "PROCEDURE", 4: "DIAGNOSTIC", 5: "EVENT"}
-OPERATIONS = {0x20: "PING", 0x21: "GET_DEVICE_INFO", 0x22: "GET_STATUS", 0x23: "GET_CAPABILITIES", 0x24: "DESCRIBE_CAPABILITY", 0x25: "READ_CAPABILITY", 0x26: "SET_INDICATOR", 0x27: "RUN_PROCEDURE", 0x28: "GET_DIAGNOSTICS", 0x29: "POLL_EVENTS", 0x2A: "CONSUME_EVENT"}
+OPERATIONS = {0x20: "PING", 0x21: "GET_DEVICE_INFO", 0x22: "GET_STATUS", 0x23: "GET_CAPABILITIES", 0x24: "DESCRIBE_CAPABILITY", 0x25: "READ_CAPABILITY", 0x26: "SET_INDICATOR", 0x27: "RUN_PROCEDURE", 0x28: "GET_DIAGNOSTICS", 0x29: "POLL_EVENTS", 0x2A: "CONSUME_EVENT", 0x2B: "GET_EVENT_DIAGNOSTICS"}
 VALUE_TYPES = {0: "NONE", 1: "BOOLEAN", 2: "UNSIGNED_32", 3: "SIGNED_32", 4: "NORMALIZED_U16", 5: "FIXED_Q16_16", 6: "ENUM_U16", 0x7F: "STRUCTURE"}
 RESULT_CLASSES = {0: "SUCCESS", 1: "REQUEST_REJECTED", 2: "OPERATION_RESULT", 3: "RADIO_RESULT", 4: "LOCAL_RUNTIME_RESULT", 5: "EVENT_RESULT"}
 RESULT_CODES = {
@@ -43,6 +43,10 @@ BUTTON_EVENTS = {1: "PRESS", 2: "RELEASE", 3: "SHORT_PRESS", 4: "LONG_PRESS", 5:
 THRESHOLD_VALUE_TYPES = {2: "UNSIGNED_32", 3: "SIGNED_32", 4: "NORMALIZED_U16", 5: "FIXED_Q16_16", 6: "ENUM_U16"}
 THRESHOLD_RELATIONS = {1: "CROSSED_BELOW", 2: "CROSSED_ABOVE"}
 EVENT_MIN_LIFETIME, EVENT_MAX_LIFETIME = 60, 86400
+EVENT_DIAGNOSTIC_STATES = {0:"EMPTY",1:"QUEUED",2:"READY",3:"TX_PREPARE",4:"TRANSMITTING",5:"WAIT_ADMISSION",6:"BACKOFF",7:"RELEASED",8:"FAILED",9:"EXPIRED",10:"ACTIVE",11:"CONSUMED"}
+EVENT_PRODUCER_KINDS = {0:"NONE",1:"BUTTON",2:"SENSOR_THRESHOLD",3:"MANUAL_CHECK_IN"}
+EVENT_PRODUCER_RESULTS = {0:"NONE",1:"CREATED",2:"QUEUE_FULL",3:"INVALID_EVENT",4:"STORAGE_FAILURE",5:"SUPPRESSED"}
+EVENT_DIAGNOSTIC_COUNTERS = ("enqueueAccepted","queueFullRejected","persistenceFailures","eventsRecovered","storageCorruptions","eventAttempts","eventsExpired","attemptsExhausted","hubCapacityRejections","identityContentMismatches","duplicateRetransmissions","successfulAdmissions","admissionsAcknowledged","hostPollsReturnedEvent","hostConsumptions")
 
 EXIT_OK, EXIT_DEVICE_RESULT, EXIT_TIMEOUT, EXIT_MALFORMED, EXIT_LOCAL = 0, 2, 3, 4, 5
 
@@ -138,12 +142,15 @@ def decode_event_identity(raw: bytes) -> dict:
 
 def operation_payload(category: int, operation: int, target_device: int, target_id: int, value_type=0, value=None, *, minor=MINOR) -> bytes:
     pairs = {1:{0x20,0x21,0x22}, 2:{0x23,0x24,0x25,0x26}, 3:{0x27}, 4:{0x28}}
-    if minor == 2: pairs[5] = {0x29, 0x2A}
+    if minor == 2:
+        pairs[4].add(0x2B); pairs[5] = {0x29, 0x2A}
     if operation not in pairs.get(category, set()): raise ProtocolFailure("invalid category/operation pair")
     if (category in (1,4,5) or operation == 0x23) and target_id != 0: raise ProtocolFailure("operation requires target ID zero")
     if operation in (0x24,0x25,0x26,0x27) and target_id == 0: raise ProtocolFailure("operation requires nonzero target ID")
-    allowed = {0x20:{0},0x21:{0},0x22:{0},0x23:{0,2},0x24:{0},0x25:{0},0x26:{1},0x27:{0,1,2,3,4,5,6},0x28:{0,2},0x29:{0},0x2A:{0x7F}}
+    allowed = {0x20:{0},0x21:{0},0x22:{0},0x23:{0,2},0x24:{0},0x25:{0},0x26:{1},0x27:{0,1,2,3,4,5,6},0x28:{0,2},0x29:{0},0x2A:{0x7F},0x2B:{0,2}}
     if value_type not in allowed[operation]: raise ProtocolFailure("value type invalid for operation")
+    if operation == 0x2B and value_type == 2 and value != 1:
+        raise ProtocolFailure("Event lifecycle page selector must be 1")
     if operation == 0x2A:
         if not isinstance(value, bytes) or len(value) != 9: raise ProtocolFailure("CONSUME_EVENT requires exact Event identity")
         decode_event_identity(value)
@@ -165,6 +172,7 @@ def decode_typed(kind: int, raw: bytes):
 
 def decode_record(operation: int, raw: bytes):
     if operation == 0x29: return decode_event_record(raw)
+    if operation == 0x2B: return decode_event_diagnostics(raw)
     if operation == 0x21:
         if len(raw) != 8 or raw[5] != 1 or raw[6] not in (1,2): raise ProtocolFailure("invalid DEVICE_INFO")
         return dict(zip(("firmware_major","firmware_minor","firmware_patch","wire_protocol","configuration_schema","hardware_profile","role","device_id"), raw))
@@ -194,6 +202,74 @@ def decode_record(operation: int, raw: bytes):
             entries.append({"metric_id":metric,"metric":METRICS[metric],"value":value})
         return {"next_cursor":cursor,"count":count,"entries":entries}
     raise ProtocolFailure("STRUCTURE not valid for this operation")
+
+EVENT_TX_COUNTERS = (
+    "ready_selected", "arbitration_granted", "start_called", "start_accepted",
+    "start_failed", "tx_entered", "dio_event", "dio_other", "dio_classified_event",
+    "dio_other_path_during_tx", "tx_completed_called", "wait_entered",
+    "ack_decoded", "ack_matched", "admission_timeout", "backoff_entered",
+    "backoff_due", "retry_ready", "expired_queued", "expired_ready", "expired_tx",
+    "expired_wait", "expired_backoff", "expired_prepare", "clock_reversed",
+    "receive_during_tx", "host_during_tx", "maintenance_during_tx",
+    "pending_flag_cleared_during_tx", "terminal_reclaimed",
+)
+EVENT_TX_STATES = ("QUEUED", "READY", "TX_PREPARE", "TX", "WAIT_ADMISSION",
+                   "BACKOFF", "RELEASED", "FAILED", "EXPIRED")
+EVENT_RADIO_OWNERS = ("LISTENING", "STANDBY_ACQUIRED", "EVENT_TX", "COMMAND_PRE_ACK",
+                      "COMMAND_ACK_TX", "COMMAND_RESPONSE_TX", "MAINTENANCE")
+
+def decode_event_tx_diagnostics(raw: bytes) -> dict:
+    if len(raw) != 99 or raw[0] != 2:
+        raise ProtocolFailure("invalid Event TX diagnostics geometry/schema")
+    _,role,available,step,state,owner,attempt,source = raw[:8]
+    if role not in (1,2) or available not in (0,1) or (role == 1 and available) or step > 30 or state > 8 or owner > 6 or attempt > 5:
+        raise ProtocolFailure("invalid Event TX diagnostics fields")
+    epoch,event_id,last_at,start_at,completed_at,previous_clock,input_clock = struct.unpack_from("<7I",raw,8)
+    start_result = struct.unpack_from("<h",raw,36)[0]
+    admission = raw[38]
+    counts = struct.unpack_from("<30H",raw,39)
+    if admission != 0xff and admission > 4:
+        raise ProtocolFailure("invalid Event TX admission status")
+    identity = {"source_device_id":source,"event_epoch":epoch,"event_id":event_id}
+    if (attempt and not all(identity.values())) or (not attempt and any(identity.values())):
+        raise ProtocolFailure("invalid last TX identity")
+    if not available and (any(raw[3:38]) or admission != 0xff or any(counts)):
+        raise ProtocolFailure("noncanonical unavailable Event TX diagnostics")
+    return {"schema":2,"role":role,"available":bool(available),
+            "last_step":EVENT_TX_COUNTERS[step-1] if step else None,
+            "controller_state":EVENT_TX_STATES[state],"radio_owner":EVENT_RADIO_OWNERS[owner],
+            "attempt":attempt,"identity":identity if attempt else None,
+            "last_at_ms":last_at,"start_at_ms":start_at,"completed_at_ms":completed_at,
+            "previous_clock_ms":previous_clock,"input_clock_ms":input_clock,
+            "start_result":start_result,"admission_status":None if admission == 0xff else admission,
+            "counters":dict(zip(EVENT_TX_COUNTERS,counts))}
+
+def decode_event_diagnostics(raw: bytes) -> dict:
+    if raw[:1] == b"\x02": return decode_event_tx_diagnostics(raw)
+    if len(raw) != 111: raise ProtocolFailure("invalid EVENT_DIAGNOSTICS length")
+    schema,role,custody,capacity,active,consumed,available,state = raw[:8]
+    if schema != 1 or role not in (1,2) or capacity > 8 or custody > capacity or active + consumed > capacity or available not in (0,1) or state not in EVENT_DIAGNOSTIC_STATES:
+        raise ProtocolFailure("invalid EVENT_DIAGNOSTICS fields")
+    identity = {"source_device_id":raw[8],"event_epoch":struct.unpack_from("<I",raw,9)[0],"event_id":struct.unpack_from("<I",raw,13)[0]}
+    family,attempts,attempt_max,flags = raw[17:21]
+    remaining,ordinal = struct.unpack_from("<II",raw,21)
+    recent_available=raw[29]
+    recent={"source_device_id":raw[30],"event_epoch":struct.unpack_from("<I",raw,31)[0],"event_id":struct.unpack_from("<I",raw,35)[0]}
+    producer_kind,producer_result,producer_identity_available=raw[39:42]
+    producer_identity={"source_device_id":raw[42],"event_epoch":struct.unpack_from("<I",raw,43)[0],"event_id":struct.unpack_from("<I",raw,47)[0]}
+    if flags & 0xC0 or recent_available not in (0,1) or producer_identity_available not in (0,1) or producer_kind not in EVENT_PRODUCER_KINDS or producer_result not in EVENT_PRODUCER_RESULTS:
+        raise ProtocolFailure("invalid EVENT_DIAGNOSTICS flags")
+    if available:
+        if not all(identity.values()) or family not in EVENT_FAMILIES: raise ProtocolFailure("invalid diagnostic Event identity")
+    elif any(identity.values()) or family or attempts or attempt_max or flags & 0x0C or remaining or ordinal:
+        raise ProtocolFailure("noncanonical absent diagnostic Event")
+    if attempts > attempt_max or (not flags & 0x04 and remaining) or (not flags & 0x08 and ordinal): raise ProtocolFailure("noncanonical diagnostic state")
+    if recent_available != bool(all(recent.values())): raise ProtocolFailure("invalid recent admission identity")
+    if producer_identity_available:
+        if producer_result != 1 or not all(producer_identity.values()): raise ProtocolFailure("invalid producer identity")
+    elif any(producer_identity.values()): raise ProtocolFailure("noncanonical absent producer identity")
+    values=struct.unpack_from("<15I",raw,51)
+    return {"schema":schema,"role":role,"custody_count":custody,"capacity":capacity,"active_count":active,"consumed_count":consumed,"record_available":bool(available),"state":EVENT_DIAGNOSTIC_STATES[state],"state_raw":state,"identity":identity if available else None,"family":EVENT_FAMILIES.get(family),"family_raw":family,"attempts_used":attempts,"attempts_maximum":attempt_max,"waiting_for_admission":bool(flags&1),"waiting_for_retry":bool(flags&2),"remaining_lifetime_seconds":remaining if flags&4 else None,"admission_ordinal":ordinal if flags&8 else None,"persistence_degraded":bool(flags&0x10),"hub_unavailable":bool(flags&0x20),"recent_admission":recent if recent_available else None,"last_producer":{"kind":EVENT_PRODUCER_KINDS[producer_kind],"kind_raw":producer_kind,"result":EVENT_PRODUCER_RESULTS[producer_result],"result_raw":producer_result,"identity":producer_identity if producer_identity_available else None},"counters":dict(zip(EVENT_DIAGNOSTIC_COUNTERS,values))}
 
 def decode_event_body(family: int, body: bytes) -> dict:
     if family == 0x40:
@@ -249,8 +325,8 @@ def decode_payload(frame: Frame) -> dict:
         raw=p[9:]
         event_operation = category == 5 and operation in (0x29, 0x2A)
         if len(raw)!=length or category not in CATEGORIES or operation not in OPERATIONS or result_class not in RESULT_CLASSES or result_code not in RESULT_CODES[result_class]: raise ProtocolFailure("invalid OPERATION_RESPONSE fields")
-        if frame.minor == 1 and (category == 5 or operation in (0x29,0x2A) or result_class == 5): raise ProtocolFailure("Host Protocol 0.2 vocabulary in minor-1 frame")
-        if frame.minor == 2 and ((category == 5) != (operation in (0x29,0x2A))): raise ProtocolFailure("invalid category/operation pair")
+        if frame.minor == 1 and (category == 5 or operation in (0x29,0x2A,0x2B) or result_class == 5): raise ProtocolFailure("Host Protocol 0.2 vocabulary in minor-1 frame")
+        if frame.minor == 2 and (((category == 5) != (operation in (0x29,0x2A))) or (operation == 0x2B and category != 4)): raise ProtocolFailure("invalid category/operation pair")
         if event_operation and target_id != 0: raise ProtocolFailure("Event operation requires target ID zero")
         if event_operation and result_class not in (0,1,5): raise ProtocolFailure("invalid Event operation result class")
         if result_class == 5 and (not event_operation or (result_code == 1 and operation != 0x2A)): raise ProtocolFailure("invalid EVENT_RESULT scope")
@@ -261,7 +337,7 @@ def decode_payload(frame: Frame) -> dict:
             valid = ((operation==0x29 and kind==0x7F and length==29) or
                      (operation==0x2A and kind==0 and length==0) or
                      (operation==0x20 and kind==2) or
-                     (operation in (0x21,0x22,0x23,0x24,0x28) and kind==0x7F) or
+                     (operation in (0x21,0x22,0x23,0x24,0x28,0x2B) and kind==0x7F) or
                      (operation==0x25 and kind in range(1,7)) or
                      (operation==0x26 and kind==0) or
                      (operation==0x27 and kind in range(7)))
@@ -325,7 +401,7 @@ def named_vectors()->dict[str,bytes]:
     vectors["poll_events_storage_failure"]=build_frame(0x11,0x1001,storage_payload,minor=2)[1]
     return vectors
 
-COMMANDS={"ping":(1,0x20),"device-info":(1,0x21),"status":(1,0x22),"capabilities":(2,0x23),"describe":(2,0x24),"read":(2,0x25),"set-indicator":(2,0x26),"run-procedure":(3,0x27),"diagnostics":(4,0x28),"poll-events":(5,0x29),"consume-event":(5,0x2A)}
+COMMANDS={"ping":(1,0x20),"device-info":(1,0x21),"status":(1,0x22),"capabilities":(2,0x23),"describe":(2,0x24),"read":(2,0x25),"set-indicator":(2,0x26),"run-procedure":(3,0x27),"diagnostics":(4,0x28),"poll-events":(5,0x29),"consume-event":(5,0x2A),"event-diagnostics":(4,0x2B)}
 def parse_int(text): return int(text,0)
 def parse_bool(text):
     if text.lower() in ("true","1"): return True
@@ -348,6 +424,7 @@ def request_for_args(args)->tuple[int,bytes,bytes]:
         elif args.command=="set-indicator": kind,value=1,args.value
         elif args.command=="run-procedure": kind,value=args.value_type,args.value
         elif args.command=="consume-event": kind,value=0x7F,encode_event_identity(args.source_device_id,args.event_epoch,args.event_id)
+        elif args.command=="event-diagnostics" and getattr(args,"lifecycle",False): kind,value=2,1
         payload=operation_payload(category,op,args.target_device,target_id,kind,value,minor=minor); msg=0x10
     decoded,encoded=build_frame(msg,rid,payload,minor=minor)
     return rid,decoded,encoded
@@ -381,6 +458,7 @@ def make_parser():
         if name=="run-procedure":
             q.add_argument("--procedure-id",type=parse_int,required=True); q.add_argument("--value-type",type=parse_int,default=0); q.add_argument("--value",type=parse_int)
         if name in ("capabilities","diagnostics"): q.add_argument("--cursor",type=parse_int)
+        if name=="event-diagnostics": q.add_argument("--lifecycle",action="store_true",help="read the local volatile TX lifecycle page (minor 2)")
         if name=="consume-event":
             q.add_argument("--source-device-id",type=parse_int,required=True)
             q.add_argument("--event-epoch",type=parse_int,required=True)

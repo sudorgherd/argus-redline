@@ -61,7 +61,8 @@ enum class OperationCode : uint8_t {
     RUN_PROCEDURE = 0x27,
     GET_DIAGNOSTICS = 0x28,
     POLL_EVENTS = 0x29,
-    CONSUME_EVENT = 0x2A
+    CONSUME_EVENT = 0x2A,
+    GET_EVENT_DIAGNOSTICS = 0x2B
 };
 
 enum class ResultClass : uint8_t {
@@ -213,7 +214,8 @@ inline bool isKnownOperationCode(uint8_t minor, OperationCode operation) {
     return isKnownOperationCode(operation) ||
         (minor == VERSION_MINOR_0_2 &&
             (operation == OperationCode::POLL_EVENTS ||
-             operation == OperationCode::CONSUME_EVENT));
+             operation == OperationCode::CONSUME_EVENT ||
+             operation == OperationCode::GET_EVENT_DIAGNOSTICS));
 }
 
 inline bool isSupportedCategoryOperation(
@@ -245,6 +247,9 @@ inline bool isSupportedCategoryOperation(uint8_t minor,
     if (minor == VERSION_MINOR_0_2 && category == OperationCategory::EVENT)
         return operation == OperationCode::POLL_EVENTS ||
             operation == OperationCode::CONSUME_EVENT;
+    if (minor == VERSION_MINOR_0_2 &&
+        category == OperationCategory::DIAGNOSTIC &&
+        operation == OperationCode::GET_EVENT_DIAGNOSTICS) return true;
     return isKnownOperationCategory(minor, category) &&
         isKnownOperationCode(minor, operation) &&
         isSupportedCategoryOperation(category, operation);

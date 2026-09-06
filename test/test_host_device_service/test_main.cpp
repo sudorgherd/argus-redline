@@ -382,10 +382,89 @@ void testCompositionPreservesCapabilityAndProcedureDisposition() {
         static_cast<uint8_t>(result.disposition));
 }
 
+void testEventDiagnosticsIsMinorTwoLocalReadOnlyAndRepeatable() {
+    RuntimeState::State runtime(RuntimeState::DeviceRole::NODE, 0x10, 0x01);
+    RuntimeState::EventDetailSnapshot detail;
+    detail.custodyCount = 1;
+    detail.capacity = 8;
+    detail.recordAvailable = true;
+    detail.state = RuntimeState::EventDetailState::BACKOFF;
+    detail.identity = {0x10, 7, 9};
+    detail.family = 0x40;
+    detail.attemptsUsed = 2;
+    detail.attemptsMaximum = 5;
+    detail.waitingForRetry = true;
+    detail.remainingLifetimeAvailable = true;
+    detail.remainingLifetimeSeconds = 3400;
+    detail.lastProducer.kind = RuntimeState::EventProducerKind::BUTTON;
+    detail.lastProducer.result = RuntimeState::EventProducerResult::CREATED;
+    detail.lastProducer.identityAvailable = true;
+    detail.lastProducer.identity = detail.identity;
+    detail.counters.enqueueAccepted = 1;
+    detail.counters.eventAttempts = 2;
+    const DeviceSnapshot snapshot = makeDeviceSnapshot(runtime, 55, detail);
+    OperationRequest request = makeRequest(OperationCategory::DIAGNOSTIC,
+        OperationCode::GET_EVENT_DIAGNOSTICS, 0x10);
+
+    const Result first = handleLocalDeviceOrDiagnostic(0x7201, request,
+        snapshot, VERSION_MINOR_0_2);
+    const Result second = handleLocalDeviceOrDiagnostic(0x7202, request,
+        snapshot, VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Disposition::HANDLED),
+        static_cast<uint8_t>(first.disposition));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PayloadResult::OK),
+        static_cast<uint8_t>(validateOperationResponse(
+            VERSION_MINOR_0_2, first.response)));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(first.response.value.bytes,
+        second.response.value.bytes, EVENT_DIAGNOSTICS_RECORD_SIZE);
+    EventDiagnosticsRecord decoded = {};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PayloadResult::OK),
+        static_cast<uint8_t>(decodeEventDiagnosticsRecord(
+            first.response.value, decoded)));
+    TEST_ASSERT_EQUAL_UINT8(2, decoded.attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT32(3400, decoded.remainingLifetimeSeconds);
+    TEST_ASSERT_EQUAL_UINT32(1, detail.counters.enqueueAccepted);
+    TEST_ASSERT_EQUAL_UINT32(2, detail.counters.eventAttempts);
+
+    const Result minorOne = handleLocalDeviceOrDiagnostic(0x7203, request,
+        snapshot, VERSION_MINOR_0_1);
+    TEST_ASSERT_NOT_EQUAL(static_cast<uint8_t>(Disposition::HANDLED),
+        static_cast<uint8_t>(minorOne.disposition));
+}
+
+void testLifecyclePageIsRepeatableAndPreservesLegacyDiagnosticPage() {
+    RuntimeState::State runtime(RuntimeState::DeviceRole::NODE, 0x10, 1);
+    RuntimeState::EventDetailSnapshot detail;
+    detail.capacity = 8;
+    detail.txLifecycle.available = true;
+    detail.txLifecycle.source = 0x10; detail.txLifecycle.epoch = 1;
+    detail.txLifecycle.id = 37; detail.txLifecycle.attempt = 5;
+    detail.txLifecycle.counters[2] = 5;
+    const auto snapshot = makeDeviceSnapshot(runtime, 42, detail);
+    auto request = makeRequest(OperationCategory::DIAGNOSTIC, OperationCode::GET_EVENT_DIAGNOSTICS, 0x10);
+    const auto legacy = handleLocalDeviceOrDiagnostic(1, request, snapshot, VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8(111, legacy.response.value.length);
+    setUint32Value(request.value, CapabilityValueType::UNSIGNED_32, 1);
+    const auto first = handleLocalDeviceOrDiagnostic(2, request, snapshot, VERSION_MINOR_0_2);
+    const auto second = handleLocalDeviceOrDiagnostic(3, request, snapshot, VERSION_MINOR_0_2);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ResultClass::OPERATION_RESULT,
+        (uint8_t)first.response.resultClass);
+    TEST_ASSERT_EQUAL_UINT8(0, first.response.resultCode);
+    TEST_ASSERT_EQUAL_UINT8(99, first.response.value.length);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(first.response.value.bytes, second.response.value.bytes, 99);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)PayloadResult::OK,
+        (uint8_t)validateOperationResponse(VERSION_MINOR_0_2, first.response));
+    TEST_ASSERT_NOT_EQUAL((uint8_t)Disposition::HANDLED, (uint8_t)handleLocalDeviceOrDiagnostic(
+        4, request, snapshot, VERSION_MINOR_0_1).disposition);
+    TEST_ASSERT_EQUAL_UINT32(37, detail.txLifecycle.id);
+    TEST_ASSERT_EQUAL_UINT16(5, detail.txLifecycle.counters[2]);
+}
+
 }  // namespace
 
 int main(int, char**) {
     UNITY_BEGIN();
+    RUN_TEST(testLifecyclePageIsRepeatableAndPreservesLegacyDiagnosticPage);
     RUN_TEST(testVersionSchemaProfileAndRoleAuthorities);
     RUN_TEST(testSnapshotIsCopiedAndBounded);
     RUN_TEST(testPingValuesTargetsAndMalformedInputs);
@@ -396,5 +475,6 @@ int main(int, char**) {
     RUN_TEST(testDiagnosticBadCursorAndNoMutation);
     RUN_TEST(testHelloResponseAndErrors);
     RUN_TEST(testCompositionPreservesCapabilityAndProcedureDisposition);
+    RUN_TEST(testEventDiagnosticsIsMinorTwoLocalReadOnlyAndRepeatable);
     return UNITY_END();
 }

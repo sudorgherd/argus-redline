@@ -73,6 +73,42 @@ The closed v0.7 Event families decoded by this tool are BUTTON,
 SENSOR_THRESHOLD, and MANUAL_CHECK_IN. MANUAL_CHECK_IN USER_REQUEST has no
 panic, duress, emergency, incident, or application-workflow meaning.
 
+## Event diagnostics
+
+GET_EVENT_DIAGNOSTICS is an additive minor-2 local diagnostic on either role.
+It reads bounded Event subsystem state without polling, consuming, admitting,
+acknowledging, retrying, or otherwise mutating an Event. It does not imply that
+the connected device advertises the Hub EVENT service.
+
+```powershell
+python tools/host_reference/redline_host.py event-diagnostics --minor 2 --target-device 0x01 --request-id 0x1701 --dry-run --show-hex
+python tools/host_reference/redline_host.py event-diagnostics --minor 2 --target-device 0x10 --request-id 0x1702 --port COM5 --json
+```
+
+The decoded schema reports role-local custody/capacity, primary identity and
+state, attempts and available lifetime/ordinal values, Hub admission evidence,
+the Node's volatile last-producer outcome, and all 15 Event counters. The
+producer observation does not survive reboot and is not persistent Event
+authority. Operation 0x2B is rejected under minor 1.
+
+`--lifecycle` selects the additive local TX page using UNSIGNED_32 selector 1.
+It returns schema 2 (99 bytes): last TX identity/attempt, current controller and
+radio owner, start result/timestamps, reversed policy-time evidence, and 30
+saturating uint16 lifecycle counters. Without this option the original NONE
+request and 111-byte schema-1 response remain unchanged. The decoder supports
+both schemas; Hub's lifecycle page is canonically unavailable.
+
+```sh
+python tools/host_reference/redline_host.py event-diagnostics --minor 2 --target-device 0x10 --lifecycle --request-id 0x1801 --dry-run --show-hex
+```
+
+Use the rediscovered Node port for a separately authorized physical read. OLED
+observation should precede Host access: existing Node Host standby/receive
+handling can interrupt Event TX despite the diagnostic operation itself being
+read-only. A nonzero `host_during_tx` flags that interference; it invalidates
+claiming spontaneous lost completion from that attempt. The Linux safe-open
+adapter remains mandatory and unchanged.
+
 Decode a captured, delimiter-terminated frame:
 
 ```powershell

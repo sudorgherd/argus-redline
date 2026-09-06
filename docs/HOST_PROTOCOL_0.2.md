@@ -8,10 +8,10 @@
 
 ## 1. Purpose and Scope
 
-Host Protocol 0.2 adds bounded local Hub Event retrieval and explicit
-consumption to the developmental computer-to-device protocol. The Host remains
-the initiator. Event service uses synchronous `POLL_EVENTS` and
-`CONSUME_EVENT`; no unsolicited frame is introduced.
+Host Protocol 0.2 adds bounded local Hub Event retrieval, explicit consumption,
+and a bounded read-only Event diagnostics query to the developmental
+computer-to-device protocol. The Host remains the initiator. Event service and
+diagnostics are synchronous; no unsolicited frame is introduced.
 
 This specification encodes the accepted v0.7.0 Event custody model. It does not
 change Wire Event admission, Node delivery, Hub ledger persistence, Event
@@ -32,7 +32,8 @@ frame major 0 / minor 2 -> Host Protocol 0.2 semantics in this document
 The minor byte in every frame is authoritative. HELLO negotiation does not
 create hidden connection state and never changes how a later frame is decoded.
 A minor-1 frame cannot carry category EVENT, Event feature advertisement,
-POLL_EVENTS, CONSUME_EVENT, request STRUCTURE values, or 0.2 result classes.
+POLL_EVENTS, CONSUME_EVENT, GET_EVENT_DIAGNOSTICS, request STRUCTURE values, or
+0.2 result classes.
 
 For minor-1 frames a 0.2 implementation MUST preserve the exact 0.1 accepted
 versions, HELLO range rules and response bytes, categories, feature/reserved
@@ -212,10 +213,13 @@ Host Protocol 0.2 adds:
 |---|---:|---|---|
 | EVENT | `0x29` | `POLL_EVENTS` | local Hub only |
 | EVENT | `0x2A` | `CONSUME_EVENT` | local Hub only |
+| DIAGNOSTIC | `0x2B` | `GET_EVENT_DIAGNOSTICS` | local Hub or Node |
 
-Only category EVENT may pair with 0x29 or 0x2A. Existing category/operation
-pairs are unchanged. A valid EVENT request sent to a role without advertised
-Event service receives `REQUEST_REJECTED/UNSUPPORTED_OPERATION`.
+Only category EVENT may pair with 0x29 or 0x2A. Only category DIAGNOSTIC may
+pair with 0x2B. Other existing category/operation pairs are unchanged. A valid
+EVENT request sent to a role without advertised Event service receives
+`REQUEST_REJECTED/UNSUPPORTED_OPERATION`. GET_EVENT_DIAGNOSTICS is available
+locally on both roles and does not advertise or imply Event-service support.
 
 Host operation values and Wire EVENT family opcodes are separate namespaces.
 For example, Host `POLL_EVENTS=0x29` is unrelated to Wire family
@@ -277,14 +281,16 @@ STRUCTURE      0x7F
 ```
 
 `STRUCTURE` remains operation-specific, never a generic byte array. Minor 2
-adds exactly these Event uses:
+adds exactly these Event and Event-diagnostic uses:
 
 - POLL_EVENTS success response: 29-byte Host Event record;
-- CONSUME_EVENT request: 9-byte Host Event identity.
+- CONSUME_EVENT request: 9-byte Host Event identity; and
+- GET_EVENT_DIAGNOSTICS success response: 111-byte schema-1 summary, or the
+  explicitly selected 99-byte schema-2 TX lifecycle page (Section 14A.1).
 
-POLL_EVENTS request and successful CONSUME_EVENT response use NONE/length 0.
-Error responses use NONE/length 0. No string, arbitrary blob, or generic
-application payload is created.
+POLL_EVENTS and default GET_EVENT_DIAGNOSTICS requests and successful CONSUME_EVENT
+responses use NONE/length 0. Error responses use NONE/length 0. No string,
+arbitrary blob, or generic application payload is created.
 
 For minor-1 frames, STRUCTURE remains response-only and constrained exactly by
 Host Protocol 0.1.
@@ -333,10 +339,10 @@ The complete record fits comfortably in the 128-byte Host payload: the
 OPERATION_RESPONSE payload is `9+29=38` bytes and decoded frame is 48 bytes.
 Exactly one Event is returned; batching is prohibited.
 
-Hub `admission_ordinal` is deliberately not Host-visible. It is internal
-persistent ledger ordering state. POLL's contract already guarantees oldest
-ACTIVE selection, while exposing the ordinal would create an unnecessary
-storage-generation token that applications could mistake for Event identity.
+Hub `admission_ordinal` is deliberately absent from the POLL record and is not
+part of Event identity. The read-only qualification diagnostic in Section 14A
+may expose it explicitly as ledger-ordering evidence; applications MUST NOT
+use it as Event identity or a storage-generation token.
 
 No native C/C++ structure may be serialized. All fields are encoded and
 validated explicitly.
@@ -409,6 +415,173 @@ content, or admission ordinal.
 
 Host disconnect never consumes an Event. Hub reboot preserves ACTIVE and
 CONSUMED state as defined by the Event reliability design.
+
+## 14A. GET_EVENT_DIAGNOSTICS
+
+GET_EVENT_DIAGNOSTICS is an additive minor-2 local DIAGNOSTIC operation. It is
+available through the directly connected Hub or Node and is never bridged over
+the Wire Protocol.
+
+Request:
+
+```text
+category          DIAGNOSTIC (0x04)
+operation         GET_EVENT_DIAGNOSTICS (0x2B)
+target device ID  connected local device ID
+target ID         0
+value type        NONE (0x00)
+value length      0
+```
+
+A successful response is `OPERATION_RESULT/OK` with STRUCTURE length 111 and
+schema 1:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | schema (`1`) |
+| 1 | 1 | role (`HUB=1`, `NODE=2`) |
+| 2 | 1 | total durable custody/owned count |
+| 3 | 1 | role capacity (`8`) |
+| 4 | 1 | Hub ACTIVE count; zero on Node |
+| 5 | 1 | Hub retained CONSUMED count; zero on Node |
+| 6 | 1 | primary record available (`0` or `1`) |
+| 7 | 1 | primary Event state |
+| 8 | 9 | primary Event identity |
+| 17 | 1 | primary Event family |
+| 18 | 1 | committed attempts used |
+| 19 | 1 | attempt maximum |
+| 20 | 1 | availability/state flags |
+| 21 | 4 | remaining powered lifetime seconds |
+| 25 | 4 | Hub admission ordinal |
+| 29 | 1 | recent Hub admission available |
+| 30 | 9 | recent Hub admission identity |
+| 39 | 1 | last producer kind |
+| 40 | 1 | last producer result |
+| 41 | 1 | last producer identity available |
+| 42 | 9 | last producer identity |
+| 51 | 60 | fifteen `uint32` Event diagnostic counters |
+
+Flag bits are: bit 0 waiting for admission, bit 1 waiting for retry, bit 2
+remaining lifetime available, bit 3 admission ordinal available, bit 4 Event
+persistence degraded, and bit 5 Hub unavailable. Bits 6..7 are reserved zero.
+The state vocabulary is `EMPTY=0`, `QUEUED=1`, `READY=2`, `TX_PREPARE=3`,
+`TRANSMITTING=4`, `WAIT_ADMISSION=5`, `BACKOFF=6`, `RELEASED=7`, `FAILED=8`,
+`EXPIRED=9`, `ACTIVE=10`, and `CONSUMED=11`.
+
+Producer kinds are `NONE=0`, `BUTTON=1`, `SENSOR_THRESHOLD=2`, and
+`MANUAL_CHECK_IN=3`. Producer results are `NONE=0`, `CREATED=1`,
+`QUEUE_FULL=2`, `INVALID_EVENT=3`, `STORAGE_FAILURE=4`, and `SUPPRESSED=5`.
+Producer state is volatile diagnostic evidence only. Its identity is available
+only for CREATED, and it is not recovery or delivery authority.
+
+The counters beginning at offset 51 are, in order: enqueue accepted, queue-full
+rejected, persistence failures, Events recovered, storage corruptions,
+committed Event attempts, Events expired, attempts exhausted, Hub capacity
+rejections, identity/content mismatches, duplicate retransmissions, successful
+admissions, admissions acknowledged, Host polls returning an Event, and Host
+consumptions.
+
+The primary Node record is the oldest queued Event, otherwise a bounded owned
+terminal record, with current controller state when active. The primary Hub
+record is the oldest ACTIVE Event, otherwise the most recently admitted
+retained record. An unavailable identity is all zero; unavailable associated
+fields and values are canonical zero. The recent admission identity is the
+highest retained admission ordinal. Counts and identities are read directly
+from authoritative stores; querying does not create, enqueue, attempt, retry,
+acknowledge, admit, consume, reorder, release, expire, persist, or reset an
+Event or lifetime. Repeated queries are safe and may replace only the ordinary
+volatile Host retained completion.
+
+This operation creates no new HELLO category or feature bit. In particular, a
+Node continues to clear category EVENT and the Event-service feature. Minor-1
+frames reject operation 0x2B under the frozen 0.1 vocabulary. Older minor-2
+Hosts remain compatible because no unsolicited response is produced and all
+prior numeric assignments and frames are unchanged.
+
+### 14A.1 Explicit local TX lifecycle page
+
+The existing NONE request and 111-byte schema-1 response remain byte-for-byte
+unchanged. An explicit `UNSIGNED_32`, length 4, value `1` selects the volatile
+TX lifecycle page of the same local `0x2B` operation. No other selector is
+valid. Target ID remains zero. The response is OPERATION_RESULT/OK with an
+exact 99-byte STRUCTURE, schema 2. Node reports available; Hub returns the
+canonical unavailable page. Minor 1 rejects both request forms. Older
+diagnostic firmware rejects the new selector; older clients continue using
+NONE. Stored/captured schema-1 frames still decode unchanged. No Wire Protocol,
+RF peer, HELLO bit, persistent Event record, or persistence schema changes.
+
+All multi-byte fields are little-endian:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | schema `2` |
+| 1 | 1 | role `HUB=1`, `NODE=2` |
+| 2 | 1 | lifecycle available, 0 or 1 |
+| 3 | 1 | last foreground observation, 0=none or counter index+1 |
+| 4 | 1 | current controller state (vocabulary below) |
+| 5 | 1 | current radio owner (vocabulary below) |
+| 6 | 1 | last encoded TX attempt number, 0..5 |
+| 7 | 1 | last encoded TX source ID |
+| 8 | 4 | last encoded TX epoch |
+| 12 | 4 | last encoded TX Event ID |
+| 16 | 4 | last foreground observation time, milliseconds |
+| 20 | 4 | latest startTransmit invocation time, milliseconds |
+| 24 | 4 | latest txCompleted invocation time, milliseconds |
+| 28 | 4 | prior policy time at most recent reversed input |
+| 32 | 4 | reversed policy input time |
+| 36 | 2 | signed int16 latest RadioLib start result |
+| 38 | 1 | latest decoded admission status 0..4, or `0xFF`=none |
+| 39 | 60 | thirty saturating uint16 counters, ordered below |
+
+Controller states are `QUEUED=0`, `READY=1`, `TX_PREPARE=2`, `TX=3`,
+`WAIT_ADMISSION=4`, `BACKOFF=5`, `RELEASED=6`, `FAILED=7`, `EXPIRED=8`.
+This differs from the schema-1 record-state vocabulary. Owners are
+`LISTENING=0`, `STANDBY_ACQUIRED=1`, `EVENT_TX=2`, `COMMAND_PRE_ACK=3`,
+`COMMAND_ACK_TX=4`, `COMMAND_RESPONSE_TX=5`, `MAINTENANCE=6`.
+Attempt zero requires an all-zero identity; nonzero attempts require a valid
+identity. Unavailable pages have bytes 3..37 and counters zero, with admission
+status `0xFF`. Millisecond times may be zero or wrap; corresponding counters
+establish whether a timestamp was captured.
+
+Counter indices 0..29:
+
+```text
+ready_selected, arbitration_granted, start_called, start_accepted,
+start_failed, tx_entered, dio_event, dio_other, dio_classified_event,
+dio_other_path_during_tx, tx_completed_called, wait_entered,
+ack_decoded, ack_matched, admission_timeout, backoff_entered,
+backoff_due, retry_ready, expired_queued, expired_ready, expired_tx,
+expired_wait, expired_backoff, expired_prepare, clock_reversed,
+receive_during_tx, host_during_tx, maintenance_during_tx,
+pending_flag_cleared_during_tx, terminal_reclaimed
+```
+
+Counters saturate at 65535 and survive terminal reclamation only in RAM;
+reboot clears them. DIO totals are ISR-owned saturating uint32 values narrowed
+on snapshot; they do not set last-observation time. `dio_event` means the
+diagnostic window followed controller TX at interrupt; `dio_classified_event`
+means foreground selected the Event-owner branch. Neither independently
+proves the chip IRQ register contained TX_DONE. No extra SPI read, ISR RadioLib
+call, interrupt masking, timeout, or scheduling decision is introduced.
+ISR totals are individually sampled, not an atomic multi-field edge trace.
+Existing shared-boolean flag coalescing remains unchanged.
+
+`ack_decoded` counts valid admission responses considered during WAIT;
+`ack_matched` additionally proves exact attempt correlation. Schema-1
+admissionsAcknowledged remains the durable ADMITTED-release evidence. Expiry
+counts retain the previous head state; non-head/recovery expirations count as
+QUEUED. `clock_reversed` observes successive policy deltas exceeding half the
+uint32 range; normal wrap is supported and policy time is not corrected.
+Last-TX identity/attempt survive FREE reclamation in RAM and need not match a
+later queued record.
+
+Consumers mutate no Event state. Existing Node Host service acquires standby
+and restores receive; its LISTENING phase guard does not independently exclude
+Event ownership. A query during TX can therefore disturb that unresolved
+radio path. `host_during_tx` exposes this before the response snapshot. Observe
+OLED first and prefer querying after TX ends. A Host-interrupted attempt cannot
+prove spontaneous missed DIO1. This diagnostic addition does not fix that
+separate ownership behavior.
 
 ## 15. Result Classes and Codes
 
@@ -537,6 +710,8 @@ Logical response handoff increments `responsesEmitted` under existing rules.
 Event-service counters such as Host poll/consumption and storage failure remain
 owned by the Event runtime design; Host diagnostics MUST NOT double-count them
 as radio/capability diagnostics. No diagnostic counter becomes persistent.
+GET_EVENT_DIAGNOSTICS observes those existing counters and authoritative
+stores without incrementing or otherwise mutating them.
 
 ## 20. Security Boundary
 
@@ -626,6 +801,9 @@ Before integration, native tests MUST cover:
 - unchanged existing operation categories, values, pairings, responses, and
   remote bridge behavior;
 - EVENT category and operation numeric values and rejection under minor 1;
+- GET_EVENT_DIAGNOSTICS 0x2B minor-2-only pairing, exact 111-byte record,
+  canonical optional identities/fields, role-local authoritative values, and
+  repeated read-only behavior;
 - POLL exact request validation, bad target/type/length/trailing bytes,
   unsupported role, storage failure, no-Event record, one-Event record,
   canonical field validation, 12-byte maximum body, and 38-byte response;
@@ -661,7 +839,8 @@ Host Protocol 0.2 does not introduce:
 - authenticated local-user or radio identity;
 - cryptographic freshness or security anti-replay;
 - a multi-client stable Host API;
-- Host-visible Hub admission ordinals;
+- Hub admission ordinals in POLL or as Event identity (the qualification-only
+  diagnostic may expose one as read-only ledger evidence);
 - Wire Event admission or radio scheduling; or
 - application workflow or product-specific Event meaning.
 
@@ -675,6 +854,7 @@ Implementation may begin only when:
 [ ] Immediate, deferred, and retained responses preserve their request minor
 [ ] EVENT category 0x05 and feature bit 0x0004 are accepted
 [ ] POLL_EVENTS 0x29 and CONSUME_EVENT 0x2A are accepted
+[ ] GET_EVENT_DIAGNOSTICS 0x2B is minor-2-only and read-only
 [ ] 29-byte Host Event record and 9-byte consume identity are frozen
 [ ] EVENT_RESULT/NOT_FOUND/STORAGE_FAILURE assignments are accepted
 [ ] Role-dependent advertisement and reserved-bit rules are frozen

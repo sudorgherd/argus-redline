@@ -43,16 +43,41 @@ inline CreationResult normalize(NodeEventStore::EnqueueStatus status) {
     }
 }
 
+inline RuntimeState::EventProducerResult diagnosticResult(
+    CreationResult result
+) {
+    switch (result) {
+        case CreationResult::ENQUEUED:
+            return RuntimeState::EventProducerResult::CREATED;
+        case CreationResult::QUEUE_FULL:
+            return RuntimeState::EventProducerResult::QUEUE_FULL;
+        case CreationResult::INVALID_EVENT:
+            return RuntimeState::EventProducerResult::INVALID_EVENT;
+        case CreationResult::STORAGE_FAILURE:
+            return RuntimeState::EventProducerResult::STORAGE_FAILURE;
+    }
+    return RuntimeState::EventProducerResult::STORAGE_FAILURE;
+}
+
 class StoreCreationSink final : public CreationSink {
 public:
     explicit StoreCreationSink(NodeEventStore::Store& store) : store_(store) {}
 
     CreationResult create(const NodeEventStore::EventInput& input) override {
-        return normalize(store_.enqueue(input).status);
+        lastResult_ = store_.enqueue(input);
+        lastResultAvailable_ = true;
+        return normalize(lastResult_.status);
+    }
+
+    bool lastResultAvailable() const { return lastResultAvailable_; }
+    const NodeEventStore::EnqueueResult& lastResult() const {
+        return lastResult_;
     }
 
 private:
     NodeEventStore::Store& store_;
+    bool lastResultAvailable_ = false;
+    NodeEventStore::EnqueueResult lastResult_ = {};
 };
 
 struct Emission {
@@ -95,11 +120,13 @@ struct ButtonContext {
     bool displayAwake;
     bool editorActive;
     bool homeScreen;
+    bool buttonEventSelected = true;
 };
 
 struct ButtonProductionResult {
     Emission button;
     Emission manualCheckIn;
+    bool buttonSuppressed;
 };
 
 // One gesture is admitted from its PRESS-time UI context. SHORT_PRESS is the
@@ -113,7 +140,7 @@ public:
         const ButtonContext& context,
         CreationSink& sink
     ) {
-        ButtonProductionResult result = {noEmission(), noEmission()};
+        ButtonProductionResult result = {noEmission(), noEmission(), false};
         observeOne(events.first, context, sink, result);
         observeOne(events.second, context, sink, result);
         return result;
@@ -124,14 +151,20 @@ private:
                     CreationSink& sink, ButtonProductionResult& result) {
         switch (event) {
             case DeviceInput::ButtonEvent::PRESS:
-                gestureEligible_ = context.displayAwake && !context.editorActive;
-                manualEligible_ = gestureEligible_ && context.homeScreen;
+                gestureEligible_ = context.buttonEventSelected &&
+                    context.displayAwake && !context.editorActive;
+                gestureSuppressed_ = context.buttonEventSelected &&
+                    !gestureEligible_;
+                manualEligible_ = context.displayAwake &&
+                    !context.editorActive && context.homeScreen;
                 longObserved_ = false;
                 veryLongObserved_ = false;
                 break;
             case DeviceInput::ButtonEvent::SHORT_PRESS:
                 if (gestureEligible_) result.button = emitButton(sink, event);
+                else if (gestureSuppressed_) result.buttonSuppressed = true;
                 gestureEligible_ = false;
+                gestureSuppressed_ = false;
                 manualEligible_ = false;
                 break;
             case DeviceInput::ButtonEvent::LONG_PRESS:
@@ -145,6 +178,7 @@ private:
                 if (manualEligible_ && longObserved_ && !veryLongObserved_)
                     result.manualCheckIn = emitManualCheckIn(sink);
                 if (longObserved_) gestureEligible_ = false;
+                gestureSuppressed_ = false;
                 manualEligible_ = false;
                 longObserved_ = false;
                 veryLongObserved_ = false;
@@ -155,6 +189,7 @@ private:
     }
 
     bool gestureEligible_ = false;
+    bool gestureSuppressed_ = false;
     bool manualEligible_ = false;
     bool longObserved_ = false;
     bool veryLongObserved_ = false;

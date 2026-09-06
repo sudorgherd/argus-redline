@@ -787,10 +787,105 @@ void testMinorSpecificEventRequestAndResponseSchemas() {
         validateOperationResponse(VERSION_MINOR_0_2, response)));
 }
 
+void testEventDiagnosticsRecordIsFixedBoundedAndMinorTwoOnly() {
+    EventDiagnosticsRecord record = {};
+    record.schema = EVENT_DIAGNOSTICS_SCHEMA;
+    record.role = DeviceRole::NODE;
+    record.custodyCount = 1;
+    record.capacity = 8;
+    record.recordAvailable = 1;
+    record.state = 5;
+    record.identity = {0x10, 0x11223344U, 0x01020304U};
+    record.family = 0x40;
+    record.attemptsUsed = 2;
+    record.attemptsMaximum = 5;
+    record.flags = EVENT_DIAGNOSTICS_WAITING_ADMISSION |
+        EVENT_DIAGNOSTICS_LIFETIME_AVAILABLE;
+    record.remainingLifetimeSeconds = 3421;
+    record.producerKind = 1;
+    record.producerResult = 1;
+    record.producerIdentityAvailable = 1;
+    record.producerIdentity = record.identity;
+    for (uint8_t i = 0; i < EVENT_DIAGNOSTIC_COUNTER_COUNT; ++i)
+        record.counters[i] = static_cast<uint32_t>(i + 1);
+    TypedValue value = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK),
+        raw(encodeEventDiagnosticsRecord(record, value)));
+    TEST_ASSERT_EQUAL_UINT8(EVENT_DIAGNOSTICS_RECORD_SIZE, value.length);
+    EventDiagnosticsRecord decoded = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK),
+        raw(decodeEventDiagnosticsRecord(value, decoded)));
+    TEST_ASSERT_EQUAL_UINT32(0x11223344U, decoded.identity.eventEpoch);
+    TEST_ASSERT_EQUAL_UINT32(15, decoded.counters[14]);
+
+    OperationRequest request = makeRequest(OperationCategory::DIAGNOSTIC,
+        OperationCode::GET_EVENT_DIAGNOSTICS, 0);
+    request.targetDeviceId = 0x10;
+    uint8_t payload[MAX_PAYLOAD_SIZE] = {};
+    size_t length = 0;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_2, request, payload, sizeof(payload), length)));
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationRequest(
+        VERSION_MINOR_0_1, request, payload, sizeof(payload), length)));
+
+    OperationResponse response = {};
+    response.category = request.category;
+    response.operation = request.operation;
+    response.targetDeviceId = request.targetDeviceId;
+    response.resultClass = ResultClass::OPERATION_RESULT;
+    response.resultCode = static_cast<uint8_t>(OperationStatus::OK);
+    response.value = value;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_2, response, payload, sizeof(payload), length)));
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeOperationResponse(
+        VERSION_MINOR_0_1, response, payload, sizeof(payload), length)));
+
+    value.bytes[20] |= 0x80;
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK),
+        raw(decodeEventDiagnosticsRecord(value, decoded)));
+}
+
+void testEventTxDiagnosticPageCodecBoundsAndVersionGate() {
+    EventTxDiagnostics::Observer observer; observer.enable();
+    observer.attempt(0x10, 7, 37, 5); observer.start(123); observer.startResult(-5, 124);
+    observer.completed(125); observer.admission(0, 130);
+    auto snapshot = observer.snapshot(); snapshot.controllerState = 4; snapshot.radioOwner = 0;
+    snapshot.counters[29] = UINT16_MAX;
+    TypedValue value = {};
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeEventTxDiagnostics(DeviceRole::NODE, snapshot, value)));
+    TEST_ASSERT_EQUAL_UINT8(99, value.length);
+    TEST_ASSERT_EQUAL_UINT8(2, value.bytes[0]);
+    TEST_ASSERT_EQUAL_UINT8(37, value.bytes[12]);
+    TEST_ASSERT_EQUAL_UINT8(0xfb, value.bytes[36]);
+    TEST_ASSERT_EQUAL_UINT8(0xff, value.bytes[37]);
+    DeviceRole role; EventTxDiagnostics::Snapshot decoded;
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(decodeEventTxDiagnostics(value, role, decoded)));
+    TEST_ASSERT_EQUAL_UINT32(37, decoded.id);
+    TEST_ASSERT_EQUAL_INT16(-5, decoded.startResult);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, decoded.counters[29]);
+    OperationRequest request = makeRequest(OperationCategory::DIAGNOSTIC, OperationCode::GET_EVENT_DIAGNOSTICS, 0);
+    request.targetDeviceId = 0x10;
+    setUint32Value(request.value, CapabilityValueType::UNSIGNED_32, 1);
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(validateOperationRequest(VERSION_MINOR_0_2, request)));
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(validateOperationRequest(VERSION_MINOR_0_1, request)));
+    request.value.bytes[0] = 2;
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(validateOperationRequest(VERSION_MINOR_0_2, request)));
+    const uint8_t offsets[] = {0, 1, 2, 3, 4, 5, 6, 7, 38};
+    for (auto offset : offsets) {
+        auto invalid = value; invalid.bytes[offset] = offset == 7 ? 0 : 254;
+        TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(decodeEventTxDiagnostics(invalid, role, decoded)));
+    }
+    auto invalid = value; --invalid.length;
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(decodeEventTxDiagnostics(invalid, role, decoded)));
+    TEST_ASSERT_NOT_EQUAL(raw(PayloadResult::OK), raw(encodeEventTxDiagnostics(DeviceRole::HUB, snapshot, value)));
+    TEST_ASSERT_EQUAL_UINT8(raw(PayloadResult::OK), raw(encodeEventTxDiagnostics(DeviceRole::HUB, {}, value)));
+}
+
 }  // namespace
 
 int main(int, char**) {
     UNITY_BEGIN();
+    RUN_TEST(testEventTxDiagnosticPageCodecBoundsAndVersionGate);
     RUN_TEST(testHelloRequestExactCodecAndValidation);
     RUN_TEST(testHelloResponseExactCodecAndLittleEndianBitmaps);
     RUN_TEST(testHelloResponseRejectsEveryConstrainedField);
@@ -812,5 +907,6 @@ int main(int, char**) {
     RUN_TEST(testMinorTwoHelloVocabularyAndRangeSelection);
     RUN_TEST(testHostEventIdentityAndRecordExactGeometry);
     RUN_TEST(testMinorSpecificEventRequestAndResponseSchemas);
+    RUN_TEST(testEventDiagnosticsRecordIsFixedBoundedAndMinorTwoOnly);
     return UNITY_END();
 }

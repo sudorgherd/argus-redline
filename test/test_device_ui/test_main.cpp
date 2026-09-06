@@ -19,6 +19,21 @@ void assertScreen(DeviceUi::Screen expected, DeviceUi::Screen actual) {
     );
 }
 
+void assertPresentationEqual(
+    const DeviceUi::PresentationSnapshot& expected,
+    const DeviceUi::PresentationSnapshot& actual
+) {
+    assertScreen(expected.screen, actual.screen);
+    TEST_ASSERT_EQUAL_STRING(expected.title, actual.title);
+    TEST_ASSERT_EQUAL_UINT8(expected.rowCount, actual.rowCount);
+    for (uint8_t index = 0; index < expected.rowCount; ++index) {
+        TEST_ASSERT_EQUAL_STRING(expected.rows[index].label,
+            actual.rows[index].label);
+        TEST_ASSERT_EQUAL_STRING(expected.rows[index].value,
+            actual.rows[index].value);
+    }
+}
+
 void assertEditorAction(
     DeviceUi::EditorAction expected,
     DeviceUi::EditorAction actual
@@ -78,6 +93,7 @@ void testDefaultScreenIsHome() {
 void testScreenOrderMatchesApprovedSequence() {
     DeviceUi::Controller controller(0);
     const DeviceUi::Screen expected[] = {
+        DeviceUi::Screen::EVENT_DIAGNOSTICS,
         DeviceUi::Screen::RADIO,
         DeviceUi::Screen::DEVICE,
         DeviceUi::Screen::LAST_PACKET,
@@ -86,22 +102,22 @@ void testScreenOrderMatchesApprovedSequence() {
         DeviceUi::Screen::HOME
     };
 
-    for (uint8_t index = 0; index < 6; index++) {
+    for (uint8_t index = 0; index < 7; index++) {
         controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, index + 1);
         assertScreen(expected[index], controller.screen());
     }
 }
 
-void testSixShortPressesWrapExactlyHome() {
+void testSevenShortPressesWrapExactlyHome() {
     DeviceUi::Controller controller(0);
-    for (uint8_t index = 0; index < 6; index++) {
+    for (uint8_t index = 0; index < 7; index++) {
         controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, index + 1);
     }
     assertScreen(DeviceUi::Screen::HOME, controller.screen());
 }
 
 void testLongPressReturnsHomeFromEveryNonHomeScreen() {
-    for (uint8_t distance = 1; distance < 6; distance++) {
+    for (uint8_t distance = 1; distance < 7; distance++) {
         DeviceUi::Controller controller(0);
         for (uint8_t index = 0; index < distance; index++) {
             controller.handle(
@@ -143,6 +159,8 @@ void testLiveScreenClassificationIsExact() {
     TEST_ASSERT_TRUE(DeviceUi::isLiveScreen(DeviceUi::Screen::LAST_PACKET));
     TEST_ASSERT_TRUE(DeviceUi::isLiveScreen(DeviceUi::Screen::DIAGNOSTICS));
     TEST_ASSERT_FALSE(DeviceUi::isLiveScreen(DeviceUi::Screen::ABOUT));
+    TEST_ASSERT_TRUE(DeviceUi::isLiveScreen(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS));
 }
 
 void testInitialStateIsAwakeDirtyAndImmediatelyRenderable() {
@@ -277,7 +295,7 @@ void testSwitchingToLiveScreenRequestsImmediateDirtyRender() {
     DeviceUi::Controller controller(0);
     renderAndRecord(controller, 0);
     controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 100);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, controller.screen());
     TEST_ASSERT_TRUE(controller.dirty());
     assertAction(DeviceUi::UiAction::RENDER, controller.update(100));
 }
@@ -400,7 +418,7 @@ void testWakeShortGestureIsSuppressedThenNextGestureNavigates() {
     assertScreen(DeviceUi::Screen::HOME, controller.screen());
 
     shortPress(controller, 32000);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, controller.screen());
 }
 
 void testWakeLongGestureIsFullySuppressed() {
@@ -411,7 +429,7 @@ void testWakeLongGestureIsFullySuppressed() {
     controller.handle(DeviceInput::ButtonEvent::RELEASE, 31900);
     assertScreen(DeviceUi::Screen::HOME, controller.screen());
     shortPress(controller, 32000);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, controller.screen());
 }
 
 void testWakeResetsTimeoutAndPreservesSelectedScreen() {
@@ -421,7 +439,7 @@ void testWakeResetsTimeoutAndPreservesSelectedScreen() {
     renderAndRecord(controller, 100);
     assertAction(DeviceUi::UiAction::DISPLAY_OFF, controller.update(30100));
     controller.handle(DeviceInput::ButtonEvent::PRESS, 31000);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, controller.screen());
     assertAction(
         DeviceUi::UiAction::DISPLAY_ON_AND_RENDER,
         controller.update(31000)
@@ -490,7 +508,7 @@ void testControllersRemainIndependent() {
     DeviceUi::Controller second(0);
     first.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 1);
     first.markDirty();
-    assertScreen(DeviceUi::Screen::RADIO, first.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, first.screen());
     assertScreen(DeviceUi::Screen::HOME, second.screen());
     TEST_ASSERT_TRUE(second.displayAwake());
 }
@@ -514,7 +532,7 @@ void testVeryLongEntersEditorFromAwakeNormalUi() {
     DeviceUi::Controller controller(0);
     controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 1);
     enterEditor(controller, 3000);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
+    assertScreen(DeviceUi::Screen::EVENT_DIAGNOSTICS, controller.screen());
     assertEditorItem(
         DeviceUi::EditorItem::DISPLAY_TIMEOUT,
         controller.selectedEditorItem()
@@ -530,17 +548,16 @@ void testLongReturnsHomeBeforeVeryLongEntry() {
     enterEditor(controller, 3000);
 }
 
-void testSleepingWakeGestureCannotEnterEditorAndTailIsSuppressed() {
+void testSleepingVeryLongWakeRemainsSuppressedWithoutNavigationOrEditor() {
     DeviceUi::Controller controller(0);
     sleepController(controller, 30000);
     controller.handle(DeviceInput::ButtonEvent::PRESS, 31000);
     controller.handle(DeviceInput::ButtonEvent::LONG_PRESS, 31800);
     controller.handle(DeviceInput::ButtonEvent::VERY_LONG_PRESS, 34000);
     TEST_ASSERT_FALSE(controller.editorActive());
+    assertScreen(DeviceUi::Screen::HOME, controller.screen());
     controller.handle(DeviceInput::ButtonEvent::RELEASE, 34100);
     assertScreen(DeviceUi::Screen::HOME, controller.screen());
-    controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, 35000);
-    assertScreen(DeviceUi::Screen::RADIO, controller.screen());
 }
 
 void testStartupHeldInputCannotEnterEditor() {
@@ -1061,7 +1078,7 @@ void testDiagnosticsDisabledRendersExplicitlyWithoutChangingOrder() {
     assertRow(snapshot, 0, "STATUS", "DISABLED");
 
     DeviceUi::Controller controller(0);
-    for (uint8_t index = 0; index < 4; ++index) {
+    for (uint8_t index = 0; index < 5; ++index) {
         controller.handle(DeviceInput::ButtonEvent::SHORT_PRESS, index + 1);
     }
     assertScreen(DeviceUi::Screen::DIAGNOSTICS, controller.screen());
@@ -1120,7 +1137,8 @@ void testEveryScreenBuildsWithMatchingIdAndBoundedRows() {
         DeviceUi::Screen::DEVICE,
         DeviceUi::Screen::LAST_PACKET,
         DeviceUi::Screen::DIAGNOSTICS,
-        DeviceUi::Screen::ABOUT
+        DeviceUi::Screen::ABOUT,
+        DeviceUi::Screen::EVENT_DIAGNOSTICS
     };
     const DeviceUi::PresentationInput input = makePresentationInput();
     for (DeviceUi::Screen screen : screens) {
@@ -1644,6 +1662,36 @@ void testHubAndNodePresentationInputsRemainIndependent() {
     );
 }
 
+void testEventDetailInputCannotAlterExistingQualifiedScreens() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    const DeviceUi::Screen screens[] = {
+        DeviceUi::Screen::HOME,
+        DeviceUi::Screen::DIAGNOSTICS,
+        DeviceUi::Screen::LAST_PACKET
+    };
+    DeviceUi::PresentationSnapshot before[3];
+    for (uint8_t index = 0; index < 3; ++index)
+        before[index] = DeviceUi::buildPresentation(screens[index], input);
+
+    input.eventDetail.custodyCount = 8;
+    input.eventDetail.capacity = 8;
+    input.eventDetail.activeCount = 4;
+    input.eventDetail.consumedCount = 4;
+    input.eventDetail.recordAvailable = true;
+    input.eventDetail.state = RuntimeState::EventDetailState::ACTIVE;
+    input.eventDetail.identity = {0x10, 0x11223344U, 0x01020304U};
+    input.eventDetail.family = 0x40;
+    input.eventDetail.attemptsUsed = 5;
+    input.eventDetail.attemptsMaximum = 5;
+    input.eventDetail.lastProducer.result =
+        RuntimeState::EventProducerResult::CREATED;
+
+    for (uint8_t index = 0; index < 3; ++index) {
+        assertPresentationEqual(before[index],
+            DeviceUi::buildPresentation(screens[index], input));
+    }
+}
+
 void testNodeEventHomePresentationIsBoundedAndActionable() {
     DeviceUi::PresentationInput input = makePresentationInput(RuntimeState::DeviceRole::NODE);
     input.event.queuedCount = 8;
@@ -1677,13 +1725,113 @@ void testHubEventHomePresentationShowsCustodyAndEvidence() {
     assertRow(snapshot, 4, "POLL/USE", "8/9");
 }
 
+void testNodeEventDiagnosticsEmptyPendingAndRetryStates() {
+    DeviceUi::PresentationInput input =
+        makePresentationInput(RuntimeState::DeviceRole::NODE);
+    input.eventDetail.capacity = 8;
+    DeviceUi::PresentationSnapshot snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    TEST_ASSERT_EQUAL_STRING("EVENT DIAG", snapshot.title);
+    assertRow(snapshot, 0, "EV", "0/8");
+    assertRow(snapshot, 1, "STATE", "EMPTY");
+    assertRow(snapshot, 2, "LIFE/PR", "--/NONE");
+
+    input.eventDetail.custodyCount = 1;
+    input.eventDetail.recordAvailable = true;
+    input.eventDetail.state = RuntimeState::EventDetailState::WAIT_ADMISSION;
+    input.eventDetail.identity = {0x10, 0x11223344U, 0x01020304U};
+    input.eventDetail.family = 0x40;
+    input.eventDetail.attemptsUsed = 2;
+    input.eventDetail.attemptsMaximum = 5;
+    input.eventDetail.waitingForAdmission = true;
+    input.eventDetail.remainingLifetimeAvailable = true;
+    input.eventDetail.remainingLifetimeSeconds = 3421;
+    input.eventDetail.lastProducer.result =
+        RuntimeState::EventProducerResult::CREATED;
+    snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "EV", "1/8");
+    assertRow(snapshot, 1, "SRC/E", "10:11223344");
+    assertRow(snapshot, 2, "ID/FAM", "01020304/40");
+    assertRow(snapshot, 3, "TRY/ST", "2/5 WAIT ACK");
+    assertRow(snapshot, 4, "LIFE/PR", "3421/OK");
+
+    input.eventDetail.state = RuntimeState::EventDetailState::BACKOFF;
+    input.eventDetail.waitingForAdmission = false;
+    input.eventDetail.waitingForRetry = true;
+    snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(snapshot, 3, "TRY/ST", "2/5 RETRY");
+}
+
+void testHubEventDiagnosticsEmptyActiveAndConsumedStates() {
+    DeviceUi::PresentationInput input = makePresentationInput();
+    input.eventDetail.capacity = 8;
+    DeviceUi::PresentationSnapshot snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "ACT/CON", "0/0/8");
+    assertRow(snapshot, 1, "STATE", "EMPTY");
+
+    input.eventDetail.custodyCount = 2;
+    input.eventDetail.activeCount = 1;
+    input.eventDetail.consumedCount = 1;
+    input.eventDetail.recordAvailable = true;
+    input.eventDetail.state = RuntimeState::EventDetailState::ACTIVE;
+    input.eventDetail.identity = {0x10, 0x11223344U, 0x01020304U};
+    input.eventDetail.family = 0x44;
+    input.eventDetail.admissionOrdinalAvailable = true;
+    input.eventDetail.admissionOrdinal = 42;
+    input.eventDetail.counters.successfulAdmissions = 2;
+    input.eventDetail.counters.duplicateRetransmissions = 3;
+    input.eventDetail.counters.identityContentMismatches = 4;
+    snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(snapshot, 0, "ACT/CON", "1/1/8");
+    assertRow(snapshot, 3, "ORD/ST", "42 ACTIVE");
+    assertRow(snapshot, 4, "ADM/D/M", "2/3/4");
+
+    input.eventDetail.activeCount = 0;
+    input.eventDetail.consumedCount = 2;
+    input.eventDetail.state = RuntimeState::EventDetailState::CONSUMED;
+    snapshot = DeviceUi::buildPresentation(
+        DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(snapshot, 3, "ORD/ST", "42 CONSUMED");
+}
+
+void testReclaimedEventKeepsCompactTxEvidenceOnlyOnEventScreen() {
+    auto input = makePresentationInput(RuntimeState::DeviceRole::NODE);
+    const auto homeBefore = DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
+    const auto diagBefore = DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    const auto packetBefore = DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input);
+    input.eventDetail.capacity = 8;
+    auto& tx = input.eventDetail.txLifecycle;
+    tx.available = true; tx.id = 37; tx.attempt = 5;
+    using C = EventTxDiagnostics::Counter;
+    tx.counters[(uint8_t)C::START_ACCEPTED] = 5;
+    tx.counters[(uint8_t)C::DIO_EVENT] = 4;
+    tx.counters[(uint8_t)C::DIO_CLASSIFIED_EVENT] = 3;
+    const auto before = input.eventDetail;
+    const auto screen = DeviceUi::buildPresentation(DeviceUi::Screen::EVENT_DIAGNOSTICS, input);
+    assertRow(screen, 0, "EV", "0/8");
+    assertRow(screen, 3, "TX/D/C", "5/4/3");
+    assertRow(screen, 4, "LAST/T", "00000025/5");
+    const auto homeAfter = DeviceUi::buildPresentation(DeviceUi::Screen::HOME, input);
+    const auto diagAfter = DeviceUi::buildPresentation(DeviceUi::Screen::DIAGNOSTICS, input);
+    const auto packetAfter = DeviceUi::buildPresentation(DeviceUi::Screen::LAST_PACKET, input);
+    TEST_ASSERT_EQUAL_MEMORY(&homeBefore, &homeAfter, sizeof(homeBefore));
+    TEST_ASSERT_EQUAL_MEMORY(&diagBefore, &diagAfter, sizeof(diagBefore));
+    TEST_ASSERT_EQUAL_MEMORY(&packetBefore, &packetAfter, sizeof(packetBefore));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &input.eventDetail, sizeof(before));
+}
+
 }  // namespace
 
 int main(int, char**) {
     UNITY_BEGIN();
+    RUN_TEST(testReclaimedEventKeepsCompactTxEvidenceOnlyOnEventScreen);
     RUN_TEST(testDefaultScreenIsHome);
     RUN_TEST(testScreenOrderMatchesApprovedSequence);
-    RUN_TEST(testSixShortPressesWrapExactlyHome);
+    RUN_TEST(testSevenShortPressesWrapExactlyHome);
     RUN_TEST(testLongPressReturnsHomeFromEveryNonHomeScreen);
     RUN_TEST(testLongPressOnHomeLeavesHomeSelected);
     RUN_TEST(testNonNavigationEventsDoNotNavigateWhileAwake);
@@ -1723,7 +1871,7 @@ int main(int, char**) {
     RUN_TEST(testControllersRemainIndependent);
     RUN_TEST(testVeryLongEntersEditorFromAwakeNormalUi);
     RUN_TEST(testLongReturnsHomeBeforeVeryLongEntry);
-    RUN_TEST(testSleepingWakeGestureCannotEnterEditorAndTailIsSuppressed);
+    RUN_TEST(testSleepingVeryLongWakeRemainsSuppressedWithoutNavigationOrEditor);
     RUN_TEST(testStartupHeldInputCannotEnterEditor);
     RUN_TEST(testEntryCopiesCompleteCurrentSettingsAndStartsClean);
     RUN_TEST(testEditorItemOrderWrapsWithoutRequests);
@@ -1774,7 +1922,10 @@ int main(int, char**) {
     RUN_TEST(testEveryErrorClassAndUnknownFallbackMapsDeterministically);
     RUN_TEST(testAboutUsesSuppliedMetadataExactlyWithoutFutureVersion);
     RUN_TEST(testHubAndNodePresentationInputsRemainIndependent);
+    RUN_TEST(testEventDetailInputCannotAlterExistingQualifiedScreens);
     RUN_TEST(testNodeEventHomePresentationIsBoundedAndActionable);
     RUN_TEST(testHubEventHomePresentationShowsCustodyAndEvidence);
+    RUN_TEST(testNodeEventDiagnosticsEmptyPendingAndRetryStates);
+    RUN_TEST(testHubEventDiagnosticsEmptyActiveAndConsumedStates);
     return UNITY_END();
 }

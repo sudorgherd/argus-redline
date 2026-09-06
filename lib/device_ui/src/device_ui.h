@@ -16,15 +16,23 @@ enum class Screen : uint8_t {
     DEVICE,
     LAST_PACKET,
     DIAGNOSTICS,
-    ABOUT
+    ABOUT,
+    EVENT_DIAGNOSTICS
 };
 
 inline bool isLiveScreen(Screen screen) {
     return (
         screen == Screen::RADIO ||
         screen == Screen::LAST_PACKET ||
-        screen == Screen::DIAGNOSTICS
+        screen == Screen::DIAGNOSTICS ||
+        screen == Screen::EVENT_DIAGNOSTICS
     );
+}
+
+// HOME and EVENT_DIAGNOSTICS short presses are navigation-only. Every other
+// normal screen retains the existing awake SHORT_PRESS BUTTON producer.
+inline bool isButtonProducerScreen(Screen screen) {
+    return screen != Screen::HOME && screen != Screen::EVENT_DIAGNOSTICS;
 }
 
 enum class UiAction : uint8_t {
@@ -119,6 +127,7 @@ struct PresentationInput {
     RuntimeState::LastInboundPacket lastInboundPacket = {};
     RuntimeState::DiagnosticCounters counters = {};
     RuntimeState::EventSnapshot event = {};
+    RuntimeState::EventDetailSnapshot eventDetail = {};
     RuntimeState::ErrorClass lastError = RuntimeState::ErrorClass::NONE;
     bool diagnosticsEnabled = true;
     ConfigurationStatus configurationStatus =
@@ -193,6 +202,36 @@ inline const char* healthLabel(RuntimeState::Health health) {
             return "DEGRADED";
         case RuntimeState::Health::ERROR:
             return "ERROR";
+    }
+    return "UNKNOWN";
+}
+
+inline const char* eventStateLabel(RuntimeState::EventDetailState state) {
+    switch (state) {
+        case RuntimeState::EventDetailState::EMPTY: return "EMPTY";
+        case RuntimeState::EventDetailState::QUEUED: return "QUEUED";
+        case RuntimeState::EventDetailState::READY: return "READY";
+        case RuntimeState::EventDetailState::TX_PREPARE: return "TX PREP";
+        case RuntimeState::EventDetailState::TRANSMITTING: return "TX";
+        case RuntimeState::EventDetailState::WAIT_ADMISSION: return "WAIT ACK";
+        case RuntimeState::EventDetailState::BACKOFF: return "RETRY";
+        case RuntimeState::EventDetailState::RELEASED: return "RELEASED";
+        case RuntimeState::EventDetailState::FAILED: return "FAILED";
+        case RuntimeState::EventDetailState::EXPIRED: return "EXPIRED";
+        case RuntimeState::EventDetailState::ACTIVE: return "ACTIVE";
+        case RuntimeState::EventDetailState::CONSUMED: return "CONSUMED";
+    }
+    return "UNKNOWN";
+}
+
+inline const char* producerResultLabel(RuntimeState::EventProducerResult result) {
+    switch (result) {
+        case RuntimeState::EventProducerResult::NONE: return "NONE";
+        case RuntimeState::EventProducerResult::CREATED: return "OK";
+        case RuntimeState::EventProducerResult::QUEUE_FULL: return "FULL";
+        case RuntimeState::EventProducerResult::INVALID_EVENT: return "INVALID";
+        case RuntimeState::EventProducerResult::STORAGE_FAILURE: return "STOR FAIL";
+        case RuntimeState::EventProducerResult::SUPPRESSED: return "SUPPRESS";
     }
     return "UNKNOWN";
 }
@@ -656,6 +695,79 @@ inline PresentationSnapshot buildPresentation(
             break;
         }
 
+        case Screen::EVENT_DIAGNOSTICS: {
+            copyText(snapshot.title, "EVENT DIAG");
+            const RuntimeState::EventDetailSnapshot& event = input.eventDetail;
+            if (input.role == RuntimeState::DeviceRole::NODE) {
+                snprintf(value, sizeof(value), "%u/%u", event.custodyCount,
+                    event.capacity);
+                addRow(snapshot, "EV", value);
+                if (event.recordAvailable) {
+                    snprintf(value, sizeof(value), "%02X:%08lX",
+                        event.identity.sourceDeviceId,
+                        static_cast<unsigned long>(event.identity.eventEpoch));
+                    addRow(snapshot, "SRC/E", value);
+                    snprintf(value, sizeof(value), "%08lX/%02X",
+                        static_cast<unsigned long>(event.identity.eventId),
+                        event.family);
+                    addRow(snapshot, "ID/FAM", value);
+                    snprintf(value, sizeof(value), "%u/%u %s",
+                        event.attemptsUsed, event.attemptsMaximum,
+                        eventStateLabel(event.state));
+                    addRow(snapshot, "TRY/ST", value);
+                } else {
+                    addRow(snapshot, "STATE", eventStateLabel(event.state));
+                }
+                if (event.remainingLifetimeAvailable) {
+                    snprintf(value, sizeof(value), "%lu/%s",
+                        static_cast<unsigned long>(event.remainingLifetimeSeconds),
+                        producerResultLabel(event.lastProducer.result));
+                } else {
+                    snprintf(value, sizeof(value), "--/%s",
+                        producerResultLabel(event.lastProducer.result));
+                }
+                addRow(snapshot, "LIFE/PR", value);
+                if (!event.recordAvailable && event.txLifecycle.available) {
+                    const auto& tx = event.txLifecycle;
+                    using C = EventTxDiagnostics::Counter;
+                    snprintf(value, sizeof(value), "%u/%u/%u",
+                        tx.counters[static_cast<uint8_t>(C::START_ACCEPTED)],
+                        tx.counters[static_cast<uint8_t>(C::DIO_EVENT)],
+                        tx.counters[static_cast<uint8_t>(C::DIO_CLASSIFIED_EVENT)]);
+                    addRow(snapshot, "TX/D/C", value);
+                    snprintf(value, sizeof(value), "%08lX/%u",
+                        static_cast<unsigned long>(tx.id), tx.attempt);
+                    addRow(snapshot, "LAST/T", value);
+                }
+            } else {
+                snprintf(value, sizeof(value), "%u/%u/%u",
+                    event.activeCount, event.consumedCount, event.capacity);
+                addRow(snapshot, "ACT/CON", value);
+                if (event.recordAvailable) {
+                    snprintf(value, sizeof(value), "%02X:%08lX",
+                        event.identity.sourceDeviceId,
+                        static_cast<unsigned long>(event.identity.eventEpoch));
+                    addRow(snapshot, "SRC/E", value);
+                    snprintf(value, sizeof(value), "%08lX/%02X",
+                        static_cast<unsigned long>(event.identity.eventId),
+                        event.family);
+                    addRow(snapshot, "ID/FAM", value);
+                    snprintf(value, sizeof(value), "%lu %s",
+                        static_cast<unsigned long>(event.admissionOrdinal),
+                        eventStateLabel(event.state));
+                    addRow(snapshot, "ORD/ST", value);
+                } else {
+                    addRow(snapshot, "STATE", eventStateLabel(event.state));
+                }
+                snprintf(value, sizeof(value), "%lu/%lu/%lu",
+                    static_cast<unsigned long>(event.counters.successfulAdmissions),
+                    static_cast<unsigned long>(event.counters.duplicateRetransmissions),
+                    static_cast<unsigned long>(event.counters.identityContentMismatches));
+                addRow(snapshot, "ADM/D/M", value);
+            }
+            break;
+        }
+
         case Screen::ABOUT:
             copyText(snapshot.title, "ARGUS REDLINE");
             addRow(snapshot, "FW", input.firmwareVersion);
@@ -1021,6 +1133,8 @@ private:
     static Screen nextScreen(Screen screen) {
         switch (screen) {
             case Screen::HOME:
+                return Screen::EVENT_DIAGNOSTICS;
+            case Screen::EVENT_DIAGNOSTICS:
                 return Screen::RADIO;
             case Screen::RADIO:
                 return Screen::DEVICE;

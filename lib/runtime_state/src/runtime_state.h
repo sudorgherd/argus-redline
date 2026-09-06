@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "device_capabilities.h"
+#include "event_tx_diagnostics.h"
 
 namespace RuntimeState {
 
@@ -93,6 +94,78 @@ struct EventSnapshot {
     uint8_t activeCount = 0;
     bool hubUnavailable = false;
     bool persistenceDegraded = false;
+};
+
+enum class EventDetailState : uint8_t {
+    EMPTY = 0,
+    QUEUED = 1,
+    READY = 2,
+    TX_PREPARE = 3,
+    TRANSMITTING = 4,
+    WAIT_ADMISSION = 5,
+    BACKOFF = 6,
+    RELEASED = 7,
+    FAILED = 8,
+    EXPIRED = 9,
+    ACTIVE = 10,
+    CONSUMED = 11
+};
+
+enum class EventProducerKind : uint8_t {
+    NONE = 0,
+    BUTTON = 1,
+    SENSOR_THRESHOLD = 2,
+    MANUAL_CHECK_IN = 3
+};
+
+enum class EventProducerResult : uint8_t {
+    NONE = 0,
+    CREATED = 1,
+    QUEUE_FULL = 2,
+    INVALID_EVENT = 3,
+    STORAGE_FAILURE = 4,
+    SUPPRESSED = 5
+};
+
+struct EventIdentitySnapshot {
+    uint8_t sourceDeviceId = 0;
+    uint32_t eventEpoch = 0;
+    uint32_t eventId = 0;
+};
+
+struct EventProducerSnapshot {
+    EventProducerKind kind = EventProducerKind::NONE;
+    EventProducerResult result = EventProducerResult::NONE;
+    bool identityAvailable = false;
+    EventIdentitySnapshot identity = {};
+};
+
+// Built on demand from the authoritative Node store/delivery controller or
+// Hub ledger. Only lastProducer is retained, volatile diagnostic-only state.
+struct EventDetailSnapshot {
+    EventTxDiagnostics::Snapshot txLifecycle;
+    uint8_t custodyCount = 0;
+    uint8_t capacity = 0;
+    uint8_t activeCount = 0;
+    uint8_t consumedCount = 0;
+    bool recordAvailable = false;
+    EventDetailState state = EventDetailState::EMPTY;
+    EventIdentitySnapshot identity = {};
+    uint8_t family = 0;
+    uint8_t attemptsUsed = 0;
+    uint8_t attemptsMaximum = 0;
+    bool waitingForAdmission = false;
+    bool waitingForRetry = false;
+    bool remainingLifetimeAvailable = false;
+    uint32_t remainingLifetimeSeconds = 0;
+    bool admissionOrdinalAvailable = false;
+    uint32_t admissionOrdinal = 0;
+    bool recentAdmissionAvailable = false;
+    EventIdentitySnapshot recentAdmission = {};
+    bool persistenceDegraded = false;
+    bool hubUnavailable = false;
+    EventProducerSnapshot lastProducer = {};
+    EventDiagnosticCounters counters = {};
 };
 
 enum class EventDiagnostic : uint8_t {
@@ -225,6 +298,23 @@ public:
     }
 
     const EventSnapshot& eventSnapshot() const { return eventSnapshot_; }
+    const EventProducerSnapshot& lastEventProducer() const {
+        return lastEventProducer_;
+    }
+    void recordEventProducer(
+        EventProducerKind kind,
+        EventProducerResult result,
+        const EventIdentitySnapshot* identity = nullptr
+    ) {
+        lastEventProducer_ = {};
+        lastEventProducer_.kind = kind;
+        lastEventProducer_.result = result;
+        if (identity != nullptr && identity->sourceDeviceId != 0 &&
+            identity->eventEpoch != 0 && identity->eventId != 0) {
+            lastEventProducer_.identityAvailable = true;
+            lastEventProducer_.identity = *identity;
+        }
+    }
     void setEventQueue(uint8_t count, uint8_t capacity) {
         eventSnapshot_.queuedCount = count > capacity ? capacity : count;
         eventSnapshot_.queueCapacity = capacity;
@@ -342,6 +432,7 @@ private:
     uint32_t lastActivityAtMs_ = 0;
     DiagnosticCounters counters_;
     EventSnapshot eventSnapshot_;
+    EventProducerSnapshot lastEventProducer_;
     bool capabilityDiagnosticsAvailable_ = false;
     DeviceCapabilities::CapabilityDiagnosticsSnapshot
         capabilityDiagnostics_ = {};

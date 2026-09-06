@@ -32,8 +32,11 @@ enum class AttemptResult : uint8_t {
 
 class Policy {
 public:
-    Status recover(NodeEventStore::Store& store, uint32_t nowMilliseconds) {
+    Status recover(NodeEventStore::Store& store, uint32_t nowMilliseconds,
+                   EventTxDiagnostics::Observer* observer = nullptr) {
         reset();
+        observer_ = observer;
+        if (observer_) observer_->clock(nowMilliseconds);
         store_ = &store;
         if (!store.healthy()) return fail(Status::STORE_DEGRADED);
 
@@ -48,6 +51,8 @@ public:
             if (mutation != NodeEventStore::MutationStatus::OK) {
                 return fail(Status::DEBIT_FAILURE);
             }
+            if (observer_ && record->state == EventRecords::NodeState::EXPIRED)
+                observer_->note(EventTxDiagnostics::Counter::EXPIRED_QUEUED, nowMilliseconds);
         }
 
         initializeTrackedSlots(nowMilliseconds);
@@ -73,6 +78,7 @@ public:
     }
 
     Status service(uint32_t nowMilliseconds) {
+        if (observer_) observer_->clock(nowMilliseconds);
         if (!ready_ || store_ == nullptr || !store_->healthy()) {
             return fail(Status::STORE_DEGRADED);
         }
@@ -204,6 +210,7 @@ private:
     }
 
     NodeEventStore::Store* store_ = nullptr;
+    EventTxDiagnostics::Observer* observer_ = nullptr;
     SlotRuntime runtime_[NodeEventStore::NODE_EVENT_CAPACITY] = {};
     bool ready_ = false;
     Status status_ = Status::STORE_DEGRADED;
@@ -251,14 +258,16 @@ public:
     ControllerResult recover(NodeEventStore::Store& store, uint8_t sourceDeviceId,
                              uint8_t hubDeviceId, SequenceSource& sequences,
                              JitterSource& jitter, uint32_t nowMilliseconds,
-                             ::RuntimeState::State* diagnostics = nullptr) {
+                             ::RuntimeState::State* diagnostics = nullptr,
+                             EventTxDiagnostics::Observer* observer = nullptr) {
         reset();
+        observer_ = observer;
         diagnostics_ = diagnostics;
         if (!EventProtocol::hasValidEndpoints(sourceDeviceId, hubDeviceId))
             return result(ControllerStatus::INVALID_CONFIGURATION);
         store_ = &store; sequences_ = &sequences; jitter_ = &jitter;
         source_ = sourceDeviceId; destination_ = hubDeviceId;
-        if (policy_.recover(store, nowMilliseconds) != Status::READY)
+        if (policy_.recover(store, nowMilliseconds, observer_) != Status::READY)
             return degrade(ControllerStatus::POLICY_FAILURE, false);
         initialized_ = true;
         loadHead();
@@ -279,18 +288,23 @@ public:
             case RuntimeState::QUEUED:
                 if (record()->attemptsUsed >= EventRecords::MAX_ATTEMPTS) {
                     if (!markFailed()) return degrade(ControllerStatus::STORAGE_FAILURE, true);
-                } else if (!synchronousWork) state_ = RuntimeState::READY;
+                } else if (!synchronousWork) changeState(RuntimeState::READY, nowMilliseconds);
                 break;
             case RuntimeState::READY:
                 if (synchronousWork) state_ = RuntimeState::QUEUED;
                 break;
             case RuntimeState::WAIT_ADMISSION:
-                if (elapsed(nowMilliseconds, deadlineOrigin_) >= ADMISSION_TIMEOUT_MILLISECONDS)
+                if (elapsed(nowMilliseconds, deadlineOrigin_) >= ADMISSION_TIMEOUT_MILLISECONDS) {
+                    note(EventTxDiagnostics::Counter::ADMISSION_TIMEOUT, nowMilliseconds);
                     return failedAttempt(nowMilliseconds, true);
+                }
                 break;
             case RuntimeState::BACKOFF:
-                if (elapsed(nowMilliseconds, deadlineOrigin_) >= deadlineDuration_)
-                    state_ = synchronousWork ? RuntimeState::QUEUED : RuntimeState::READY;
+                if (elapsed(nowMilliseconds, deadlineOrigin_) >= deadlineDuration_) {
+                    note(EventTxDiagnostics::Counter::BACKOFF_DUE, nowMilliseconds);
+                    changeState(synchronousWork ? RuntimeState::QUEUED : RuntimeState::READY,
+                        nowMilliseconds);
+                }
                 break;
             default: break;
         }
@@ -326,7 +340,9 @@ public:
         action.type = RadioActionType::TRANSMIT;
         if (!EventProtocol::encodeEvent(attemptEvent_, action.bytes, sizeof(action.bytes), action.length))
             return degrade(ControllerStatus::ENCODE_FAILURE, true);
-        correlationValid_ = true; state_ = RuntimeState::TX;
+        if (observer_) observer_->attempt(source_, current->eventEpoch,
+            current->eventId, current->attemptsUsed);
+        correlationValid_ = true; changeState(RuntimeState::TX, nowMilliseconds);
         return {ControllerStatus::OK, action};
     }
 
@@ -342,10 +358,11 @@ public:
         return receiveResult();
     }
     ControllerResult txCompleted(uint32_t nowMilliseconds) {
+        if (observer_) observer_->completed(nowMilliseconds);
         if (!usable() || state_ != RuntimeState::TX) return result(ControllerStatus::INVALID_STATE);
         if (!serviceLifetime(nowMilliseconds)) return degradedResult_;
         if (state_ != RuntimeState::EXPIRED) {
-            state_ = RuntimeState::WAIT_ADMISSION;
+            changeState(RuntimeState::WAIT_ADMISSION, nowMilliseconds);
             deadlineOrigin_ = nowMilliseconds; deadlineDuration_ = ADMISSION_TIMEOUT_MILLISECONDS;
         }
         return receiveResult();
@@ -358,9 +375,12 @@ public:
         if (!serviceLifetime(nowMilliseconds)) return degradedResult_;
         if (state_ == RuntimeState::EXPIRED) return receiveResult();
         EventProtocol::AdmissionResponse response = {};
-        if (!EventProtocol::decodeAdmissionResponse(bytes, length, response) ||
-            !correlationValid_ || !EventProtocol::matchesEvent(response, attemptEvent_))
+        if (!EventProtocol::decodeAdmissionResponse(bytes, length, response))
             return receiveResult();
+        if (observer_) observer_->admission(static_cast<uint8_t>(response.status), nowMilliseconds);
+        if (!correlationValid_ || !EventProtocol::matchesEvent(response, attemptEvent_))
+            return receiveResult();
+        note(EventTxDiagnostics::Counter::ACK_MATCHED, nowMilliseconds);
         switch (response.status) {
             case EventProtocol::AdmissionStatus::ADMITTED:
                 if (store_->releaseQueued(activeSlot_) != NodeEventStore::MutationStatus::OK)
@@ -399,11 +419,39 @@ public:
     uint32_t deadlineOrigin() const { return deadlineOrigin_; }
     uint32_t deadlineDuration() const { return deadlineDuration_; }
     const EventProtocol::Event& attemptEvent() const { return attemptEvent_; }
+    uint32_t effectiveRemainingSeconds() const {
+        return active_ ? policy_.effectiveRemainingSeconds(activeSlot_) : 0;
+    }
     void successfulHubExchange() {
         if (diagnostics_ != nullptr) diagnostics_->setHubUnavailable(false);
     }
 
 private:
+    void note(EventTxDiagnostics::Counter counter, uint32_t now) {
+        if (observer_) observer_->note(counter, now);
+    }
+    void changeState(RuntimeState next, uint32_t now) {
+        if (next != state_) {
+            using C = EventTxDiagnostics::Counter;
+            if (next == RuntimeState::TX) note(C::TX_ENTERED, now);
+            if (next == RuntimeState::WAIT_ADMISSION) note(C::WAIT_ENTERED, now);
+            if (next == RuntimeState::BACKOFF) note(C::BACKOFF_ENTERED, now);
+            if (next == RuntimeState::READY && record() && record()->attemptsUsed > 0)
+                note(C::RETRY_READY, now);
+            if (next == RuntimeState::EXPIRED) {
+                switch (state_) {
+                    case RuntimeState::QUEUED: note(C::EXPIRED_QUEUED, now); break;
+                    case RuntimeState::READY: note(C::EXPIRED_READY, now); break;
+                    case RuntimeState::TX_PREPARE: note(C::EXPIRED_PREPARE, now); break;
+                    case RuntimeState::TX: note(C::EXPIRED_TX, now); break;
+                    case RuntimeState::WAIT_ADMISSION: note(C::EXPIRED_WAIT, now); break;
+                    case RuntimeState::BACKOFF: note(C::EXPIRED_BACKOFF, now); break;
+                    default: break;
+                }
+            }
+        }
+        state_ = next;
+    }
     static uint32_t elapsed(uint32_t now, uint32_t then) { return now - then; }
     const EventRecords::NodeRecord* record() const {
         return active_ && store_ != nullptr ? store_->recordAt(activeSlot_) : nullptr;
@@ -419,10 +467,25 @@ private:
         if (store_ && store_->queuedAt(0, &slot)) { active_ = true; activeSlot_ = slot; state_ = RuntimeState::QUEUED; }
     }
     bool serviceLifetime(uint32_t now) {
+        bool queued[NodeEventStore::NODE_EVENT_CAPACITY] = {};
+        if (observer_) {
+            for (uint8_t slot = 0; slot < NodeEventStore::NODE_EVENT_CAPACITY; ++slot) {
+                const auto* r = store_->recordAt(slot);
+                queued[slot] = r && r->state == EventRecords::NodeState::QUEUED;
+            }
+        }
         if (policy_.service(now) != Status::READY) { degrade(ControllerStatus::POLICY_FAILURE, true); return false; }
+        if (observer_) {
+            for (uint8_t slot = 0; slot < NodeEventStore::NODE_EVENT_CAPACITY; ++slot) {
+                const auto* r = store_->recordAt(slot);
+                if (queued[slot] && slot != activeSlot_ && r &&
+                    r->state == EventRecords::NodeState::EXPIRED)
+                    note(EventTxDiagnostics::Counter::EXPIRED_QUEUED, now);
+            }
+        }
         const EventRecords::NodeRecord* current = record();
         if (current && current->state == EventRecords::NodeState::EXPIRED) {
-            state_ = RuntimeState::EXPIRED; clearAttempt();
+            changeState(RuntimeState::EXPIRED, now); clearAttempt();
         }
         return true;
     }
@@ -442,7 +505,7 @@ private:
                 return degrade(ControllerStatus::INVALID_CONFIGURATION, true);
             static const uint32_t base[] = {1000U, 2000U, 4000U, 8000U};
             deadlineOrigin_ = now; deadlineDuration_ = base[current->attemptsUsed - 1U] + jitter;
-            state_ = RuntimeState::BACKOFF;
+            changeState(RuntimeState::BACKOFF, now);
         }
         return receiveResult();
     }
@@ -473,6 +536,7 @@ private:
     EventProtocol::Event attemptEvent_ = {};
     ControllerResult degradedResult_ = {};
     ::RuntimeState::State* diagnostics_ = nullptr;
+    EventTxDiagnostics::Observer* observer_ = nullptr;
 };
 
 }  // namespace NodeEventDelivery

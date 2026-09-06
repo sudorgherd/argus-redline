@@ -16,6 +16,8 @@
 #include "capability_role_integration.h"
 #include "esp32_event_storage.h"
 #include "node_event_delivery.h"
+#include "node_event_reclamation.h"
+#include "node_event_service_time.h"
 #include "node_event_radio.h"
 #include "event_producers.h"
 #include <esp_system.h>
@@ -48,6 +50,12 @@ constexpr uint32_t BUTTON_VERY_LONG_PRESS_MS = 3000;
 constexpr uint32_t BUTTON_FEEDBACK_MS = 50;
 
 volatile bool operationDone = false;
+// ISR-only writers for counts; aligned 32-bit foreground reads are observational.
+// The window follows controller TX, independently of mutable radio ownership.
+volatile bool eventTxObservationWindow = false;
+volatile uint32_t dioDuringEventTx = 0;
+volatile uint32_t dioOutsideEventTx = 0;
+EventTxDiagnostics::Observer eventTxObserver;
 
 RuntimeState::State runtimeState(
     RuntimeState::DeviceRole::NODE,
@@ -166,7 +174,18 @@ HostOperationService::AvailabilityProvider hostAvailability() {
 #endif
 
 void IRAM_ATTR setRadioFlag() {
+    if (eventTxObservationWindow) {
+        if (dioDuringEventTx != UINT32_MAX) dioDuringEventTx = dioDuringEventTx + 1U;
+    } else {
+        if (dioOutsideEventTx != UINT32_MAX) dioOutsideEventTx = dioOutsideEventTx + 1U;
+    }
     operationDone = true;
+}
+
+void clearRadioFlag() {
+    eventTxObserver.clearingFlag(operationDone, eventTxObservationWindow,
+        static_cast<uint32_t>(millis()));
+    operationDone = false;
 }
 
 void markPresentationChanged() {
@@ -199,6 +218,95 @@ void setPeerState(DeviceUi::PeerState state) {
     }
 }
 
+RuntimeState::EventDetailState eventDetailState(
+    NodeEventDelivery::RuntimeState state
+) {
+    switch (state) {
+        case NodeEventDelivery::RuntimeState::QUEUED:
+            return RuntimeState::EventDetailState::QUEUED;
+        case NodeEventDelivery::RuntimeState::READY:
+            return RuntimeState::EventDetailState::READY;
+        case NodeEventDelivery::RuntimeState::TX_PREPARE:
+            return RuntimeState::EventDetailState::TX_PREPARE;
+        case NodeEventDelivery::RuntimeState::TX:
+            return RuntimeState::EventDetailState::TRANSMITTING;
+        case NodeEventDelivery::RuntimeState::WAIT_ADMISSION:
+            return RuntimeState::EventDetailState::WAIT_ADMISSION;
+        case NodeEventDelivery::RuntimeState::BACKOFF:
+            return RuntimeState::EventDetailState::BACKOFF;
+        case NodeEventDelivery::RuntimeState::RELEASED:
+            return RuntimeState::EventDetailState::RELEASED;
+        case NodeEventDelivery::RuntimeState::FAILED:
+            return RuntimeState::EventDetailState::FAILED;
+        case NodeEventDelivery::RuntimeState::EXPIRED:
+            return RuntimeState::EventDetailState::EXPIRED;
+    }
+    return RuntimeState::EventDetailState::EMPTY;
+}
+
+RuntimeState::EventDetailSnapshot buildEventDetailSnapshot() {
+    RuntimeState::EventDetailSnapshot detail;
+    const RuntimeState::EventSnapshot& summary = runtimeState.eventSnapshot();
+    detail.custodyCount = static_cast<uint8_t>(nodeEventStore.ownedCount());
+    detail.capacity = static_cast<uint8_t>(NodeEventStore::NODE_EVENT_CAPACITY);
+    detail.persistenceDegraded = summary.persistenceDegraded;
+    detail.hubUnavailable = summary.hubUnavailable;
+    detail.lastProducer = runtimeState.lastEventProducer();
+    detail.counters = summary.counters;
+    detail.txLifecycle = eventTxObserver.snapshot();
+    detail.txLifecycle.controllerState = static_cast<uint8_t>(eventDelivery.state());
+    detail.txLifecycle.radioOwner = static_cast<uint8_t>(eventRadio.owner());
+    const uint32_t eventIrqs = dioDuringEventTx;
+    const uint32_t otherIrqs = dioOutsideEventTx;
+    detail.txLifecycle.counters[static_cast<uint8_t>(EventTxDiagnostics::Counter::DIO_EVENT)] =
+        eventIrqs > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(eventIrqs);
+    detail.txLifecycle.counters[static_cast<uint8_t>(EventTxDiagnostics::Counter::DIO_OTHER)] =
+        otherIrqs > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(otherIrqs);
+
+    uint8_t slot = 0xFF;
+    const EventRecords::NodeRecord* record = nodeEventStore.queuedAt(0, &slot);
+    if (record == nullptr) {
+        for (uint8_t candidate = 0;
+             candidate < NodeEventStore::NODE_EVENT_CAPACITY; ++candidate) {
+            const EventRecords::NodeRecord* owned = nodeEventStore.recordAt(candidate);
+            if (owned != nullptr && owned->state != EventRecords::NodeState::FREE) {
+                record = owned;
+                slot = candidate;
+                break;
+            }
+        }
+    }
+    if (record == nullptr) {
+        if (eventDelivery.state() == NodeEventDelivery::RuntimeState::RELEASED)
+            detail.state = RuntimeState::EventDetailState::RELEASED;
+        return detail;
+    }
+
+    detail.recordAvailable = true;
+    detail.identity = {runtimeState.localId(), record->eventEpoch, record->eventId};
+    detail.family = record->family;
+    detail.attemptsUsed = record->attemptsUsed;
+    detail.attemptsMaximum = EventRecords::MAX_ATTEMPTS;
+    if (record->state == EventRecords::NodeState::FAILED) {
+        detail.state = RuntimeState::EventDetailState::FAILED;
+    } else if (record->state == EventRecords::NodeState::EXPIRED) {
+        detail.state = RuntimeState::EventDetailState::EXPIRED;
+    } else if (eventDelivery.hasActiveEvent() && eventDelivery.activeSlot() == slot) {
+        detail.state = eventDetailState(eventDelivery.state());
+        detail.waitingForAdmission =
+            eventDelivery.state() == NodeEventDelivery::RuntimeState::WAIT_ADMISSION;
+        detail.waitingForRetry =
+            eventDelivery.state() == NodeEventDelivery::RuntimeState::BACKOFF;
+        detail.remainingLifetimeAvailable = true;
+        detail.remainingLifetimeSeconds = eventDelivery.effectiveRemainingSeconds();
+    } else {
+        detail.state = RuntimeState::EventDetailState::QUEUED;
+        detail.remainingLifetimeAvailable = true;
+        detail.remainingLifetimeSeconds = record->remainingActiveSeconds;
+    }
+    return detail;
+}
+
 DeviceUi::PresentationInput buildPresentationInput() {
     DeviceUi::PresentationInput input;
     input.role = runtimeState.role();
@@ -217,6 +325,7 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
     input.event = runtimeState.eventSnapshot();
+    input.eventDetail = buildEventDetailSnapshot();
     input.lastError = runtimeState.lastError();
     input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
     input.configurationStatus = configurationState.status;
@@ -313,6 +422,27 @@ void queueEditorAction() {
     }
 }
 
+void recordProducerEmission(
+    RuntimeState::EventProducerKind kind,
+    const EventProducers::Emission& emission
+) {
+    if (!emission.attempted) return;
+    RuntimeState::EventIdentitySnapshot identity = {};
+    const RuntimeState::EventIdentitySnapshot* identityPointer = nullptr;
+    if (emission.result == EventProducers::CreationResult::ENQUEUED &&
+        eventCreationSink.lastResultAvailable()) {
+        const NodeEventStore::EnqueueResult& result =
+            eventCreationSink.lastResult();
+        identity = {result.identity.sourceDeviceId,
+            result.identity.epoch, result.identity.id};
+        identityPointer = &identity;
+    }
+    runtimeState.recordEventProducer(kind,
+        EventProducers::diagnosticResult(emission.result),
+        identityPointer);
+    markPresentationChanged();
+}
+
 void serviceButton(uint32_t nowMs) {
     const bool pressed = digitalRead(APPLICATION_BUTTON_PIN) == LOW;
     const DeviceInput::ButtonEvents events =
@@ -325,10 +455,21 @@ void serviceButton(uint32_t nowMs) {
         const EventProducers::ButtonContext producerContext = {
             uiController.displayAwake(),
             uiController.editorActive(),
-            uiController.screen() == DeviceUi::Screen::HOME
+            uiController.screen() == DeviceUi::Screen::HOME,
+            DeviceUi::isButtonProducerScreen(uiController.screen())
         };
         const EventProducers::ButtonProductionResult produced =
             buttonEventProducer.observe(events, producerContext, eventCreationSink);
+        recordProducerEmission(RuntimeState::EventProducerKind::BUTTON,
+            produced.button);
+        recordProducerEmission(RuntimeState::EventProducerKind::MANUAL_CHECK_IN,
+            produced.manualCheckIn);
+        if (produced.buttonSuppressed) {
+            runtimeState.recordEventProducer(
+                RuntimeState::EventProducerKind::BUTTON,
+                RuntimeState::EventProducerResult::SUPPRESSED);
+            markPresentationChanged();
+        }
         if ((produced.button.attempted &&
                 produced.button.result == EventProducers::CreationResult::STORAGE_FAILURE) ||
             (produced.manualCheckIn.attempted &&
@@ -350,6 +491,8 @@ void serviceSensorThresholdProducer() {
         capabilityState.analogInputNormalized,
         eventCreationSink
     );
+    recordProducerEmission(RuntimeState::EventProducerKind::SENSOR_THRESHOLD,
+        produced);
     if (produced.attempted &&
         produced.result == EventProducers::CreationResult::STORAGE_FAILURE) {
         eventSubsystemReady = false;
@@ -749,7 +892,10 @@ void servicePersistenceAfterAcknowledgment(
 }
 
 bool startListening() {
-    operationDone = false;
+    if (eventDelivery.state() == NodeEventDelivery::RuntimeState::TX)
+        eventTxObserver.note(EventTxDiagnostics::Counter::RECEIVE_DURING_TX,
+            static_cast<uint32_t>(millis()));
+    clearRadioFlag();
     setRuntimePhase(RuntimeState::RuntimePhase::LISTENING);
 
     const int state = radio.startReceive();
@@ -797,6 +943,8 @@ void serviceQuietMaintenance(uint32_t nowMs) {
     maintenanceOwnershipActive = true;
     // standby() is the ownership boundary. Recheck the ISR flag after it;
     // an event that wins this race remains set for normal packet processing.
+    if (eventTxObservationWindow)
+        eventTxObserver.note(EventTxDiagnostics::Counter::MAINTENANCE_DURING_TX, nowMs);
     const int standbyState = radio.standby();
     const bool eventArrivedDuringAcquisition = operationDone;
     const NodeSettingsIntegration::AcquisitionOutcome acquisition =
@@ -876,7 +1024,7 @@ bool startAcknowledgment(
 void serviceCommandPreAck(uint32_t nowMs) {
     if (!commandPreAck.due(nowMs)) return;
     commandPreAck.clear();
-    operationDone = false;
+    clearRadioFlag();
     eventRadio.beginCommandAckTx();
     radioLedActive = true;
     updateLedOutput();
@@ -913,7 +1061,7 @@ bool startStructuredResponse(const Protocol::Packet& response) {
         return false;
     structuredResponse = response;
     transmitLength = length;
-    operationDone = false;
+    clearRadioFlag();
     setRuntimePhase(RuntimeState::RuntimePhase::TRANSMITTING_RESPONSE);
     eventRadio.beginCommandResponseTx();
     radioLedActive = true;
@@ -967,12 +1115,15 @@ void serviceProductionHost(uint32_t nowMs) {
     if (!runtimeState.isReady() || operationDone ||
         runtimeState.phase() != RuntimeState::RuntimePhase::LISTENING ||
         Serial.available() <= 0) return;
+    if (eventTxObservationWindow)
+        eventTxObserver.note(EventTxDiagnostics::Counter::HOST_DURING_TX, nowMs);
     if (radio.standby() != RADIOLIB_ERR_NONE || operationDone) {
         startListening();
         return;
     }
     const HostOperationService::DeviceSnapshot snapshot =
-        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U);
+        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U,
+            buildEventDetailSnapshot());
     hostStack.serviceRx(snapshot, runtimeState.peerId(), capabilityRegistryValid,
         HeltecV4Capabilities::registryView(), capabilityHandler,
         DeviceCapabilities::InterlockState::CLEAR, capabilityDiagnostics,
@@ -1243,20 +1394,25 @@ void setup() {
     loadSettings(static_cast<uint32_t>(millis()));
 
     nodeEventStore.setDiagnostics(&runtimeState);
+    eventTxObserver.enable();
     const NodeEventStore::Status eventStoreStatus = nodeEventStore.recover(
         eventStorage, eventEntropy, DeviceConfig::LOCAL_ID);
-    if (eventStoreStatus == NodeEventStore::Status::READY) {
+    if (eventStoreStatus == NodeEventStore::Status::READY &&
+        NodeEventDelivery::reclaimTerminals(nodeEventStore, nullptr,
+            &eventTxObserver, static_cast<uint32_t>(millis()))) {
         const NodeEventDelivery::ControllerResult recovered = eventDelivery.recover(
             nodeEventStore, DeviceConfig::LOCAL_ID, DeviceConfig::PEER_ID,
             eventSequence, eventJitter, static_cast<uint32_t>(millis()),
-            &runtimeState);
+            &runtimeState, &eventTxObserver);
         eventSubsystemReady =
             recovered.status == NodeEventDelivery::ControllerStatus::OK ||
             recovered.status == NodeEventDelivery::ControllerStatus::NO_ACTIVE_EVENT;
     } else {
         runtimeState.setEventPersistenceDegraded(true);
-        runtimeState.incrementEventDiagnostic(
-            RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
+        // Store reclamation already owns its persistence-failure counter.
+        if (eventStoreStatus != NodeEventStore::Status::READY)
+            runtimeState.incrementEventDiagnostic(
+                RuntimeState::EventDiagnostic::PERSISTENCE_FAILURE);
         if (eventStoreStatus == NodeEventStore::Status::INDETERMINATE_SLOT ||
             eventStoreStatus == NodeEventStore::Status::RECORD_CONFLICT ||
             eventStoreStatus == NodeEventStore::Status::GENERATION_AMBIGUOUS) {
@@ -1315,19 +1471,47 @@ void setup() {
     logVersionMetadata();
 }
 
-void serviceNodeEvents(uint32_t nowMs) {
+void serviceNodeEvents() {
     if (!eventSubsystemReady) return;
     const bool synchronousWork = commandPreAck.active() ||
         eventRadio.owner() != EventRadioIntegration::NodeOwner::LISTENING ||
         runtimeState.phase() != RuntimeState::RuntimePhase::LISTENING ||
         operationDone || maintenanceOwnershipActive || renderingPresentation;
-    const NodeEventDelivery::ControllerResult serviced =
-        eventDelivery.service(nowMs, synchronousWork);
+    const NodeEventDelivery::ServiceTick tick = NodeEventDelivery::serviceNow(
+        eventDelivery, synchronousWork, [] { return millis(); });
+    const uint32_t nowMs = tick.now;
+    const NodeEventDelivery::ControllerResult& serviced = tick.result;
+    eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
     if (serviced.status == NodeEventDelivery::ControllerStatus::DEGRADED ||
         serviced.status == NodeEventDelivery::ControllerStatus::POLICY_FAILURE ||
         serviced.status == NodeEventDelivery::ControllerStatus::STORAGE_FAILURE) {
         eventSubsystemReady = false;
         return;
+    }
+    // Terminal transition is already committed. Honor its receive restoration
+    // before reclaim, but never interrupt a COMMAND ACK/RESPONSE owner.
+    if (NodeEventDelivery::hasTerminalRecords(nodeEventStore)) {
+        if (eventRadio.eventOwnsRadio() &&
+            (eventDelivery.state() == NodeEventDelivery::RuntimeState::EXPIRED ||
+             eventDelivery.state() == NodeEventDelivery::RuntimeState::FAILED)) {
+            startListening();
+            return;
+        }
+        // Cleanup must not open an extra receive gap during an admission wait
+        // or preempt TX even if another path has overwritten radio ownership.
+        const auto deliveryState = eventDelivery.state();
+        if (!synchronousWork && runtimeState.isReady() &&
+            deliveryState != NodeEventDelivery::RuntimeState::TX &&
+            deliveryState != NodeEventDelivery::RuntimeState::TX_PREPARE &&
+            deliveryState != NodeEventDelivery::RuntimeState::WAIT_ADMISSION) {
+            const bool standbyOk = radio.standby() == RADIOLIB_ERR_NONE;
+            if (operationDone) return;
+            if (standbyOk && !NodeEventDelivery::reclaimTerminals(
+                    nodeEventStore, &eventDelivery, &eventTxObserver, nowMs))
+                eventSubsystemReady = false;
+            startListening();
+            return;
+        }
     }
     EventRadioIntegration::NodeSafePoint point = {
         runtimeState.isReady(),
@@ -1337,6 +1521,8 @@ void serviceNodeEvents(uint32_t nowMs) {
         maintenanceOwnershipActive,
         renderingPresentation
     };
+    if (eventDelivery.state() == NodeEventDelivery::RuntimeState::READY)
+        eventTxObserver.note(EventTxDiagnostics::Counter::READY_SELECTED, nowMs);
     if (eventRadio.requestEvent(point, eventDelivery.state()) !=
         EventRadioIntegration::NodeAcquireResult::ACQUIRE_STANDBY) return;
     const bool standbyOk = radio.standby() == RADIOLIB_ERR_NONE;
@@ -1346,17 +1532,24 @@ void serviceNodeEvents(uint32_t nowMs) {
     if (acquired != EventRadioIntegration::NodeAcquireResult::GRANT_EVENT_TX) {
         startListening(); return;
     }
+    eventTxObserver.note(EventTxDiagnostics::Counter::ARBITRATION_GRANTED, nowMs);
     const NodeEventDelivery::ControllerResult grant = eventDelivery.grantTransmit(nowMs);
     if (grant.action.type != NodeEventDelivery::RadioActionType::TRANSMIT) {
         startListening(); return;
     }
-    operationDone = false;
-    if (radio.startTransmit(grant.action.bytes, grant.action.length) != RADIOLIB_ERR_NONE) {
+    eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
+    clearRadioFlag();
+    eventTxObserver.start(static_cast<uint32_t>(millis()));
+    const int16_t startResult = radio.startTransmit(grant.action.bytes, grant.action.length);
+    eventTxObserver.startResult(startResult, static_cast<uint32_t>(millis()));
+    if (startResult != RADIOLIB_ERR_NONE) {
         (void)eventDelivery.txStartFailed(nowMs);
+        eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
         startListening();
         return;
     }
     (void)eventDelivery.txStarted(nowMs);
+    eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
 }
 
 void loop() {
@@ -1371,10 +1564,12 @@ void loop() {
 #endif
 
     if (runtimeState.isReady() && operationDone) {
+        eventTxObserver.dispatchDio(eventRadio.eventOwnsRadio(), eventTxObservationWindow, nowMs);
         operationDone = false;
 
         if (eventRadio.eventOwnsRadio()) {
             (void)eventDelivery.txCompleted(nowMs);
+            eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
             startListening();
         } else if (
             runtimeState.phase() ==
@@ -1401,7 +1596,7 @@ void loop() {
 #endif
     }
 
-    serviceNodeEvents(nowMs);
+    serviceNodeEvents();
 
     // Defer OLED I/O until an active ACK has completed and receive restarted.
     if (

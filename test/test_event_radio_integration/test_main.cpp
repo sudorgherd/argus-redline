@@ -2,6 +2,7 @@
 
 #include "hub_event_radio.h"
 #include "node_event_radio.h"
+#include "hub_receive_release.h"
 
 using namespace EventRadioIntegration;
 
@@ -174,10 +175,170 @@ void testAckStartLossKeepsCustodyAndRetryRegeneratesAck() {
     TEST_ASSERT_FALSE(retry.ledgerMutated); TEST_ASSERT_EQUAL_UINT(1,l.activeCount());
 }
 
+void testDioDispatchObservationDetectsOwnershipOverwriteWithoutChangingIt() {
+    NodeArbiter arbiter; EventTxDiagnostics::Observer observer;
+    NodeSafePoint point = {true, true, false, false, false, false};
+    arbiter.requestEvent(point, NodeEventDelivery::RuntimeState::READY);
+    arbiter.finishStandby(true, false);
+    observer.dispatchDio(arbiter.eventOwnsRadio(), true, 10);
+    TEST_ASSERT_TRUE(arbiter.eventOwnsRadio());
+    // Characterize existing production receive restoration overriding ownership.
+    arbiter.restoreListening();
+    observer.dispatchDio(arbiter.eventOwnsRadio(), true, 20);
+    observer.clearingFlag(true, true, 21);
+    observer.clearingFlag(false, true, 22);
+    observer.clearingFlag(true, false, 23);
+    using C = EventTxDiagnostics::Counter;
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::DIO_CLASSIFIED_EVENT]);
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::DIO_OTHER_PATH_DURING_TX]);
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::PENDING_FLAG_CLEARED_DURING_TX]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeOwner::LISTENING, (uint8_t)arbiter.owner());
+}
+
+struct ReleaseRadio {
+    volatile bool pending = false;
+    bool irqDuringStandby = false, irqDuringReceive = false;
+    int standbyResult = 0;
+    bool receiveResult = true;
+    unsigned standbyCalls = 0, receiveCalls = 0;
+    bool listening = false;
+    int standby() {
+        ++standbyCalls;
+        if (irqDuringStandby) pending = true;
+        if (standbyResult == 0) listening = false;
+        return standbyResult;
+    }
+    bool receive() {
+        ++receiveCalls;
+        if (irqDuringReceive) pending = true;
+        listening = receiveResult;
+        return receiveResult;
+    }
+};
+
+ReleaseReceiveResult releaseReceive(ReleaseRadio& radio, const HubArbiter& arbiter,
+                                    bool eventActive = false) {
+    return restoreReleasedReceive(radio, radio.pending, eventActive, arbiter,
+        [&] { return radio.receive(); });
+}
+
+void testLegacyReleasedBoundaryRestoresReceiveOnce() {
+    ReleaseRadio radio; HubArbiter arbiter;
+    arbiter.setOwner(HubOwner::COMMAND_WAIT_ACK, 2500);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::RESTORED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.listening);
+    TEST_ASSERT_EQUAL_UINT(1, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(1, radio.receiveCalls);
+    TEST_ASSERT_FALSE(radio.pending);
+    // Release acquisition does not rewrite saved owner/deadline metadata.
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)HubOwner::COMMAND_WAIT_ACK, (uint8_t)arbiter.owner());
+    TEST_ASSERT_EQUAL_UINT32(2500, arbiter.deadline());
+}
+
+void testStructuredReleasedBoundaryRestoresReceiveOnce() {
+    ReleaseRadio radio; HubArbiter arbiter;
+    arbiter.setOwner(HubOwner::COMMAND_WAIT_RESPONSE, 5000);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::RESTORED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.listening);
+    TEST_ASSERT_EQUAL_UINT(1, radio.receiveCalls);
+    TEST_ASSERT_EQUAL_UINT32(5000, arbiter.deadline());
+}
+
+void testReleasePreservesPendingIrqBeforeStandby() {
+    ReleaseRadio radio; HubArbiter arbiter; radio.pending = true;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::PENDING_IRQ,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.pending);
+    TEST_ASSERT_EQUAL_UINT(0, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(0, radio.receiveCalls);
+}
+
+void testReleaseRechecksIrqAfterStandby() {
+    ReleaseRadio radio; HubArbiter arbiter; radio.irqDuringStandby = true;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::PENDING_IRQ,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.pending);
+    TEST_ASSERT_EQUAL_UINT(1, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(0, radio.receiveCalls);
+}
+
+void testReleaseDoesNotClearIrqRaisedDuringReceiveStart() {
+    ReleaseRadio radio; HubArbiter arbiter; radio.irqDuringReceive = true;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::RESTORED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.pending);
+    TEST_ASSERT_TRUE(radio.listening);
+}
+
+void testReleaseAfterConsumedCompletionRestoresReceive() {
+    ReleaseRadio radio; HubArbiter arbiter;
+    radio.pending = true;
+    radio.pending = false; // Existing dispatcher consumes the completion first.
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::RESTORED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_EQUAL_UINT(1, radio.receiveCalls);
+}
+
+void testReleaseDoesNotPreemptEitherEventOwnershipIndicator() {
+    ReleaseRadio radio; HubArbiter arbiter;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::EVENT_OWNED,
+        (uint8_t)releaseReceive(radio, arbiter, true));
+    arbiter.setOwner(HubOwner::COMMAND_WAIT_ACK, 1234);
+    TEST_ASSERT_TRUE(arbiter.beginEventAck());
+    radio.pending = true; // The pending Event TX completion must remain intact.
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::EVENT_OWNED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.pending);
+    TEST_ASSERT_EQUAL_UINT(0, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(0, radio.receiveCalls);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)HubOwner::COMMAND_WAIT_ACK, (uint8_t)arbiter.finishEventAck());
+    TEST_ASSERT_EQUAL_UINT32(1234, arbiter.deadline());
+}
+
+void testReleaseStandbyFailureIsExplicitWithoutReceive() {
+    ReleaseRadio radio; HubArbiter arbiter; radio.standbyResult = -1;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::STANDBY_FAILED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_FALSE(radio.listening);
+    TEST_ASSERT_EQUAL_UINT(1, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(0, radio.receiveCalls);
+}
+
+void testReleaseReceiveFailureIsExplicitWithoutAutomaticRetry() {
+    ReleaseRadio radio; HubArbiter arbiter; radio.receiveResult = false;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::RECEIVE_FAILED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_FALSE(radio.listening);
+    TEST_ASSERT_EQUAL_UINT(1, radio.standbyCalls);
+    TEST_ASSERT_EQUAL_UINT(1, radio.receiveCalls);
+}
+
+void testReleaseReportsStandbyFailureEvenWhenIrqAlsoArrives() {
+    ReleaseRadio radio; HubArbiter arbiter;
+    radio.standbyResult = -1; radio.irqDuringStandby = true;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ReleaseReceiveResult::STANDBY_FAILED,
+        (uint8_t)releaseReceive(radio, arbiter));
+    TEST_ASSERT_TRUE(radio.pending);
+    TEST_ASSERT_EQUAL_UINT(0, radio.receiveCalls);
+}
+
 } // namespace
 
 int main(int, char**) {
     UNITY_BEGIN();
+    RUN_TEST(testLegacyReleasedBoundaryRestoresReceiveOnce);
+    RUN_TEST(testStructuredReleasedBoundaryRestoresReceiveOnce);
+    RUN_TEST(testReleasePreservesPendingIrqBeforeStandby);
+    RUN_TEST(testReleaseRechecksIrqAfterStandby);
+    RUN_TEST(testReleaseDoesNotClearIrqRaisedDuringReceiveStart);
+    RUN_TEST(testReleaseAfterConsumedCompletionRestoresReceive);
+    RUN_TEST(testReleaseDoesNotPreemptEitherEventOwnershipIndicator);
+    RUN_TEST(testReleaseStandbyFailureIsExplicitWithoutReceive);
+    RUN_TEST(testReleaseReceiveFailureIsExplicitWithoutAutomaticRetry);
+    RUN_TEST(testReleaseReportsStandbyFailureEvenWhenIrqAlsoArrives);
+    RUN_TEST(testDioDispatchObservationDetectsOwnershipOverwriteWithoutChangingIt);
     RUN_TEST(testNodeStandbyRecheckAndOwnership);
     RUN_TEST(testNodeSynchronousOwnersBlockEvent);
     RUN_TEST(testPreAckDeadlineIsNonblockingWrapSafeAndOneShot);

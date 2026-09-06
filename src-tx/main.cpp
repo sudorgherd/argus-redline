@@ -17,6 +17,7 @@
 #include "esp32_event_storage.h"
 #include "host_event_service.h"
 #include "hub_event_radio.h"
+#include "hub_receive_release.h"
 #if defined(ARGUS_HOST_MACHINE_STREAM)
 #include "host_role_integration.h"
 #endif
@@ -173,6 +174,59 @@ void setPeerState(DeviceUi::PeerState state) {
     }
 }
 
+RuntimeState::EventIdentitySnapshot hubRecordIdentity(
+    const EventRecords::HubRecord& record
+) {
+    return {record.sourceDeviceId, record.eventEpoch, record.eventId};
+}
+
+RuntimeState::EventDetailSnapshot buildEventDetailSnapshot() {
+    RuntimeState::EventDetailSnapshot detail;
+    const RuntimeState::EventSnapshot& summary = runtimeState.eventSnapshot();
+    detail.capacity = static_cast<uint8_t>(HubEventLedger::HUB_EVENT_CAPACITY);
+    detail.activeCount = static_cast<uint8_t>(hubEventLedger.activeCount());
+    detail.consumedCount = static_cast<uint8_t>(hubEventLedger.consumedCount());
+    detail.custodyCount = static_cast<uint8_t>(
+        detail.activeCount + detail.consumedCount);
+    detail.persistenceDegraded = summary.persistenceDegraded;
+    detail.counters = summary.counters;
+    if (!hubEventLedger.healthy()) return detail;
+
+    bool recentAvailable = false;
+    EventRecords::HubRecord recent = {};
+    for (uint8_t slot = 0; slot < HubEventLedger::HUB_EVENT_CAPACITY; ++slot) {
+        const EventRecords::HubRecord* candidate = hubEventLedger.record(slot);
+        if (candidate == nullptr ||
+            (candidate->state != EventRecords::HubState::ACTIVE &&
+             candidate->state != EventRecords::HubState::CONSUMED)) continue;
+        if (!recentAvailable ||
+            candidate->admissionOrdinal > recent.admissionOrdinal) {
+            recent = *candidate;
+            recentAvailable = true;
+        }
+    }
+    if (recentAvailable) {
+        detail.recentAdmissionAvailable = true;
+        detail.recentAdmission = hubRecordIdentity(recent);
+    }
+
+    uint8_t activeSlot = 0xFF;
+    EventRecords::HubRecord displayed = {};
+    if (!hubEventLedger.oldestActive(activeSlot, displayed)) {
+        if (!recentAvailable) return detail;
+        displayed = recent;
+    }
+    detail.recordAvailable = true;
+    detail.identity = hubRecordIdentity(displayed);
+    detail.family = displayed.family;
+    detail.admissionOrdinalAvailable = true;
+    detail.admissionOrdinal = displayed.admissionOrdinal;
+    detail.state = displayed.state == EventRecords::HubState::ACTIVE
+        ? RuntimeState::EventDetailState::ACTIVE
+        : RuntimeState::EventDetailState::CONSUMED;
+    return detail;
+}
+
 DeviceUi::PresentationInput buildPresentationInput() {
     DeviceUi::PresentationInput input;
     input.role = runtimeState.role();
@@ -191,6 +245,7 @@ DeviceUi::PresentationInput buildPresentationInput() {
     input.lastInboundPacket = runtimeState.lastInboundPacket();
     input.counters = runtimeState.counters();
     input.event = runtimeState.eventSnapshot();
+    input.eventDetail = buildEventDetailSnapshot();
     input.lastError = runtimeState.lastError();
     input.diagnosticsEnabled = currentSettings.diagnosticsEnabled;
     input.configurationStatus = configurationState.status;
@@ -710,9 +765,12 @@ void servicePersistence(uint32_t nowMs) {
     persistenceRequests.clear();
 }
 
+void restoreReleasedTransactionReceive();
+
 void scheduleNextTransaction() {
     setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
+    restoreReleasedTransactionReceive();
 }
 
 void completeAndScheduleNextTransaction() {
@@ -723,7 +781,6 @@ void completeAndScheduleNextTransaction() {
 }
 
 void scheduleRetryOrNext(const String& reason) {
-    radio.standby();
     const TransactionEngine::HubTransactionAction action =
         transactionState.attemptFailed();
 
@@ -738,6 +795,7 @@ void scheduleRetryOrNext(const String& reason) {
 
         setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
         nextTransmitAt = millis() + RETRY_DELAY_MS;
+        restoreReleasedTransactionReceive();
         return;
     }
 
@@ -872,11 +930,29 @@ bool startAckReceive(bool resetDeadline
     return true;
 }
 
-bool restoreHubReceive(RuntimeState::RuntimePhase phase) {
-    operationDone = false;
+bool restoreHubReceive(RuntimeState::RuntimePhase phase, bool clearPending = true) {
+    if (clearPending) operationDone = false;
     if (radio.startReceive() != RADIOLIB_ERR_NONE) return false;
     setRuntimePhase(phase);
     return true;
+}
+
+void restoreReleasedTransactionReceive() {
+    const EventRadioIntegration::ReleaseReceiveResult result =
+        EventRadioIntegration::restoreReleasedReceive(radio, operationDone,
+            eventAckTxActive, hubRadioArbiter, [] {
+                return restoreHubReceive(RuntimeState::RuntimePhase::IDLE, false);
+            });
+    using Result = EventRadioIntegration::ReleaseReceiveResult;
+    if (result == Result::STANDBY_FAILED || result == Result::RECEIVE_FAILED) {
+        runtimeState.incrementRadioErrors();
+        setHealth(RuntimeState::Health::DEGRADED);
+        recordError(RuntimeState::ErrorClass::RADIO_START_RECEIVE);
+        showStatus("RX START FAILED", result == Result::STANDBY_FAILED
+            ? "idle standby" : "idle receive");
+    }
+    // Pending IRQs remain for serviceHubTransport; Event ACK ownership keeps
+    // its existing completion/restoration path. No idle-loop RX restart/retry.
 }
 
 bool startEventAdmissionAck(const EventRadioIntegration::HubResult& result,
@@ -966,13 +1042,13 @@ bool startHostStructuredTransmission(const Protocol::Packet& command) {
 }
 
 void finishHostStructuredOwnership() {
-    radio.standby();
     hostStructuredOwner = false;
     TRACE_HUB(StructuredTrace::Event::STRUCTURED_OWNER_RELEASED,
         hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
         hostStructuredCommand.opcode, 0, 2);
     setRuntimePhase(RuntimeState::RuntimePhase::IDLE);
     nextTransmitAt = millis() + TRANSACTION_INTERVAL_MS;
+    restoreReleasedTransactionReceive();
 }
 
 void serviceProductionHost(uint32_t nowMs) {
@@ -1022,7 +1098,8 @@ void serviceProductionHost(uint32_t nowMs) {
     if (radio.standby() != RADIOLIB_ERR_NONE) return;
     if (operationDone) return;
     const HostOperationService::DeviceSnapshot snapshot =
-        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U);
+        HostOperationService::makeDeviceSnapshot(runtimeState, nowMs / 1000U,
+            buildEventDetailSnapshot());
     const HostRoleIntegration::Result result = hostStack.serviceRx(snapshot,
         runtimeState.peerId(), capabilityRegistryValid,
         HeltecV4Capabilities::registryView(), capabilityHandler,
@@ -1283,7 +1360,6 @@ void processAcknowledgment() {
             String("STATUS ") + rawStatus
         );
 
-        radio.standby();
         completeAndScheduleNextTransaction();
         return;
     }
@@ -1322,7 +1398,6 @@ void processAcknowledgment() {
         );
     }
 
-    radio.standby();
     completeAndScheduleNextTransaction();
 }
 

@@ -131,6 +131,56 @@ class HostProtocol02Tests(unittest.TestCase):
         return struct.pack("<BBBBIII", 1, 2, family, flags, epoch, event_id,
                            lifetime) + bytes([len(body)]) + body.ljust(12, b"\0")
 
+    def event_diagnostics_record(self):
+        raw=bytearray(111)
+        raw[:8]=bytes([1,2,1,8,0,0,1,6])
+        raw[8]=0x10; struct.pack_into("<I",raw,9,0x11223344); struct.pack_into("<I",raw,13,0x01020304)
+        raw[17:21]=bytes([0x40,2,5,0x06]); struct.pack_into("<I",raw,21,3421)
+        raw[39:42]=bytes([1,1,1]); raw[42]=0x10
+        struct.pack_into("<I",raw,43,0x11223344); struct.pack_into("<I",raw,47,0x01020304)
+        struct.pack_into("<15I",raw,51,*range(1,16))
+        return bytes(raw)
+
+    def test_event_lifecycle_page_request_is_explicit_and_minor_two_only(self):
+        parser = h.make_parser()
+        args = parser.parse_args(["event-diagnostics", "--target-device", "0x10",
+                                  "--minor", "2", "--request-id", "9", "--lifecycle", "--dry-run"])
+        _, _, encoded = h.request_for_args(args)
+        self.assertEqual(bytes.fromhex("04 2b 10 00 00 02 04 01 00 00 00"),
+                         h.decode_frame(encoded).payload)
+        args.minor = 1
+        with self.assertRaises(h.ProtocolFailure): h.request_for_args(args)
+        for selector in (0, 2, 0xffffffff):
+            with self.assertRaises(h.ProtocolFailure):
+                h.operation_payload(4, 0x2b, 0x10, 0, 2, selector, minor=2)
+        self.assertEqual(bytes.fromhex("04 2b 10 00 00 00 00"),
+                         h.operation_payload(4, 0x2b, 0x10, 0, minor=2))
+
+    def test_event_lifecycle_page_exact_decode_and_rejection(self):
+        raw = bytearray(99)
+        raw[:8] = bytes([2,2,1,25,8,0,5,0x10])
+        struct.pack_into("<7I", raw, 8, 7, 37, 105, 100, 103, 110, 105)
+        struct.pack_into("<h", raw, 36, -5)
+        raw[38] = 0xff
+        struct.pack_into("<30H", raw, 39, *range(30))
+        data = h.decode_event_diagnostics(bytes(raw))
+        self.assertEqual(37, data["identity"]["event_id"])
+        self.assertEqual("clock_reversed", data["last_step"])
+        self.assertEqual("EXPIRED", data["controller_state"])
+        self.assertEqual(-5, data["start_result"])
+        self.assertEqual(24, data["counters"]["clock_reversed"])
+        payload = struct.pack("<BBBHBBBB",4,0x2b,0x10,0,2,0,0x7f,99) + raw
+        frame = h.build_frame(0x11,9,payload,minor=2)[1]
+        self.assertEqual(data,h.decode_payload(h.decode_frame(frame))["value"])
+        for offset in (0,1,2,3,4,5,6,38):
+            invalid = bytearray(raw); invalid[offset] = 254
+            with self.assertRaises(h.ProtocolFailure): h.decode_event_diagnostics(bytes(invalid))
+        with self.assertRaises(h.ProtocolFailure): h.decode_event_diagnostics(bytes(raw[:-1]))
+        unavailable = bytearray(99); unavailable[:2] = bytes([2,1]); unavailable[38] = 255
+        self.assertFalse(h.decode_event_diagnostics(bytes(unavailable))["available"])
+        unavailable[39] = 1
+        with self.assertRaises(h.ProtocolFailure): h.decode_event_diagnostics(bytes(unavailable))
+
     def test_normative_02_vectors_and_minor_1_are_exact(self):
         vectors=h.named_vectors()
         self.assertEqual(bytes.fromhex("01 03 01 01 04 34 12 02 05 01 01 45 EA 00"),vectors["hello"])
@@ -233,6 +283,30 @@ class HostProtocol02Tests(unittest.TestCase):
         empty=h.decode_payload(h.decode_frame(h.named_vectors()["poll_events_empty"]))
         with mock.patch("builtins.print") as output: h.print_result(empty,True)
         self.assertIn('"available":false',output.call_args.args[0])
+
+    def test_event_diagnostics_is_minor_two_additive_and_decoded(self):
+        raw=self.event_diagnostics_record()
+        frame=h.decode_frame(response_frame(0x1003,category=4,operation=0x2b,
+            result_class=2,result_code=0,value_type=0x7f,value=raw,minor=2))
+        value=h.decode_payload(frame)["value"]
+        self.assertEqual(("BACKOFF",2,3421),(value["state"],value["attempts_used"],value["remaining_lifetime_seconds"]))
+        self.assertEqual("CREATED",value["last_producer"]["result"])
+        self.assertEqual(15,value["counters"]["hostConsumptions"])
+        with self.assertRaises(h.ProtocolFailure):
+            h.operation_payload(4,0x2b,0x10,0,minor=1)
+        self.assertEqual(bytes.fromhex("04 2b 10 00 00 00 00"),
+            h.operation_payload(4,0x2b,0x10,0,minor=2))
+        bad=bytearray(raw); bad[20]|=0x80
+        with self.assertRaises(h.ProtocolFailure): h.decode_event_diagnostics(bytes(bad))
+
+    def test_event_diagnostics_cli_is_single_read_only_request(self):
+        args=["event-diagnostics","--minor","2","--target-device","0x10",
+              "--request-id","0x1003","--dry-run"]
+        with mock.patch.object(h,"live_exchange") as live:
+            self.assertEqual(h.EXIT_OK,h.main(args)); live.assert_not_called()
+        parsed=h.make_parser().parse_args(args)
+        self.assertEqual(bytes.fromhex("00 02 10 00 03 10 07 00 04 2b 10 00 00 00 00"),
+            h.request_for_args(parsed)[1][:-2])
 
 
 class StreamTests(unittest.TestCase):

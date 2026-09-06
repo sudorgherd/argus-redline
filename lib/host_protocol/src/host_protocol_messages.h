@@ -5,6 +5,7 @@
 
 #include <host_protocol.h>
 #include <event_protocol.h>
+#include <event_tx_diagnostics.h>
 
 namespace HostProtocol {
 
@@ -24,6 +25,23 @@ constexpr uint16_t CAPABILITY_PAGE_END = 0xFFFF;
 constexpr uint8_t DIAGNOSTIC_PAGE_END = 0xFF;
 constexpr uint8_t HOST_EVENT_IDENTITY_SIZE = 9;
 constexpr uint8_t HOST_EVENT_RECORD_SIZE = 29;
+constexpr uint8_t EVENT_DIAGNOSTIC_COUNTER_COUNT = 15;
+constexpr uint8_t EVENT_DIAGNOSTICS_RECORD_SIZE = 111;
+constexpr uint8_t EVENT_DIAGNOSTICS_SCHEMA = 1;
+constexpr uint8_t EVENT_TX_DIAGNOSTICS_SCHEMA = 2;
+constexpr uint8_t EVENT_TX_DIAGNOSTICS_SIZE = 99;
+static_assert(EVENT_TX_DIAGNOSTICS_SIZE <= MAX_RESPONSE_VALUE_SIZE,
+    "Event TX diagnostic page must fit the existing Host frame");
+static_assert(39 + 2 * EventTxDiagnostics::COUNTER_COUNT == EVENT_TX_DIAGNOSTICS_SIZE,
+    "Event TX diagnostic geometry");
+
+constexpr uint8_t EVENT_DIAGNOSTICS_WAITING_ADMISSION = 0x01;
+constexpr uint8_t EVENT_DIAGNOSTICS_WAITING_RETRY = 0x02;
+constexpr uint8_t EVENT_DIAGNOSTICS_LIFETIME_AVAILABLE = 0x04;
+constexpr uint8_t EVENT_DIAGNOSTICS_ORDINAL_AVAILABLE = 0x08;
+constexpr uint8_t EVENT_DIAGNOSTICS_PERSISTENCE_DEGRADED = 0x10;
+constexpr uint8_t EVENT_DIAGNOSTICS_HUB_UNAVAILABLE = 0x20;
+constexpr uint8_t EVENT_DIAGNOSTICS_KNOWN_FLAGS = 0x3F;
 
 constexpr uint16_t STATUS_READY = 0x0001;
 constexpr uint16_t STATUS_RADIO_OPERATIONAL = 0x0002;
@@ -125,6 +143,31 @@ struct HostEventRecord {
     uint32_t lifetimeBudgetSeconds;
     uint8_t bodyLength;
     uint8_t body[EventProtocol::MAX_BODY_SIZE];
+};
+
+struct EventDiagnosticsRecord {
+    uint8_t schema;
+    DeviceRole role;
+    uint8_t custodyCount;
+    uint8_t capacity;
+    uint8_t activeCount;
+    uint8_t consumedCount;
+    uint8_t recordAvailable;
+    uint8_t state;
+    HostEventIdentity identity;
+    uint8_t family;
+    uint8_t attemptsUsed;
+    uint8_t attemptsMaximum;
+    uint8_t flags;
+    uint32_t remainingLifetimeSeconds;
+    uint32_t admissionOrdinal;
+    uint8_t recentAdmissionAvailable;
+    HostEventIdentity recentAdmission;
+    uint8_t producerKind;
+    uint8_t producerResult;
+    uint8_t producerIdentityAvailable;
+    HostEventIdentity producerIdentity;
+    uint32_t counters[EVENT_DIAGNOSTIC_COUNTER_COUNT];
 };
 
 struct DeviceInfoRecord {
@@ -283,6 +326,190 @@ inline PayloadResult decodeHostEventRecord(const uint8_t* input,
     if (!isValidHostEventRecord(candidate)) return PayloadResult::INVALID_VALUE;
     record = candidate;
     return PayloadResult::OK;
+}
+
+inline bool isZeroHostEventIdentity(const HostEventIdentity& identity) {
+    return identity.sourceDeviceId == 0 && identity.eventEpoch == 0 &&
+        identity.eventId == 0;
+}
+
+inline bool isValidEventDiagnosticsRecord(const EventDiagnosticsRecord& record) {
+    if (record.schema != EVENT_DIAGNOSTICS_SCHEMA ||
+        !isKnownDeviceRole(record.role) || record.capacity > 8 ||
+        record.custodyCount > record.capacity ||
+        record.activeCount > record.capacity ||
+        record.consumedCount > record.capacity ||
+        record.activeCount + record.consumedCount > record.capacity ||
+        record.recordAvailable > 1 || record.recentAdmissionAvailable > 1 ||
+        record.producerIdentityAvailable > 1 || record.state > 11 ||
+        record.producerKind > 3 || record.producerResult > 5 ||
+        (record.flags & static_cast<uint8_t>(~EVENT_DIAGNOSTICS_KNOWN_FLAGS)) != 0)
+        return false;
+    if (record.recordAvailable == 1) {
+        if (!isValidHostEventIdentity(record.identity) ||
+            !EventProtocol::isRegisteredFamily(record.family)) return false;
+    } else if (!isZeroHostEventIdentity(record.identity) || record.family != 0 ||
+        record.attemptsUsed != 0 || record.attemptsMaximum != 0 ||
+        (record.flags & (EVENT_DIAGNOSTICS_LIFETIME_AVAILABLE |
+            EVENT_DIAGNOSTICS_ORDINAL_AVAILABLE)) != 0 ||
+        record.remainingLifetimeSeconds != 0 || record.admissionOrdinal != 0) {
+        return false;
+    }
+    if (record.attemptsUsed > record.attemptsMaximum ||
+        ((record.flags & EVENT_DIAGNOSTICS_LIFETIME_AVAILABLE) == 0 &&
+            record.remainingLifetimeSeconds != 0) ||
+        ((record.flags & EVENT_DIAGNOSTICS_ORDINAL_AVAILABLE) == 0 &&
+            record.admissionOrdinal != 0)) return false;
+    if (record.recentAdmissionAvailable == 1) {
+        if (!isValidHostEventIdentity(record.recentAdmission)) return false;
+    } else if (!isZeroHostEventIdentity(record.recentAdmission)) return false;
+    if (record.producerIdentityAvailable == 1) {
+        if (!isValidHostEventIdentity(record.producerIdentity) ||
+            record.producerResult != 1) return false;
+    } else if (!isZeroHostEventIdentity(record.producerIdentity)) return false;
+    return true;
+}
+
+inline PayloadResult encodeEventDiagnosticsRecord(
+    const EventDiagnosticsRecord& record,
+    TypedValue& value
+) {
+    if (!isValidEventDiagnosticsRecord(record)) return PayloadResult::INVALID_VALUE;
+    TypedValue candidate = {};
+    candidate.type = STRUCTURE_VALUE_TYPE;
+    candidate.length = EVENT_DIAGNOSTICS_RECORD_SIZE;
+    uint8_t* output = candidate.bytes;
+    output[0] = record.schema;
+    output[1] = static_cast<uint8_t>(record.role);
+    output[2] = record.custodyCount;
+    output[3] = record.capacity;
+    output[4] = record.activeCount;
+    output[5] = record.consumedCount;
+    output[6] = record.recordAvailable;
+    output[7] = record.state;
+    output[8] = record.identity.sourceDeviceId;
+    writeUint32Le(output + 9, record.identity.eventEpoch);
+    writeUint32Le(output + 13, record.identity.eventId);
+    output[17] = record.family;
+    output[18] = record.attemptsUsed;
+    output[19] = record.attemptsMaximum;
+    output[20] = record.flags;
+    writeUint32Le(output + 21, record.remainingLifetimeSeconds);
+    writeUint32Le(output + 25, record.admissionOrdinal);
+    output[29] = record.recentAdmissionAvailable;
+    output[30] = record.recentAdmission.sourceDeviceId;
+    writeUint32Le(output + 31, record.recentAdmission.eventEpoch);
+    writeUint32Le(output + 35, record.recentAdmission.eventId);
+    output[39] = record.producerKind;
+    output[40] = record.producerResult;
+    output[41] = record.producerIdentityAvailable;
+    output[42] = record.producerIdentity.sourceDeviceId;
+    writeUint32Le(output + 43, record.producerIdentity.eventEpoch);
+    writeUint32Le(output + 47, record.producerIdentity.eventId);
+    for (size_t i = 0; i < EVENT_DIAGNOSTIC_COUNTER_COUNT; ++i)
+        writeUint32Le(output + 51 + 4 * i, record.counters[i]);
+    value = candidate;
+    return PayloadResult::OK;
+}
+
+inline PayloadResult decodeEventDiagnosticsRecord(
+    const TypedValue& value,
+    EventDiagnosticsRecord& record
+) {
+    if (value.type != STRUCTURE_VALUE_TYPE ||
+        value.length != EVENT_DIAGNOSTICS_RECORD_SIZE)
+        return PayloadResult::INVALID_VALUE;
+    const uint8_t* input = value.bytes;
+    EventDiagnosticsRecord candidate = {};
+    candidate.schema = input[0];
+    candidate.role = static_cast<DeviceRole>(input[1]);
+    candidate.custodyCount = input[2];
+    candidate.capacity = input[3];
+    candidate.activeCount = input[4];
+    candidate.consumedCount = input[5];
+    candidate.recordAvailable = input[6];
+    candidate.state = input[7];
+    candidate.identity = {input[8], readUint32Le(input + 9),
+        readUint32Le(input + 13)};
+    candidate.family = input[17];
+    candidate.attemptsUsed = input[18];
+    candidate.attemptsMaximum = input[19];
+    candidate.flags = input[20];
+    candidate.remainingLifetimeSeconds = readUint32Le(input + 21);
+    candidate.admissionOrdinal = readUint32Le(input + 25);
+    candidate.recentAdmissionAvailable = input[29];
+    candidate.recentAdmission = {input[30], readUint32Le(input + 31),
+        readUint32Le(input + 35)};
+    candidate.producerKind = input[39];
+    candidate.producerResult = input[40];
+    candidate.producerIdentityAvailable = input[41];
+    candidate.producerIdentity = {input[42], readUint32Le(input + 43),
+        readUint32Le(input + 47)};
+    for (size_t i = 0; i < EVENT_DIAGNOSTIC_COUNTER_COUNT; ++i)
+        candidate.counters[i] = readUint32Le(input + 51 + 4 * i);
+    if (!isValidEventDiagnosticsRecord(candidate)) return PayloadResult::INVALID_VALUE;
+    record = candidate;
+    return PayloadResult::OK;
+}
+
+inline bool validEventTxDiagnostics(DeviceRole role, const EventTxDiagnostics::Snapshot& s) {
+    if (!isKnownDeviceRole(role) || (role == DeviceRole::HUB && s.available) ||
+        s.lastStep > EventTxDiagnostics::COUNTER_COUNT || s.controllerState > 8 ||
+        s.radioOwner > 6 || s.attempt > 5 ||
+        (s.admissionStatus != 0xFF && s.admissionStatus > 4)) return false;
+    const HostEventIdentity identity = {s.source, s.epoch, s.id};
+    if (s.attempt ? !isValidHostEventIdentity(identity) : !isZeroHostEventIdentity(identity))
+        return false;
+    if (!s.available) {
+        if (s.lastStep || s.controllerState || s.radioOwner || s.attempt ||
+            s.lastAt || s.startAt || s.completedAt || s.previousClock || s.inputClock ||
+            s.startResult || s.admissionStatus != 0xFF) return false;
+        for (auto count : s.counters) if (count) return false;
+    }
+    return true;
+}
+
+inline PayloadResult encodeEventTxDiagnostics(DeviceRole role,
+    const EventTxDiagnostics::Snapshot& s, TypedValue& value) {
+    if (!validEventTxDiagnostics(role, s)) return PayloadResult::INVALID_VALUE;
+    TypedValue candidate = {};
+    candidate.type = STRUCTURE_VALUE_TYPE; candidate.length = EVENT_TX_DIAGNOSTICS_SIZE;
+    uint8_t* b = candidate.bytes;
+    b[0] = EVENT_TX_DIAGNOSTICS_SCHEMA; b[1] = static_cast<uint8_t>(role);
+    b[2] = s.available; b[3] = s.lastStep; b[4] = s.controllerState;
+    b[5] = s.radioOwner; b[6] = s.attempt; b[7] = s.source;
+    writeUint32Le(b + 8, s.epoch); writeUint32Le(b + 12, s.id);
+    writeUint32Le(b + 16, s.lastAt); writeUint32Le(b + 20, s.startAt);
+    writeUint32Le(b + 24, s.completedAt); writeUint32Le(b + 28, s.previousClock);
+    writeUint32Le(b + 32, s.inputClock);
+    writeUint16Le(b + 36, static_cast<uint16_t>(s.startResult)); b[38] = s.admissionStatus;
+    for (uint8_t i = 0; i < EventTxDiagnostics::COUNTER_COUNT; ++i)
+        writeUint16Le(b + 39 + 2 * i, s.counters[i]);
+    value = candidate; return PayloadResult::OK;
+}
+
+inline PayloadResult decodeEventTxDiagnostics(const TypedValue& value,
+    DeviceRole& role, EventTxDiagnostics::Snapshot& snapshot) {
+    if (value.type != STRUCTURE_VALUE_TYPE || value.length != EVENT_TX_DIAGNOSTICS_SIZE ||
+        value.bytes[0] != EVENT_TX_DIAGNOSTICS_SCHEMA || value.bytes[2] > 1)
+        return PayloadResult::INVALID_VALUE;
+    const uint8_t* b = value.bytes;
+    const DeviceRole decodedRole = static_cast<DeviceRole>(b[1]);
+    EventTxDiagnostics::Snapshot s;
+    s.available = b[2]; s.lastStep = b[3]; s.controllerState = b[4];
+    s.radioOwner = b[5]; s.attempt = b[6]; s.source = b[7];
+    s.epoch = readUint32Le(b + 8); s.id = readUint32Le(b + 12);
+    s.lastAt = readUint32Le(b + 16); s.startAt = readUint32Le(b + 20);
+    s.completedAt = readUint32Le(b + 24); s.previousClock = readUint32Le(b + 28);
+    s.inputClock = readUint32Le(b + 32);
+    const uint16_t rawResult = readUint16Le(b + 36);
+    s.startResult = static_cast<int16_t>(rawResult <= INT16_MAX ? rawResult :
+        static_cast<int32_t>(rawResult) - 65536);
+    s.admissionStatus = b[38];
+    for (uint8_t i = 0; i < EventTxDiagnostics::COUNTER_COUNT; ++i)
+        s.counters[i] = readUint16Le(b + 39 + 2 * i);
+    if (!validEventTxDiagnostics(decodedRole, s)) return PayloadResult::INVALID_VALUE;
+    role = decodedRole; snapshot = s; return PayloadResult::OK;
 }
 
 inline uint8_t expectedScalarValueLength(uint8_t type) {
@@ -500,6 +727,13 @@ inline bool isValidOperationRequestValue(
                 (value.type == static_cast<uint8_t>(
                     CapabilityValueType::UNSIGNED_32
                 ) && isValidScalarValue(value));
+        case OperationCode::GET_EVENT_DIAGNOSTICS:
+            return isNoneValue(value) ||
+                (value.type == static_cast<uint8_t>(CapabilityValueType::UNSIGNED_32) &&
+                 isValidScalarValue(value) && readUint32Le(value.bytes) == 1);
+        case OperationCode::POLL_EVENTS:
+        case OperationCode::CONSUME_EVENT:
+            return false;
     }
     return false;
 }
@@ -754,6 +988,8 @@ inline bool isValidStructureLength(OperationCode operation, uint8_t length) {
             return length >= 2 && length <= 17 && ((length - 2) % 5) == 0;
         case OperationCode::POLL_EVENTS:
             return length == HOST_EVENT_RECORD_SIZE;
+        case OperationCode::GET_EVENT_DIAGNOSTICS:
+            return length == EVENT_DIAGNOSTICS_RECORD_SIZE || length == EVENT_TX_DIAGNOSTICS_SIZE;
         default:
             return false;
     }
@@ -800,6 +1036,14 @@ inline bool isValidStructureValue(
             HostEventRecord record = {};
             return decodeHostEventRecord(value.bytes, value.length, record) == PayloadResult::OK;
         }
+        case OperationCode::GET_EVENT_DIAGNOSTICS: {
+            if (value.length == EVENT_TX_DIAGNOSTICS_SIZE) {
+                DeviceRole role; EventTxDiagnostics::Snapshot snapshot;
+                return decodeEventTxDiagnostics(value, role, snapshot) == PayloadResult::OK;
+            }
+            EventDiagnosticsRecord record = {};
+            return decodeEventDiagnosticsRecord(value, record) == PayloadResult::OK;
+        }
         default:
             return false;
     }
@@ -819,6 +1063,7 @@ inline bool isValidSuccessfulOperationValue(
         case OperationCode::GET_CAPABILITIES:
         case OperationCode::DESCRIBE_CAPABILITY:
         case OperationCode::GET_DIAGNOSTICS:
+        case OperationCode::GET_EVENT_DIAGNOSTICS:
             return isValidStructureValue(operation, value);
         case OperationCode::READ_CAPABILITY:
             return isNonNoneScalarValue(value);
@@ -826,6 +1071,9 @@ inline bool isValidSuccessfulOperationValue(
             return isNoneValue(value);
         case OperationCode::RUN_PROCEDURE:
             return isValidScalarValue(value);
+        case OperationCode::POLL_EVENTS:
+        case OperationCode::CONSUME_EVENT:
+            return false;
     }
     return false;
 }

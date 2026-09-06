@@ -31,14 +31,74 @@ struct DeviceSnapshot {
     RuntimeState::Health health;
     uint32_t uptimeSeconds;
     RuntimeState::DiagnosticCounters counters;
+    RuntimeState::EventDetailSnapshot eventDetails;
 };
 
 inline DeviceSnapshot makeDeviceSnapshot(
     const RuntimeState::State& state,
-    uint32_t uptimeSeconds
+    uint32_t uptimeSeconds,
+    const RuntimeState::EventDetailSnapshot& eventDetails = {}
 ) {
     return {state.role(), state.localId(), state.isReady(), state.phase(),
-        state.health(), uptimeSeconds, state.counters()};
+        state.health(), uptimeSeconds, state.counters(), eventDetails};
+}
+
+inline HostProtocol::HostEventIdentity hostIdentity(
+    const RuntimeState::EventIdentitySnapshot& identity
+) {
+    return {identity.sourceDeviceId, identity.eventEpoch, identity.eventId};
+}
+
+inline HostProtocol::EventDiagnosticsRecord eventDiagnosticsRecord(
+    const DeviceSnapshot& snapshot
+) {
+    const RuntimeState::EventDetailSnapshot& source = snapshot.eventDetails;
+    HostProtocol::EventDiagnosticsRecord record = {};
+    record.schema = HostProtocol::EVENT_DIAGNOSTICS_SCHEMA;
+    record.role = snapshot.role == RuntimeState::DeviceRole::HUB
+        ? HostProtocol::DeviceRole::HUB : HostProtocol::DeviceRole::NODE;
+    record.custodyCount = source.custodyCount;
+    record.capacity = source.capacity;
+    record.activeCount = source.activeCount;
+    record.consumedCount = source.consumedCount;
+    record.recordAvailable = source.recordAvailable ? 1 : 0;
+    record.state = static_cast<uint8_t>(source.state);
+    record.identity = hostIdentity(source.identity);
+    record.family = source.family;
+    record.attemptsUsed = source.attemptsUsed;
+    record.attemptsMaximum = source.attemptsMaximum;
+    if (source.waitingForAdmission)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_WAITING_ADMISSION;
+    if (source.waitingForRetry)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_WAITING_RETRY;
+    if (source.remainingLifetimeAvailable)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_LIFETIME_AVAILABLE;
+    if (source.admissionOrdinalAvailable)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_ORDINAL_AVAILABLE;
+    if (source.persistenceDegraded)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_PERSISTENCE_DEGRADED;
+    if (source.hubUnavailable)
+        record.flags |= HostProtocol::EVENT_DIAGNOSTICS_HUB_UNAVAILABLE;
+    record.remainingLifetimeSeconds = source.remainingLifetimeSeconds;
+    record.admissionOrdinal = source.admissionOrdinal;
+    record.recentAdmissionAvailable = source.recentAdmissionAvailable ? 1 : 0;
+    record.recentAdmission = hostIdentity(source.recentAdmission);
+    record.producerKind = static_cast<uint8_t>(source.lastProducer.kind);
+    record.producerResult = static_cast<uint8_t>(source.lastProducer.result);
+    record.producerIdentityAvailable = source.lastProducer.identityAvailable ? 1 : 0;
+    record.producerIdentity = hostIdentity(source.lastProducer.identity);
+    const RuntimeState::EventDiagnosticCounters& c = source.counters;
+    const uint32_t counters[HostProtocol::EVENT_DIAGNOSTIC_COUNTER_COUNT] = {
+        c.enqueueAccepted, c.queueFullRejected, c.persistenceFailures,
+        c.eventsRecovered, c.storageCorruptions, c.eventAttempts,
+        c.eventsExpired, c.attemptsExhausted, c.hubCapacityRejections,
+        c.identityContentMismatches, c.duplicateRetransmissions,
+        c.successfulAdmissions, c.admissionsAcknowledged,
+        c.hostPollsReturnedEvent, c.hostConsumptions
+    };
+    for (size_t i = 0; i < HostProtocol::EVENT_DIAGNOSTIC_COUNTER_COUNT; ++i)
+        record.counters[i] = counters[i];
+    return record;
 }
 
 inline bool mapRole(
@@ -108,10 +168,11 @@ inline uint32_t diagnosticMetricValue(
 inline Result handleLocalDeviceOrDiagnostic(
     uint16_t requestId,
     const HostProtocol::OperationRequest& request,
-    const DeviceSnapshot& snapshot
+    const DeviceSnapshot& snapshot,
+    uint8_t requestMinor = HostProtocol::VERSION_MINOR_0_1
 ) {
     const HostProtocol::PayloadResult validation =
-        HostProtocol::validateOperationRequest(request);
+        HostProtocol::validateOperationRequest(requestMinor, request);
     if (validation != HostProtocol::PayloadResult::OK) {
         return reject(requestId, request,
             validation == HostProtocol::PayloadResult::UNSUPPORTED_CATEGORY_OPERATION
@@ -177,6 +238,22 @@ inline Result handleLocalDeviceOrDiagnostic(
         }
         return result;
     }
+    if (request.operation == HostProtocol::OperationCode::GET_EVENT_DIAGNOSTICS) {
+        if (!HostProtocol::isNoneValue(request.value)) {
+            if (HostProtocol::encodeEventTxDiagnostics(role, snapshot.eventDetails.txLifecycle,
+                    result.response.value) != HostProtocol::PayloadResult::OK)
+                setOperationResult(result, DeviceCapabilities::OperationStatus::OPERATION_FAILED);
+            return result;
+        }
+        const HostProtocol::EventDiagnosticsRecord record =
+            eventDiagnosticsRecord(snapshot);
+        if (HostProtocol::encodeEventDiagnosticsRecord(record,
+                result.response.value) != HostProtocol::PayloadResult::OK) {
+            setOperationResult(result,
+                DeviceCapabilities::OperationStatus::OPERATION_FAILED);
+        }
+        return result;
+    }
 
     uint32_t cursor = 0;
     if (!HostProtocol::isNoneValue(request.value)) {
@@ -217,14 +294,16 @@ inline Result handleLocalOperation(
     DeviceCapabilities::InterlockState interlock,
     DeviceCapabilities::CapabilityDiagnostics& diagnostics,
     RuntimeState::State& runtimeState,
-    const AvailabilityProvider& availability
+    const AvailabilityProvider& availability,
+    uint8_t requestMinor = HostProtocol::VERSION_MINOR_0_1
 ) {
     if (request.category == HostProtocol::OperationCategory::CAPABILITY) {
         return handleLocalCapability(requestId, request, snapshot.deviceId,
             registryValid, registry, handler, interlock, diagnostics,
             runtimeState, availability);
     }
-    return handleLocalDeviceOrDiagnostic(requestId, request, snapshot);
+    return handleLocalDeviceOrDiagnostic(requestId, request, snapshot,
+        requestMinor);
 }
 
 enum class HelloDisposition : uint8_t {

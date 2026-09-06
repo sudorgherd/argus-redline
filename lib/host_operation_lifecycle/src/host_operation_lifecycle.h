@@ -117,7 +117,7 @@ public:
             } else {
                 local = HostOperationService::handleLocalOperation(requestId, request,
                     snapshot, registryValid, registry, handler, interlock,
-                    diagnostics, runtimeState, availability);
+                    diagnostics, runtimeState, availability, requestMinor);
             }
             if (local.disposition != HostOperationService::Disposition::HANDLED) {
                 return rejection(requestId, request, requestMinor,

@@ -1,6 +1,7 @@
 #include <unity.h>
 
 #include "event_producers.h"
+#include "device_ui.h"
 #include "simulated_capabilities.h"
 
 using namespace EventProducers;
@@ -61,6 +62,36 @@ void test_creation_status_boundary_is_closed() {
         static_cast<uint8_t>(normalize(NodeEventStore::EnqueueStatus::DEGRADED)));
 }
 
+void test_producer_diagnostic_result_preserves_success_and_rejections() {
+    const CreationResult inputs[] = {
+        CreationResult::ENQUEUED, CreationResult::QUEUE_FULL,
+        CreationResult::INVALID_EVENT, CreationResult::STORAGE_FAILURE
+    };
+    const RuntimeState::EventProducerResult expected[] = {
+        RuntimeState::EventProducerResult::CREATED,
+        RuntimeState::EventProducerResult::QUEUE_FULL,
+        RuntimeState::EventProducerResult::INVALID_EVENT,
+        RuntimeState::EventProducerResult::STORAGE_FAILURE
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(expected[i]),
+            static_cast<uint8_t>(diagnosticResult(inputs[i])));
+    }
+
+    RuntimeState::State state(RuntimeState::DeviceRole::NODE, 0x10, 0x01);
+    RuntimeState::EventIdentitySnapshot identity = {0x10, 7, 9};
+    state.recordEventProducer(RuntimeState::EventProducerKind::BUTTON,
+        RuntimeState::EventProducerResult::CREATED, &identity);
+    TEST_ASSERT_TRUE(state.lastEventProducer().identityAvailable);
+    TEST_ASSERT_EQUAL_UINT32(9, state.lastEventProducer().identity.eventId);
+    state.recordEventProducer(RuntimeState::EventProducerKind::BUTTON,
+        RuntimeState::EventProducerResult::QUEUE_FULL);
+    TEST_ASSERT_FALSE(state.lastEventProducer().identityAvailable);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(
+        RuntimeState::EventProducerResult::QUEUE_FULL),
+        static_cast<uint8_t>(state.lastEventProducer().result));
+}
+
 void test_button_schema_and_numeric_mapping_are_exact() {
     RecordingSink sink;
     const DeviceInput::ButtonEvent values[] = {
@@ -115,10 +146,14 @@ void test_editor_wake_and_nonselected_gestures_do_not_emit_button() {
 void test_manual_check_in_is_one_home_long_release_only() {
     RecordingSink sink;
     ButtonProducer producer;
-    producer.observe(events(DeviceInput::ButtonEvent::PRESS), context(), sink);
-    producer.observe(events(DeviceInput::ButtonEvent::LONG_PRESS), context(), sink);
+    const ButtonContext homeNavigationOnly = {true, false, true, false};
+    producer.observe(events(DeviceInput::ButtonEvent::PRESS),
+        homeNavigationOnly, sink);
+    producer.observe(events(DeviceInput::ButtonEvent::LONG_PRESS),
+        homeNavigationOnly, sink);
     TEST_ASSERT_EQUAL_UINT(0, sink.calls);
-    const auto result = producer.observe(events(DeviceInput::ButtonEvent::RELEASE), context(), sink);
+    const auto result = producer.observe(events(DeviceInput::ButtonEvent::RELEASE),
+        homeNavigationOnly, sink);
     TEST_ASSERT_TRUE(result.manualCheckIn.attempted);
     TEST_ASSERT_EQUAL_UINT(1, sink.calls);
     TEST_ASSERT_EQUAL_UINT8(0x44, sink.last.family);
@@ -141,6 +176,106 @@ void test_manual_check_in_excludes_navigation_editor_and_wake_gestures() {
     producer.observe(events(DeviceInput::ButtonEvent::LONG_PRESS), context(), sink);
     producer.observe(events(DeviceInput::ButtonEvent::RELEASE), context(), sink);
     TEST_ASSERT_EQUAL_UINT(0, sink.calls);
+}
+
+ButtonProductionResult routeButtonEvent(
+    DeviceInput::ButtonEvent event,
+    DeviceUi::Controller& controller,
+    ButtonProducer& producer,
+    RecordingSink& sink,
+    uint32_t nowMs
+) {
+    const ButtonContext current = {controller.displayAwake(),
+        controller.editorActive(),
+        controller.screen() == DeviceUi::Screen::HOME,
+        DeviceUi::isButtonProducerScreen(controller.screen())};
+    const ButtonProductionResult result = producer.observe(
+        events(event), current, sink);
+    controller.handle(event, nowMs);
+    return result;
+}
+
+void navigateShortThroughProduction(
+    DeviceUi::Controller& controller,
+    ButtonProducer& producer,
+    RecordingSink& sink,
+    uint32_t nowMs,
+    bool expectProducer
+) {
+    routeButtonEvent(DeviceInput::ButtonEvent::PRESS, controller, producer,
+        sink, nowMs);
+    routeButtonEvent(DeviceInput::ButtonEvent::RELEASE, controller, producer,
+        sink, nowMs + 1);
+    const ButtonProductionResult result = routeButtonEvent(
+        DeviceInput::ButtonEvent::SHORT_PRESS, controller, producer, sink,
+        nowMs + 1);
+    TEST_ASSERT_EQUAL(expectProducer, result.button.attempted);
+    TEST_ASSERT_FALSE(result.buttonSuppressed);
+}
+
+void test_event_diagnostics_normal_navigation_is_non_mutating() {
+    RecordingSink sink;
+    ButtonProducer producer;
+    DeviceUi::Controller controller(0);
+    RuntimeState::State runtime(RuntimeState::DeviceRole::NODE, 0x10, 0x01);
+    runtime.setEventQueue(1, 8);
+    runtime.incrementEventDiagnostic(RuntimeState::EventDiagnostic::ENQUEUE_ACCEPTED);
+    RuntimeState::EventIdentitySnapshot identity = {0x10, 7, 9};
+    runtime.recordEventProducer(RuntimeState::EventProducerKind::BUTTON,
+        RuntimeState::EventProducerResult::CREATED, &identity);
+    const RuntimeState::EventSnapshot eventBefore = runtime.eventSnapshot();
+    const RuntimeState::EventProducerSnapshot producerBefore =
+        runtime.lastEventProducer();
+    navigateShortThroughProduction(controller, producer, sink, 100, false);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(DeviceUi::Screen::EVENT_DIAGNOSTICS),
+        static_cast<uint8_t>(controller.screen()));
+    routeButtonEvent(DeviceInput::ButtonEvent::PRESS, controller, producer,
+        sink, 200);
+    routeButtonEvent(DeviceInput::ButtonEvent::LONG_PRESS, controller, producer,
+        sink, 1000);
+    routeButtonEvent(DeviceInput::ButtonEvent::RELEASE, controller, producer,
+        sink, 1001);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DeviceUi::Screen::HOME),
+        static_cast<uint8_t>(controller.screen()));
+    TEST_ASSERT_EQUAL_UINT(0, sink.calls);
+    const RuntimeState::EventSnapshot& eventAfter = runtime.eventSnapshot();
+    const RuntimeState::EventProducerSnapshot& producerAfter =
+        runtime.lastEventProducer();
+    TEST_ASSERT_EQUAL_MEMORY(&eventBefore, &eventAfter, sizeof(eventBefore));
+    TEST_ASSERT_EQUAL_MEMORY(&producerBefore, &producerAfter,
+        sizeof(producerBefore));
+}
+
+void test_event_diagnostics_forward_navigation_and_remaining_screens() {
+    RecordingSink sink;
+    ButtonProducer producer;
+    DeviceUi::Controller controller(0);
+
+    navigateShortThroughProduction(controller, producer, sink, 100, false);
+    navigateShortThroughProduction(controller, producer, sink, 200, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(DeviceUi::Screen::RADIO),
+        static_cast<uint8_t>(controller.screen()));
+    TEST_ASSERT_EQUAL_UINT(0, sink.calls);
+
+    const DeviceUi::Screen expected[] = {
+        DeviceUi::Screen::DEVICE,
+        DeviceUi::Screen::LAST_PACKET,
+        DeviceUi::Screen::DIAGNOSTICS,
+        DeviceUi::Screen::ABOUT,
+        DeviceUi::Screen::HOME
+    };
+    for (uint8_t index = 0; index < 5; ++index) {
+        navigateShortThroughProduction(controller, producer, sink,
+            300 + index * 100, true);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(expected[index]),
+            static_cast<uint8_t>(controller.screen()));
+        TEST_ASSERT_EQUAL_UINT(index + 1, sink.calls);
+        TEST_ASSERT_EQUAL_UINT8(0x40, sink.last.family);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<uint8_t>(DeviceInput::ButtonEvent::SHORT_PRESS),
+            sink.last.body[0]);
+    }
 }
 
 void test_button_and_manual_propagate_every_creation_result() {
@@ -271,12 +406,15 @@ void test_sensor_propagates_every_creation_result() {
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_creation_status_boundary_is_closed);
+    RUN_TEST(test_producer_diagnostic_result_preserves_success_and_rejections);
     RUN_TEST(test_button_schema_and_numeric_mapping_are_exact);
     RUN_TEST(test_button_none_never_reaches_sink);
     RUN_TEST(test_short_press_production_emits_once_despite_release_pair);
     RUN_TEST(test_editor_wake_and_nonselected_gestures_do_not_emit_button);
     RUN_TEST(test_manual_check_in_is_one_home_long_release_only);
     RUN_TEST(test_manual_check_in_excludes_navigation_editor_and_wake_gestures);
+    RUN_TEST(test_event_diagnostics_normal_navigation_is_non_mutating);
+    RUN_TEST(test_event_diagnostics_forward_navigation_and_remaining_screens);
     RUN_TEST(test_button_and_manual_propagate_every_creation_result);
     RUN_TEST(test_sensor_schema_is_exact_little_endian_logical_id);
     RUN_TEST(test_sensor_crossing_is_edge_triggered_and_hysteresis_rearms);

@@ -1,6 +1,9 @@
 #include <unity.h>
+#include <initializer_list>
 
 #include "node_event_delivery.h"
+#include "node_event_reclamation.h"
+#include "node_event_service_time.h"
 
 using namespace EventRecords;
 using namespace EventStorage;
@@ -714,10 +717,295 @@ void testHubUnavailableUsesOnlyFrozenEvidencePaths() {
     TEST_ASSERT_FALSE(localFailure.diagnostics.eventSnapshot().hubUnavailable);
 }
 
+void testRecoveredTerminalsReclaimedAndMixedQueuePreserved() {
+    DeliveryFixture f; f.initializeEmpty();
+    const auto expired = f.enqueue(); const auto failed = f.enqueue();
+    const auto queued = f.enqueue();
+    f.store.markExpired(expired); f.store.markFailed(failed);
+    const NodeRecord before = *f.store.recordAt(queued);
+    NodeEventStore::Store rebooted;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeEventStore::Status::READY,
+        (uint8_t)rebooted.recover(f.storage, f.entropy, 0x10));
+    const unsigned metadataWrites = f.storage.metadataWrites;
+    TEST_ASSERT_TRUE(reclaimTerminals(rebooted, nullptr));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::FREE, (uint8_t)rebooted.recordAt(expired)->state);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::FREE, (uint8_t)rebooted.recordAt(failed)->state);
+    TEST_ASSERT_EQUAL_MEMORY(&before, rebooted.recordAt(queued), sizeof(before));
+    TEST_ASSERT_EQUAL_UINT(metadataWrites, f.storage.metadataWrites);
+    TEST_ASSERT_EQUAL_UINT(1, rebooted.ownedCount());
+    Controller controller;
+    controller.recover(rebooted, 0x10, 0x20, f.sequence, f.jitter, 0);
+    TEST_ASSERT_EQUAL_UINT8(queued, controller.activeSlot());
+}
+
+void testRuntimeTerminalReclaimAdvancesFifo() {
+    for (bool expire : {false, true}) {
+        DeliveryFixture f; f.initializeEmpty();
+        const auto first = f.enqueue(120); const auto next = f.enqueue(300);
+        f.recoverController();
+        if (expire) f.controller.service(60000, true);
+        else {
+            f.waitAdmission();
+            uint8_t bytes[32]; size_t length = 0;
+            f.response(EventProtocol::AdmissionStatus::UNSUPPORTED_EVENT, bytes, length);
+            f.controller.admissionCandidate(bytes, length, 1);
+        }
+        const unsigned writes = f.storage.eventWrites;
+        TEST_ASSERT_TRUE(isTerminalRecord(f.store.recordAt(first)));
+        TEST_ASSERT_TRUE(reclaimTerminals(f.store, &f.controller));
+        TEST_ASSERT_EQUAL_UINT(writes + 1, f.storage.eventWrites);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::FREE, (uint8_t)f.store.recordAt(first)->state);
+        f.controller.service(expire ? 60000 : 2, false);
+        TEST_ASSERT_EQUAL_UINT8(next, f.controller.activeSlot());
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::READY, (uint8_t)f.controller.state());
+    }
+}
+
+void testReclaimFailuresFailClosedAtBootAndRuntime() {
+    const Fault faults[] = {Fault::WRITE, Fault::COMMIT, Fault::READ_MISSING,
+        Fault::READ_UNAVAILABLE, Fault::MISMATCH, Fault::BAD_CRC};
+    for (auto fault : faults) for (bool runtime : {false, true}) {
+        DeliveryFixture f; f.initializeEmpty(); const auto slot = f.enqueue(120);
+        f.recoverController(); f.controller.service(60000, true);
+        f.storage.fault = fault;
+        TEST_ASSERT_FALSE(reclaimTerminals(f.store, runtime ? &f.controller : nullptr));
+        TEST_ASSERT_FALSE(f.store.healthy());
+        TEST_ASSERT_TRUE(f.diagnostics.eventSnapshot().persistenceDegraded);
+        TEST_ASSERT_EQUAL_UINT32(1, f.diagnostics.eventSnapshot().counters.persistenceFailures);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::EXPIRED, (uint8_t)f.store.recordAt(slot)->state);
+        TEST_ASSERT_NOT_EQUAL((uint8_t)RadioActionType::TRANSMIT,
+            (uint8_t)f.controller.grantTransmit(60001).action.type);
+    }
+}
+
+void testReclaimNeverTouchesNonterminalDeliveryStates() {
+    for (unsigned state = 0; state < 5; ++state) {
+        DeliveryFixture f; f.initializeEmpty(); const auto slot = f.enqueue(); f.recoverController();
+        if (state >= 1) f.ready();
+        if (state >= 2) f.controller.grantTransmit(0);
+        if (state >= 3) f.controller.txCompleted(0);
+        if (state >= 4) f.controller.service(2500, false);
+        const NodeRecord before = *f.store.recordAt(slot);
+        const auto runtimeBefore = f.controller.state();
+        const unsigned writes = f.storage.eventWrites;
+        TEST_ASSERT_TRUE(reclaimTerminals(f.store, &f.controller));
+        TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+        TEST_ASSERT_EQUAL_MEMORY(&before, f.store.recordAt(slot), sizeof(before));
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)runtimeBefore, (uint8_t)f.controller.state());
+    }
+}
+
+void testParallelExpiryReclamationRestoresCapacity() {
+    DeliveryFixture f; f.initializeEmpty();
+    for (unsigned i = 0; i < 8; ++i) f.enqueue(120);
+    f.recoverController(); f.controller.service(60000, false);
+    TEST_ASSERT_EQUAL_UINT(8, f.store.ownedCount());
+    TEST_ASSERT_TRUE(reclaimTerminals(f.store, &f.controller));
+    TEST_ASSERT_EQUAL_UINT(0, f.store.ownedCount());
+    const auto next = f.store.enqueue(event());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)EnqueueStatus::ENQUEUED, (uint8_t)next.status);
+    TEST_ASSERT_TRUE(next.identity.id > 8);
+    f.controller.service(60001, false);
+    TEST_ASSERT_EQUAL_UINT8(next.slot, f.controller.activeSlot());
+}
+
+void testLifecycleObservationDoesNotChangeDeliveryOrStorage() {
+    DeliveryFixture observed, plain;
+    observed.initializeEmpty(); plain.initializeEmpty();
+    observed.enqueue(); plain.enqueue();
+    EventTxDiagnostics::Observer observer; observer.enable();
+    observed.controller.recover(observed.store, 0x10, 0x20, observed.sequence,
+        observed.jitter, 0, &observed.diagnostics, &observer);
+    plain.recoverController();
+    for (auto* f : {&observed, &plain}) {
+        f->waitAdmission(100);
+        f->controller.service(2600, false);
+        f->controller.service(3600, false);
+        f->controller.grantTransmit(3600);
+        f->controller.txStartFailed(3601);
+    }
+    TEST_ASSERT_EQUAL_MEMORY(&plain.storage.events, &observed.storage.events,
+        sizeof(plain.storage.events));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)plain.controller.state(), (uint8_t)observed.controller.state());
+    using C = EventTxDiagnostics::Counter;
+    const auto& s = observer.snapshot();
+    TEST_ASSERT_EQUAL_UINT16(2, s.counters[(uint8_t)C::TX_ENTERED]);
+    TEST_ASSERT_EQUAL_UINT16(1, s.counters[(uint8_t)C::WAIT_ENTERED]);
+    TEST_ASSERT_EQUAL_UINT16(1, s.counters[(uint8_t)C::ADMISSION_TIMEOUT]);
+    TEST_ASSERT_EQUAL_UINT16(2, s.counters[(uint8_t)C::BACKOFF_ENTERED]);
+    TEST_ASSERT_EQUAL_UINT16(1, s.counters[(uint8_t)C::BACKOFF_DUE]);
+    TEST_ASSERT_EQUAL_UINT16(1, s.counters[(uint8_t)C::RETRY_READY]);
+    TEST_ASSERT_EQUAL_UINT8(2, s.attempt);
+}
+
+void testExistingBackwardTimeInputExpiresQueueAndIsObserved() {
+    // Negative control for the former production call order. The policy and
+    // observer still expose bad callers; serviceNow repairs integration only.
+    DeliveryFixture f; f.initializeEmpty(); f.enqueue(3600); f.enqueue(3600);
+    EventTxDiagnostics::Observer observer; observer.enable();
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter, 0, &f.diagnostics, &observer);
+    f.waitAdmission(100);
+    uint8_t unrelated[6] = {};
+    f.controller.admissionCandidate(unrelated, sizeof(unrelated), 110);
+    f.controller.service(105, false);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::EXPIRED, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT32(2, f.diagnostics.eventSnapshot().counters.eventsExpired);
+    using C = EventTxDiagnostics::Counter;
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::CLOCK_REVERSED]);
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::EXPIRED_WAIT]);
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::EXPIRED_QUEUED]);
+    TEST_ASSERT_EQUAL_UINT32(110, observer.snapshot().previousClock);
+    TEST_ASSERT_EQUAL_UINT32(105, observer.snapshot().inputClock);
+}
+
+void assertServiceSamplesAfterPacket(uint32_t loopStart, uint32_t packetTime,
+                                    uint32_t serviceTime) {
+    DeliveryFixture f; f.initializeEmpty(loopStart);
+    const uint8_t head = f.enqueue(3600), follower = f.enqueue(3600);
+    EventTxDiagnostics::Observer observer; observer.enable();
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter,
+        loopStart, &f.diagnostics, &observer);
+    f.waitAdmission(loopStart);
+    const EventRecords::NodeRecord originalHead = *f.store.recordAt(head);
+    const EventRecords::NodeRecord originalFollower = *f.store.recordAt(follower);
+    const unsigned writes = f.storage.eventWrites;
+    const unsigned identityWrites = f.storage.metadataWrites;
+    uint8_t unrelated[6] = {};
+    f.controller.admissionCandidate(unrelated, sizeof(unrelated), packetTime);
+    unsigned clockReads = 0;
+    // Same boundary called by production serviceNodeEvents(). loopStart is
+    // deliberately still in scope but cannot be supplied instead of a clock.
+    const auto tick = serviceNow(f.controller, false, [&] {
+        ++clockReads; return serviceTime;
+    });
+    TEST_ASSERT_EQUAL_UINT(1, clockReads);
+    TEST_ASSERT_EQUAL_UINT32(serviceTime, tick.now);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::OK, (uint8_t)tick.result.status);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT8(head, f.controller.activeSlot());
+    TEST_ASSERT_EQUAL_UINT(2, f.store.queuedCount());
+    TEST_ASSERT_EQUAL_UINT8(1, f.store.recordAt(head)->attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.recordAt(follower)->attemptsUsed);
+    const EventRecords::NodeRecord* originals[] = {&originalHead, &originalFollower};
+    const uint8_t slots[] = {head, follower};
+    for (unsigned i = 0; i < 2; ++i) {
+        uint8_t before[NODE_RECORD_SIZE] = {}, after[NODE_RECORD_SIZE] = {};
+        encodeNodeRecord(*originals[i], before, sizeof(before));
+        encodeNodeRecord(*f.store.recordAt(slots[i]), after, sizeof(after));
+        TEST_ASSERT_EQUAL_MEMORY(before, after, sizeof(before));
+    }
+    TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+    TEST_ASSERT_EQUAL_UINT(identityWrites, f.storage.metadataWrites);
+    TEST_ASSERT_EQUAL_UINT32(0, f.diagnostics.eventSnapshot().counters.eventsExpired);
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[
+        (uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED]);
+    // Fresh packet/service times must not reset the original admission deadline.
+    serviceNow(f.controller, false, [=] { return loopStart + 2499U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    serviceNow(f.controller, false, [=] { return loopStart + 2500U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::BACKOFF, (uint8_t)f.controller.state());
+    serviceNow(f.controller, false, [=] { return loopStart + 3499U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::BACKOFF, (uint8_t)f.controller.state());
+    serviceNow(f.controller, false, [=] { return loopStart + 3500U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::READY, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[
+        (uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED]);
+}
+
+void testObservedOneMillisecondStaleLoopUsesFreshServiceClock() {
+    assertServiceSamplesAfterPacket(224677U, 224678U, 224678U);
+}
+
+void testPacketProcessingThenServiceDoesNotReuseLoopStart() {
+    assertServiceSamplesAfterPacket(105U, 110U, 112U);
+}
+
+void testFreshServiceClockPreservesLegitimateWrapAndRetryDeadlines() {
+    assertServiceSamplesAfterPacket(0xFFFFFFFEU, 2U, 3U);
+}
+
+void testFreshServiceClockPreservesPoweredLifetimeAndCheckpoint() {
+    DeliveryFixture f; f.initializeEmpty();
+    const uint8_t head = f.enqueue(3600), follower = f.enqueue(3600);
+    EventTxDiagnostics::Observer observer; observer.enable();
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter, 0,
+        &f.diagnostics, &observer);
+    // Recovery's existing sixty-second debit remains authoritative.
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(head)->remainingActiveSeconds);
+    serviceNow(f.controller, true, [] { return 59999U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(follower)->remainingActiveSeconds);
+    serviceNow(f.controller, true, [] { return 60000U; });
+    TEST_ASSERT_EQUAL_UINT32(3480, f.store.recordAt(head)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT32(3480, f.store.recordAt(follower)->remainingActiveSeconds);
+    serviceNow(f.controller, true, [] { return 3540000U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::EXPIRED, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT32(2, f.diagnostics.eventSnapshot().counters.eventsExpired);
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[
+        (uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED]);
+}
+
+void testAdmissionObservationsDoNotReleaseWrongAck() {
+    DeliveryFixture f; f.initializeEmpty(); auto slot = f.enqueue();
+    EventTxDiagnostics::Observer observer; observer.enable();
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter, 0, &f.diagnostics, &observer);
+    f.waitAdmission(100);
+    auto ack = EventProtocol::makeAdmissionResponse(f.controller.attemptEvent(), EventProtocol::AdmissionStatus::ADMITTED);
+    uint8_t bytes[32]; size_t length = 0;
+    ++ack.sequence;
+    TEST_ASSERT_TRUE(EventProtocol::encodeAdmissionResponse(ack, bytes, sizeof(bytes), length));
+    const auto writes = f.storage.eventWrites;
+    f.controller.admissionCandidate(bytes, length, 101);
+    TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+    using C = EventTxDiagnostics::Counter;
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::ACK_DECODED]);
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[(uint8_t)C::ACK_MATCHED]);
+    --ack.sequence;
+    TEST_ASSERT_TRUE(EventProtocol::encodeAdmissionResponse(ack, bytes, sizeof(bytes), length));
+    f.controller.admissionCandidate(bytes, length, 102);
+    TEST_ASSERT_EQUAL_UINT16(2, observer.snapshot().counters[(uint8_t)C::ACK_DECODED]);
+    TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)C::ACK_MATCHED]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::FREE, (uint8_t)f.store.recordAt(slot)->state);
+}
+
+void testExpiryObservationsByStateAndWrapIsNotClockReversal() {
+    using C = EventTxDiagnostics::Counter;
+    const C expected[] = {C::EXPIRED_QUEUED, C::EXPIRED_READY, C::EXPIRED_TX,
+        C::EXPIRED_WAIT, C::EXPIRED_BACKOFF};
+    for (unsigned mode = 0; mode < 5; ++mode) {
+        DeliveryFixture f; f.initializeEmpty(); f.enqueue(120);
+        EventTxDiagnostics::Observer observer; observer.enable();
+        f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter, 0, &f.diagnostics, &observer);
+        if (mode >= 1) f.ready();
+        if (mode >= 2) f.controller.grantTransmit(0);
+        if (mode >= 3) f.controller.txCompleted(0);
+        if (mode >= 4) f.controller.service(2500, false);
+        f.controller.service(60000, false);
+        TEST_ASSERT_EQUAL_UINT16(1, observer.snapshot().counters[(uint8_t)expected[mode]]);
+    }
+    EventTxDiagnostics::Observer wrap;
+    wrap.clock(0xFFFFFFF0U); wrap.clock(0x20U);
+    TEST_ASSERT_EQUAL_UINT16(0, wrap.snapshot().counters[(uint8_t)C::CLOCK_REVERSED]);
+    for (unsigned i = 0; i < 65540; ++i) wrap.note(C::START_CALLED, i);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, wrap.snapshot().counters[(uint8_t)C::START_CALLED]);
+}
+
 }  // namespace
 
 int main(int, char**) {
     UNITY_BEGIN();
+    RUN_TEST(testRecoveredTerminalsReclaimedAndMixedQueuePreserved);
+    RUN_TEST(testRuntimeTerminalReclaimAdvancesFifo);
+    RUN_TEST(testReclaimFailuresFailClosedAtBootAndRuntime);
+    RUN_TEST(testReclaimNeverTouchesNonterminalDeliveryStates);
+    RUN_TEST(testParallelExpiryReclamationRestoresCapacity);
+    RUN_TEST(testLifecycleObservationDoesNotChangeDeliveryOrStorage);
+    RUN_TEST(testExistingBackwardTimeInputExpiresQueueAndIsObserved);
+    RUN_TEST(testObservedOneMillisecondStaleLoopUsesFreshServiceClock);
+    RUN_TEST(testPacketProcessingThenServiceDoesNotReuseLoopStart);
+    RUN_TEST(testFreshServiceClockPreservesLegitimateWrapAndRetryDeadlines);
+    RUN_TEST(testFreshServiceClockPreservesPoweredLifetimeAndCheckpoint);
+    RUN_TEST(testAdmissionObservationsDoNotReleaseWrongAck);
+    RUN_TEST(testExpiryObservationsByStateAndWrapIsNotClockReversal);
     RUN_TEST(testEnqueueBaselineAndSubCheckpointAccounting);
     RUN_TEST(testExactAndMultipleCheckpointCatchup);
     RUN_TEST(testImmediateExpiryAtExactBoundaryAndAfterCheckpoint);
