@@ -307,5 +307,116 @@ class CliTests(unittest.TestCase):
                 self.assertIn(("port","COM_TEST",False),prior)
         self.assertFalse(any(event[0] in ("dtr","rts") and event[2] for event in events if len(event)>2))
 
+    def test_linux_open_clears_dtr_and_rts_atomically(self):
+        events=[]
+        line_state={"value":0}
+
+        class FakePosixSerial:
+            def __init__(self):
+                self.is_open=False; self.fd=None
+                self._dtr_state=True; self._rts_state=True
+            @property
+            def dtr(self): return self._dtr_state
+            @dtr.setter
+            def dtr(self,value):
+                self._dtr_state=value
+                if self.is_open: self._update_dtr_state()
+            @property
+            def rts(self): return self._rts_state
+            @rts.setter
+            def rts(self,value):
+                self._rts_state=value
+                if self.is_open: self._update_rts_state()
+            def open(self):
+                self.fd=17; line_state["value"]=3
+                events.append(("kernel_open",line_state["value"]))
+                try:
+                    self._update_dtr_state()
+                    self._update_rts_state()
+                except BaseException:
+                    events.append(("open_cleanup",line_state["value"]))
+                    self.fd=None
+                    raise
+                self.is_open=True
+            def close(self):
+                events.append(("close",line_state["value"]))
+                self.is_open=False; self.fd=None
+            def _update_dtr_state(self):
+                bit=1
+                line_state["value"] = ((line_state["value"] | bit) if self._dtr_state
+                                       else (line_state["value"] & ~bit))
+                events.append(("dtr",line_state["value"]))
+            def _update_rts_state(self):
+                bit=2
+                line_state["value"] = ((line_state["value"] | bit) if self._rts_state
+                                       else (line_state["value"] & ~bit))
+                events.append(("rts",line_state["value"]))
+
+        def fake_ioctl(fd,request,packed):
+            mask=struct.unpack("I",packed)[0]
+            cdc_mask = (1 if mask & 0x02 else 0) | (2 if mask & 0x04 else 0)
+            line_state["value"] &= ~cdc_mask
+            events.append(("atomic_clear",fd,request,mask,line_state["value"]))
+
+        factory=h._linux_atomic_serial_factory(
+            FakePosixSerial,ioctl=fake_ioctl,tiocmbic=0x5417,
+            tiocm_dtr=0x02,tiocm_rts=0x04)
+        stream=h.open_serial_transport("/dev/ttyACM-test",115200,0.05,1.0,factory)
+        self.assertEqual([
+            ("kernel_open",3),
+            ("atomic_clear",17,0x5417,0x06,0),
+            ("rts",0),
+        ],events)
+        self.assertFalse(stream.dtr); self.assertFalse(stream.rts)
+
+        # The adapter is scoped to open; later explicit state changes use the
+        # original pyserial hooks rather than the atomic opening override.
+        stream.dtr=True; stream.dtr=False; stream.close()
+        self.assertEqual(("dtr",1),events[3])
+        self.assertEqual(("dtr",0),events[4])
+        self.assertEqual(("close",0),events[5])
+
+    def test_linux_atomic_clear_failure_aborts_open(self):
+        events=[]
+        class FakePosixSerial:
+            def __init__(self):
+                self.is_open=False; self.fd=None
+                self._dtr_state=True; self._rts_state=True
+            @property
+            def dtr(self): return self._dtr_state
+            @dtr.setter
+            def dtr(self,value): self._dtr_state=value
+            @property
+            def rts(self): return self._rts_state
+            @rts.setter
+            def rts(self,value): self._rts_state=value
+            def open(self):
+                self.fd=17
+                try: self._update_dtr_state(); self._update_rts_state()
+                except BaseException:
+                    events.append("cleanup"); self.fd=None; raise
+                self.is_open=True
+            def _update_dtr_state(self): events.append("dtr")
+            def _update_rts_state(self): events.append("rts")
+
+        def failed_ioctl(fd,request,packed):
+            events.append(("atomic",struct.unpack("I",packed)[0]))
+            raise OSError(22,"unsupported")
+
+        factory=h._linux_atomic_serial_factory(
+            FakePosixSerial,ioctl=failed_ioctl,tiocmbic=0x5417,
+            tiocm_dtr=0x02,tiocm_rts=0x04)
+        with self.assertRaisesRegex(RuntimeError,"atomic Linux DTR/RTS clear failed"):
+            h.open_serial_transport("/dev/ttyACM-test",115200,0.05,1.0,factory)
+        self.assertEqual([("atomic",0x06),"cleanup"],events)
+
+    def test_safe_factory_is_linux_only_and_checks_backend_hooks(self):
+        sentinel=object()
+        serial_module=type("FakeSerialModule",(),{"Serial":sentinel})
+        with mock.patch.object(h.sys,"platform","win32"):
+            self.assertIs(sentinel,h._default_serial_factory(serial_module))
+        with self.assertRaisesRegex(RuntimeError,"requires pyserial"):
+            h._linux_atomic_serial_factory(object)
+
 
 if __name__ == "__main__": unittest.main()

@@ -389,11 +389,71 @@ def make_parser():
     q=sub.add_parser("vectors"); q.add_argument("name",nargs="?"); q.add_argument("--port"); q.add_argument("--baud",type=int,default=115200)
     return p
 
+def _linux_atomic_serial_factory(serial_class, *, ioctl=None, tiocmbic=None,
+                                 tiocm_dtr=None, tiocm_rts=None):
+    """Wrap pyserial so its first inactive-line update clears DTR/RTS together.
+
+    Linux raises both CDC ACM control lines while opening a tty.  pyserial's
+    public API cannot intervene between that open and its separate protected
+    DTR-then-RTS update hooks, whose intermediate RTS-only state resets an
+    ESP32-S3 USB Serial/JTAG device.  The protected hooks are therefore the
+    narrowest available integration point.  Validate them before any device is
+    opened so an incompatible pyserial backend fails closed.
+    """
+    hook_names = ("_update_dtr_state", "_update_rts_state")
+    if not all(callable(getattr(serial_class, name, None)) for name in hook_names):
+        raise RuntimeError("Linux safe serial open requires pyserial DTR/RTS update hooks")
+    if ioctl is None or None in (tiocmbic, tiocm_dtr, tiocm_rts):
+        import fcntl
+        import termios
+        ioctl = fcntl.ioctl if ioctl is None else ioctl
+        tiocmbic = termios.TIOCMBIC if tiocmbic is None else tiocmbic
+        tiocm_dtr = termios.TIOCM_DTR if tiocm_dtr is None else tiocm_dtr
+        tiocm_rts = termios.TIOCM_RTS if tiocm_rts is None else tiocm_rts
+    inactive_mask = struct.pack("I", tiocm_dtr | tiocm_rts)
+
+    class LinuxAtomicSerial(serial_class):
+        def open(self):
+            self._redline_atomic_clear_pending = True
+            try:
+                return super().open()
+            finally:
+                self._redline_atomic_clear_pending = False
+
+        def _redline_update_modem_state(self, fallback):
+            if (getattr(self, "_redline_atomic_clear_pending", False) and
+                    self._dtr_state is False and self._rts_state is False):
+                try:
+                    ioctl(self.fd, tiocmbic, inactive_mask)
+                except OSError as exc:
+                    # pyserial suppresses EINVAL/ENOTTY from its update hooks.
+                    # Convert the failure so open aborts and its cleanup closes
+                    # the fd rather than returning with both lines asserted.
+                    raise RuntimeError("atomic Linux DTR/RTS clear failed") from exc
+                self._redline_atomic_clear_pending = False
+            else:
+                fallback()
+
+        def _update_dtr_state(self):
+            self._redline_update_modem_state(super()._update_dtr_state)
+
+        def _update_rts_state(self):
+            self._redline_update_modem_state(super()._update_rts_state)
+
+    return LinuxAtomicSerial
+
+
+def _default_serial_factory(serial_module):
+    if sys.platform.startswith("linux"):
+        return _linux_atomic_serial_factory(serial_module.Serial)
+    return serial_module.Serial
+
+
 def open_serial_transport(port, baud, timeout, write_timeout, serial_factory=None):
     if serial_factory is None:
         try: import serial
         except ImportError as exc: raise RuntimeError("live mode requires pyserial; install with: python -m pip install pyserial") from exc
-        serial_factory = serial.Serial
+        serial_factory = _default_serial_factory(serial)
     stream = serial_factory()
     stream.baudrate = baud
     stream.timeout = timeout
