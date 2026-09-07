@@ -1,7 +1,10 @@
 #include <unity.h>
 #include <initializer_list>
+#include <stdio.h>
+#include <string.h>
 
 #include "node_event_delivery.h"
+#include "node_event_creation.h"
 #include "node_event_reclamation.h"
 #include "node_event_service_time.h"
 
@@ -504,6 +507,13 @@ struct DeliveryFixture {
         TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(EnqueueStatus::ENQUEUED), static_cast<uint8_t>(result.status));
         return result.slot;
     }
+    uint8_t enqueueTracked(uint32_t lifetime, uint32_t now) {
+        const auto clock = [=] { return now; };
+        TrackedCreationSink<decltype(clock)> sink(store, controller, clock);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProducers::CreationResult::ENQUEUED,
+            (uint8_t)sink.create(event(lifetime)));
+        return sink.lastResult().slot;
+    }
     void recoverController(uint32_t now = 0) {
         const ControllerStatus status = controller.recover(store, 0x10, 0x20, sequence,
             jitter, now, &diagnostics).status;
@@ -525,6 +535,291 @@ struct DeliveryFixture {
         TEST_ASSERT_TRUE(EventProtocol::encodeAdmissionResponse(admission, bytes, Protocol::MAX_PACKET_SIZE, length));
     }
 };
+
+void assertReusedSlotStartsWithFreshLifetime(bool admitted, uint32_t idleMs) {
+    constexpr uint32_t lifetime = 3600;
+    constexpr uint32_t startAt = 1000;
+    constexpr uint32_t terminalAt = 1030;
+    DeliveryFixture f; f.initializeEmpty(startAt);
+    EventTxDiagnostics::Observer observer; observer.enable();
+    // Attach observations while empty, before A exists. Never recover the
+    // controller or manually track a slot between A and B: the shared creation
+    // sink must notify the controller after each successful durable enqueue.
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter,
+        startAt, &f.diagnostics, &observer);
+    const uint8_t first = f.enqueueTracked(lifetime, startAt);
+    const uint32_t firstId = f.store.recordAt(first)->eventId;
+    f.waitAdmission(startAt);
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0;
+    f.response(admitted ? EventProtocol::AdmissionStatus::ADMITTED
+                        : EventProtocol::AdmissionStatus::UNSUPPORTED_EVENT,
+        bytes, length);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::OK,
+        (uint8_t)f.controller.admissionCandidate(bytes, length, terminalAt).status);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(admitted ? RuntimeState::RELEASED : RuntimeState::FAILED),
+        (uint8_t)f.controller.state());
+    if (!admitted) TEST_ASSERT_TRUE(reclaimTerminals(f.store, &f.controller, &observer, terminalAt));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeState::FREE, (uint8_t)f.store.recordAt(first)->state);
+    TEST_ASSERT_EQUAL_UINT(0, f.store.ownedCount());
+
+    const uint32_t enqueuedAt = terminalAt + idleMs;
+    for (uint32_t now : {terminalAt, terminalAt + idleMs / 2U, enqueuedAt}) {
+        const auto idle = serviceNow(f.controller, false, [=] { return now; });
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::NO_ACTIVE_EVENT,
+            (uint8_t)idle.result.status);
+        TEST_ASSERT_FALSE(f.controller.hasActiveEvent());
+    }
+
+    // Same tracked creation sink -> serviceNow path as production.
+    const uint8_t second = f.enqueueTracked(lifetime, enqueuedAt);
+    TEST_ASSERT_EQUAL_UINT8(first, second);
+    const NodeRecord before = *f.store.recordAt(second);
+    TEST_ASSERT_NOT_EQUAL(firstId, before.eventId);
+    TEST_ASSERT_EQUAL_UINT32(lifetime, before.remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT8(0, before.attemptsUsed);
+    const unsigned writes = f.storage.eventWrites;
+    const auto serviced = serviceNow(f.controller, true, [=] { return enqueuedAt; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::OK, (uint8_t)serviced.result.status);
+    const uint16_t reversed = observer.snapshot().counters[
+        (uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED];
+    char evidence[144];
+    snprintf(evidence, sizeof(evidence),
+        "reuse idle=%lu state=%u stored=%lu effective=%lu attempts=%u reversed=%u",
+        (unsigned long)idleMs, (unsigned)f.controller.state(),
+        (unsigned long)f.store.recordAt(second)->remainingActiveSeconds,
+        (unsigned long)f.controller.effectiveRemainingSeconds(),
+        f.store.recordAt(second)->attemptsUsed, reversed);
+    TEST_MESSAGE(evidence);
+    TEST_ASSERT_EQUAL_UINT16(0, reversed);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(lifetime, f.controller.effectiveRemainingSeconds(),
+        "new Event must not inherit the prior slot occupant's elapsed lifetime");
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::QUEUED, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_MEMORY(&before, f.store.recordAt(second), sizeof(before));
+    TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+    serviceNow(f.controller, false, [=] { return enqueuedAt; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::READY, (uint8_t)f.controller.state());
+    const auto tx = f.controller.grantTransmit(enqueuedAt);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RadioActionType::TRANSMIT, (uint8_t)tx.action.type);
+    TEST_ASSERT_EQUAL_UINT32(before.eventId, f.controller.attemptEvent().id);
+    TEST_ASSERT_EQUAL_UINT32(lifetime, f.controller.attemptEvent().lifetimeBudgetSeconds);
+    TEST_ASSERT_EQUAL_UINT8(1, f.store.recordAt(second)->attemptsUsed);
+}
+
+void testReleasedSlotReuseAfterLongIdleStartsFresh() {
+    assertReusedSlotStartsWithFreshLifetime(true, 3600001U);
+}
+
+void testReleasedSlotReuseAfterOrdinaryIdleStartsFresh() {
+    assertReusedSlotStartsWithFreshLifetime(true, 2000U);
+}
+
+void testReclaimedFailedSlotReuseAfterLongIdleStartsFresh() {
+    assertReusedSlotStartsWithFreshLifetime(false, 3600001U);
+}
+
+void testReclaimedFailedSlotReuseAfterOrdinaryIdleStartsFresh() {
+    assertReusedSlotStartsWithFreshLifetime(false, 2000U);
+}
+
+void testExplicitEnqueueTrackingResetsOnlyReusedSlot() {
+    Fixture f; f.initialize(1000);
+    const auto first = f.enqueue(3600, 1000);
+    const auto follower = f.enqueue(3600, 1000);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Status::READY, (uint8_t)f.policy.service(11000));
+    TEST_ASSERT_EQUAL_UINT32(3590, f.policy.effectiveRemainingSeconds(follower.slot));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)MutationStatus::OK,
+        (uint8_t)f.store.releaseQueued(first.slot));
+    // No intervening policy tick sees FREE. Fixture::enqueue explicitly uses
+    // the existing policy API, the single-slot primitive used by the controller.
+    const auto replacement = f.enqueue(3600, 11000);
+    TEST_ASSERT_EQUAL_UINT8(first.slot, replacement.slot);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Status::READY, (uint8_t)f.policy.service(11000));
+    TEST_ASSERT_EQUAL_UINT32(3600, f.policy.effectiveRemainingSeconds(replacement.slot));
+    TEST_ASSERT_EQUAL_UINT32(3590, f.policy.effectiveRemainingSeconds(follower.slot));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)Status::READY, (uint8_t)f.policy.service(71000));
+    TEST_ASSERT_EQUAL_UINT32(3540, f.policy.effectiveRemainingSeconds(replacement.slot));
+    TEST_ASSERT_EQUAL_UINT32(3530, f.policy.effectiveRemainingSeconds(follower.slot));
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(replacement.slot)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(follower.slot)->remainingActiveSeconds);
+}
+
+void testTrackedCreationSamplesAfterDurableCommitAndCountsBeforeFirstService() {
+    DeliveryFixture f; f.initializeEmpty(1000);
+    const unsigned writes = f.storage.eventWrites;
+    unsigned clockReads = 0;
+    const auto clock = [&] {
+        ++clockReads;
+        // The in-memory authoritative index is published only after durable
+        // write/commit/readback. Tracking must not sample the pre-enqueue time.
+        TEST_ASSERT_EQUAL_UINT(writes + 1U, f.storage.eventWrites);
+        TEST_ASSERT_EQUAL_UINT(1, f.store.queuedCount());
+        TEST_ASSERT_EQUAL_UINT32(3600, f.store.queuedAt(0)->remainingActiveSeconds);
+        return 1100U;
+    };
+    TrackedCreationSink<decltype(clock)> sink(f.store, f.controller, clock);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProducers::CreationResult::ENQUEUED,
+        (uint8_t)sink.create(event(3600)));
+    TEST_ASSERT_EQUAL_UINT(1, clockReads);
+    serviceNow(f.controller, true, [] { return 61099U; });
+    TEST_ASSERT_EQUAL_UINT32(3541, f.controller.effectiveRemainingSeconds());
+    TEST_ASSERT_EQUAL_UINT32(3600, f.store.queuedAt(0)->remainingActiveSeconds);
+    serviceNow(f.controller, true, [] { return 61100U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.controller.effectiveRemainingSeconds());
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.queuedAt(0)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT(writes + 2U, f.storage.eventWrites);
+}
+
+void testTrackedSlotReusePreservesWaitingHeadFollowerAndFifo() {
+    DeliveryFixture f; f.initializeEmpty(1000);
+    const uint8_t first = f.enqueueTracked(3600, 1000);
+    const uint8_t head = f.enqueueTracked(3600, 1000);
+    const uint8_t follower = f.enqueueTracked(3600, 1000);
+    f.waitAdmission(1000);
+    uint8_t bytes[Protocol::MAX_PACKET_SIZE] = {}; size_t length = 0;
+    f.response(EventProtocol::AdmissionStatus::ADMITTED, bytes, length);
+    f.controller.admissionCandidate(bytes, length, 1030);
+    f.waitAdmission(1030);
+    TEST_ASSERT_EQUAL_UINT8(head, f.controller.activeSlot());
+    const auto headBefore = *f.store.recordAt(head);
+    const auto followerBefore = *f.store.recordAt(follower);
+    const unsigned writes = f.storage.eventWrites;
+    const uint32_t deadline = f.controller.deadlineOrigin();
+    const uint8_t replacement = f.enqueueTracked(3600, 1100);
+    TEST_ASSERT_EQUAL_UINT8(first, replacement);
+    TEST_ASSERT_EQUAL_UINT(writes + 1U, f.storage.eventWrites);
+    TEST_ASSERT_EQUAL_MEMORY(&headBefore, f.store.recordAt(head), sizeof(headBefore));
+    TEST_ASSERT_EQUAL_MEMORY(&followerBefore, f.store.recordAt(follower), sizeof(followerBefore));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT32(deadline, f.controller.deadlineOrigin());
+    const uint8_t expected[] = {head, follower, replacement};
+    for (uint8_t i = 0; i < 3; ++i) {
+        uint8_t slot = 0xFF;
+        TEST_ASSERT_NOT_NULL(f.store.queuedAt(i, &slot));
+        TEST_ASSERT_EQUAL_UINT8(expected[i], slot);
+    }
+    serviceNow(f.controller, false, [] { return 2000U; });
+    TEST_ASSERT_EQUAL_UINT32(3599, f.controller.effectiveRemainingSeconds());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    // No attempt/deadline/checkpoint refresh for existing records on enqueue.
+    TEST_ASSERT_EQUAL_UINT32(deadline, f.controller.deadlineOrigin());
+    serviceNow(f.controller, true, [] { return 61000U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(head)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(follower)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT32(3600, f.store.recordAt(replacement)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT8(1, f.store.recordAt(head)->attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.recordAt(follower)->attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.recordAt(replacement)->attemptsUsed);
+    serviceNow(f.controller, true, [] { return 61100U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(replacement)->remainingActiveSeconds);
+}
+
+void testTrackingFailurePreservesDurableEventAndBlocksDeliveryAndCreation() {
+    DeliveryFixture f;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeEventStore::Status::READY,
+        (uint8_t)f.store.recover(f.storage, f.entropy, 0x10));
+    // Simulate unavailable controller tracking after successful store enqueue.
+    const auto clock = [] { return 1000U; };
+    TrackedCreationSink<decltype(clock)> sink(f.store, f.controller, clock);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProducers::CreationResult::STORAGE_FAILURE,
+        (uint8_t)sink.create(event(3600)));
+    TEST_ASSERT_TRUE(sink.lastResultAvailable());
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)EnqueueStatus::ENQUEUED, (uint8_t)sink.lastResult().status);
+    TEST_ASSERT_TRUE(f.controller.degraded());
+    TEST_ASSERT_TRUE(f.store.healthy());
+    TEST_ASSERT_EQUAL_UINT(1, f.store.ownedCount());
+    const auto before = *f.store.queuedAt(0);
+    const unsigned writes = f.storage.eventWrites, identityWrites = f.storage.metadataWrites;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::DEGRADED,
+        (uint8_t)serviceNow(f.controller, false, clock).result.status);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RadioActionType::NONE,
+        (uint8_t)f.controller.grantTransmit(1000).action.type);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)EventProducers::CreationResult::STORAGE_FAILURE,
+        (uint8_t)sink.create(event(3600)));
+    TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+    TEST_ASSERT_EQUAL_UINT(identityWrites, f.storage.metadataWrites);
+    TEST_ASSERT_EQUAL_MEMORY(&before, f.store.queuedAt(0), sizeof(before));
+    // Durable custody survives; normal recovery still applies its existing debit.
+    f.storage.clearFault();
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)NodeEventStore::Status::READY,
+        (uint8_t)f.store.recover(f.storage, f.entropy, 0x10));
+    f.recoverController(0);
+    TEST_ASSERT_EQUAL_UINT32(before.eventId, f.store.queuedAt(0)->eventId);
+    TEST_ASSERT_EQUAL_UINT32(before.eventEpoch, f.store.queuedAt(0)->eventEpoch);
+    TEST_ASSERT_EQUAL_UINT32(3540, f.controller.effectiveRemainingSeconds());
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.queuedAt(0)->attemptsUsed);
+}
+
+void testRejectedCreationNeverTracksOrRefreshesExistingSlots() {
+    using EventProducers::CreationResult;
+    for (bool queueFull : {false, true}) {
+        DeliveryFixture f; f.initializeEmpty();
+        for (unsigned i = 0; i < (queueFull ? 8U : 1U); ++i) f.enqueueTracked(3600, 0);
+        serviceNow(f.controller, true, [] { return 10000U; });
+        unsigned clockReads = 0;
+        const auto clock = [&] { ++clockReads; return 10000U; };
+        TrackedCreationSink<decltype(clock)> sink(f.store, f.controller, clock);
+        if (!queueFull) f.storage.fault = Fault::WRITE;
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)(queueFull ? CreationResult::QUEUE_FULL : CreationResult::STORAGE_FAILURE),
+            (uint8_t)sink.create(event(3600)));
+        TEST_ASSERT_EQUAL_UINT(0, clockReads);
+        TEST_ASSERT_EQUAL_UINT32(3590, f.controller.effectiveRemainingSeconds());
+        TEST_ASSERT_EQUAL_UINT8(0, f.store.queuedAt(0)->attemptsUsed);
+    }
+    for (uint8_t slot : {(uint8_t)0, (uint8_t)NodeEventStore::NODE_EVENT_CAPACITY}) {
+        DeliveryFixture f; f.initializeEmpty();
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::POLICY_FAILURE,
+            (uint8_t)f.controller.trackEnqueued(slot, 1));
+        TEST_ASSERT_TRUE(f.controller.degraded());
+        TEST_ASSERT_EQUAL_UINT(0, f.store.ownedCount());
+    }
+}
+
+void assertCompletionSamplesAfterEnqueue(uint32_t loopStart, uint32_t enqueuedAt,
+                                        uint32_t completedAt) {
+    DeliveryFixture f; f.initializeEmpty(loopStart);
+    EventTxDiagnostics::Observer observer; observer.enable();
+    f.controller.recover(f.store, 0x10, 0x20, f.sequence, f.jitter,
+        loopStart, &f.diagnostics, &observer);
+    const uint8_t head = f.enqueueTracked(3600, loopStart);
+    f.transmit(loopStart);
+    const uint8_t follower = f.enqueueTracked(3600, enqueuedAt);
+    const unsigned writes = f.storage.eventWrites;
+    unsigned clockReads = 0;
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)ControllerStatus::OK,
+        (uint8_t)txCompletedNow(f.controller, [&] { ++clockReads; return completedAt; }).status);
+    TEST_ASSERT_EQUAL_UINT(1, clockReads);
+    serviceNow(f.controller, false, [=] { return completedAt; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    TEST_ASSERT_EQUAL_UINT32(completedAt, f.controller.deadlineOrigin());
+    TEST_ASSERT_EQUAL_UINT8(head, f.controller.activeSlot());
+    TEST_ASSERT_EQUAL_UINT8(1, f.store.recordAt(head)->attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT8(0, f.store.recordAt(follower)->attemptsUsed);
+    TEST_ASSERT_EQUAL_UINT(writes, f.storage.eventWrites);
+    TEST_ASSERT_EQUAL_UINT32(0, f.diagnostics.eventSnapshot().counters.eventsExpired);
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[(uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED]);
+    serviceNow(f.controller, false, [=] { return completedAt + 2499U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::WAIT_ADMISSION, (uint8_t)f.controller.state());
+    serviceNow(f.controller, false, [=] { return completedAt + 2500U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::BACKOFF, (uint8_t)f.controller.state());
+    serviceNow(f.controller, false, [=] { return completedAt + 3500U; });
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)RuntimeState::READY, (uint8_t)f.controller.state());
+    // Both occupied slots retain their own checkpoint boundary across wrap.
+    serviceNow(f.controller, true, [=] { return loopStart + 60000U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(head)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT32(3600, f.store.recordAt(follower)->remainingActiveSeconds);
+    serviceNow(f.controller, true, [=] { return enqueuedAt + 60000U; });
+    TEST_ASSERT_EQUAL_UINT32(3540, f.store.recordAt(follower)->remainingActiveSeconds);
+    TEST_ASSERT_EQUAL_UINT16(0, observer.snapshot().counters[(uint8_t)EventTxDiagnostics::Counter::CLOCK_REVERSED]);
+}
+
+void testEnqueueThenCompletionUsesFreshClockNotLoopStart() {
+    assertCompletionSamplesAfterEnqueue(224677U, 224678U, 224678U);
+    assertCompletionSamplesAfterEnqueue(1000U, 1100U, 1110U);
+}
+
+void testEnqueueThenCompletionPreservesMillisWrap() {
+    assertCompletionSamplesAfterEnqueue(0xFFFFFFFEU, 2U, 3U);
+}
 
 void testControllerRecoveryArbitrationAndFifo() {
     DeliveryFixture f; f.initializeEmpty();
@@ -991,8 +1286,20 @@ void testExpiryObservationsByStateAndWrapIsNotClockReversal() {
 
 }  // namespace
 
-int main(int, char**) {
+int main(int argc, char** argv) {
     UNITY_BEGIN();
+    RUN_TEST(testReleasedSlotReuseAfterLongIdleStartsFresh);
+    RUN_TEST(testReleasedSlotReuseAfterOrdinaryIdleStartsFresh);
+    RUN_TEST(testReclaimedFailedSlotReuseAfterLongIdleStartsFresh);
+    RUN_TEST(testReclaimedFailedSlotReuseAfterOrdinaryIdleStartsFresh);
+    RUN_TEST(testExplicitEnqueueTrackingResetsOnlyReusedSlot);
+    if (argc == 2 && strcmp(argv[1], "--slot-reuse-only") == 0) return UNITY_END();
+    RUN_TEST(testTrackedCreationSamplesAfterDurableCommitAndCountsBeforeFirstService);
+    RUN_TEST(testTrackedSlotReusePreservesWaitingHeadFollowerAndFifo);
+    RUN_TEST(testTrackingFailurePreservesDurableEventAndBlocksDeliveryAndCreation);
+    RUN_TEST(testRejectedCreationNeverTracksOrRefreshesExistingSlots);
+    RUN_TEST(testEnqueueThenCompletionUsesFreshClockNotLoopStart);
+    RUN_TEST(testEnqueueThenCompletionPreservesMillisWrap);
     RUN_TEST(testRecoveredTerminalsReclaimedAndMixedQueuePreserved);
     RUN_TEST(testRuntimeTerminalReclaimAdvancesFifo);
     RUN_TEST(testReclaimFailuresFailClosedAtBootAndRuntime);

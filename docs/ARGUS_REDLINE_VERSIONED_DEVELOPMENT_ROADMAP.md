@@ -1,13 +1,13 @@
 # ARGUS REDLINE — Versioned Development Roadmap
 
 **Status:** Authoritative roadmap
-**Current release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol
-**Next planned milestone:** `v0.7.0` — Node-Originated Events and Reliable Delivery
-**v0.7.0 development status:** Stages 1–15 complete; Stage 16 — Bench Integration Gate is next and has not started
+**Current release:** `v0.7.0` — Node-Originated Events and Reliable Delivery
+**Next planned milestone:** `v0.8.0` — Persistent Identity and Controlled Provisioning
+**v0.7.0 development status:** Complete — implementation, bench integration, physical qualification, and release closeout passed
 **Current wire format:** Wire Protocol `1`
 **Primary v1 target:** Secure, capability-driven, direct Hub-to-Node off-grid IoT and structured communications platform
 
-**Lifecycle state:** v0.6.0 completes structured operations, Wire Protocol 1 RESPONSE semantics, developmental Host Protocol 0.1, the Arduino-ESP32 3.3.9 framework migration, and complete two-board physical qualification. Wire Protocol remains `1`, Configuration Schema remains `1`, and hardware profile remains `HELTEC_V4`. F-02 through F-04 remain deferred authenticated-transport requirements.
+**Lifecycle state:** v0.7.0 adds durable Node-originated Event custody, bounded reliable delivery, persistent Hub admission and Host polling/consumption through Host Protocol 0.2 while preserving Host Protocol 0.1 compatibility. Wire Protocol remains `1`, Configuration Schema remains `1`, and hardware profile remains `HELTEC_V4`. F-02 through F-04 remain deferred authenticated-transport requirements.
 
 See [ARGUS REDLINE — What It Is](PROJECT_OVERVIEW.md) for the stable system vision and broad capability direction.
 
@@ -513,6 +513,13 @@ PC command
 
 ## `v0.7.0` — Node-Originated Events and Reliable Delivery
 
+**Documentation/design status:** Complete.
+
+**Implementation status:** Complete — bench and physical qualification passed
+with recorded physical-fixture limitations.
+
+**Release status:** Complete.
+
 ### Objective
 
 Allow Nodes to initiate structured traffic and preserve important events through temporary Hub unavailability.
@@ -550,24 +557,26 @@ have no v0.7.0 opcode or body schema.
 [x] Stage 13 — Python Host Reference Update
 [x] Stage 14 — Full Native Regression Gate
 [x] Stage 15 — Production Build Gate
-[ ] Stage 16 — Bench Integration Gate (next; not started)
-[ ] Stage 17 — Physical Qualification
-[ ] Stage 18 — Documentation and Release Closeout
+[x] Stage 16 — Bench Integration Gate
+[x] Stage 17 — Physical Qualification
+[x] Stage 18 — Documentation and Release Closeout
 ```
 
-This is development progress, not release completion. The release and physical
-qualification gates below remain open.
+The full implementation, bench, physical-qualification, and release-closeout
+sequence is complete. Selective physical ACK/response-loss boundaries that
+could not be induced without a dedicated fixture remain explicitly recorded as
+physical limitations and are covered by deterministic native fault injection.
 
 ### Release gate
 
 ```text
-[ ] Node can originate an event without a Hub command
-[ ] Lost ACK causes retransmission
-[ ] Hub processes a retransmitted event only once
-[ ] Important queued events survive Node reboot
-[ ] Queue-full behavior is visible and documented
-[ ] Expired events are handled predictably
-[ ] Hub-unavailable state is shown locally
+[x] Node can originate an event without a Hub command
+[x] Lost ACK causes retransmission
+[x] Hub processes a retransmitted event only once
+[x] Important queued events survive Node reboot
+[x] Queue-full behavior is visible and documented
+[x] Expired events are handled predictably
+[x] Hub-unavailable state is shown locally
 ```
 
 ### Explicit non-goals
@@ -1332,11 +1341,11 @@ v2.0.0 does not promise every possible module, application, sensor, workflow, or
 
 ## 4. Immediate Next Release
 
-After publication of the completed v0.6.0 release candidate, the next planned milestone is:
+After publication of v0.7.0, the next planned milestone is:
 
 ```text
-v0.7.0
-Node-Originated Events and Reliable Delivery
+v0.8.0
+Persistent Identity and Controlled Provisioning
 ```
 
 Immediate direction:
@@ -1348,8 +1357,12 @@ Immediate direction:
 [x] Publish v0.6.0
 [x] Begin v0.7.0 design and implementation through its own approved scope and gates
 [x] Complete v0.7.0 implementation Stages 1–15
-[ ] Complete Stage 16 — Bench Integration Gate
-[ ] Complete physical-qualification and release-closeout gates
+[x] Complete Stage 16 — Bench Integration Gate
+[x] Complete Stage 17 — Physical Qualification with explicit fixture limitations
+[x] Complete Stage 18 — Documentation and Release Closeout
+[x] Publish v0.7.0
 ```
 
-v0.7.0 introduces Node-originated structured traffic and reliable delivery. It does not pull forward persistent identity, authenticated transport, multi-Node networking, routing, repeaters, or mesh behavior.
+v0.8.0 introduces persistent identity and controlled provisioning. It does not
+pull forward authenticated transport, multi-Node networking, routing, repeaters,
+or mesh behavior.

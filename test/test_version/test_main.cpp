@@ -6,9 +6,9 @@
 namespace {
 
 void testReleaseFirmwareIdentifier() {
-    TEST_ASSERT_EQUAL_STRING("v0.6.0", RedlineVersion::FIRMWARE);
+    TEST_ASSERT_EQUAL_STRING("v0.7.0", RedlineVersion::FIRMWARE);
     TEST_ASSERT_EQUAL_UINT8(0, RedlineVersion::FIRMWARE_MAJOR);
-    TEST_ASSERT_EQUAL_UINT8(6, RedlineVersion::FIRMWARE_MINOR);
+    TEST_ASSERT_EQUAL_UINT8(7, RedlineVersion::FIRMWARE_MINOR);
     TEST_ASSERT_EQUAL_UINT8(0, RedlineVersion::FIRMWARE_PATCH);
 }
 

@@ -70,6 +70,7 @@ public:
         if (record == nullptr || record->state != EventRecords::NodeState::QUEUED) {
             return Status::NOT_QUEUED;
         }
+        if (observer_) observer_->clock(nowMilliseconds);
         SlotRuntime& runtime = runtime_[slot];
         runtime.tracked = true;
         runtime.uncommittedMilliseconds = 0;
@@ -275,6 +276,15 @@ public:
             if (!markFailed()) return degrade(ControllerStatus::STORAGE_FAILURE, true);
         }
         return result(active_ ? ControllerStatus::OK : ControllerStatus::NO_ACTIVE_EVENT);
+    }
+
+    // Notify exactly once after a new durable enqueue, never on recovery or
+    // head selection. Only this new occupant's volatile slot baseline resets.
+    ControllerStatus trackEnqueued(uint8_t slot, uint32_t nowMilliseconds) {
+        if (!usable()) return degrade(ControllerStatus::DEGRADED, false).status;
+        if (policy_.trackEnqueued(slot, nowMilliseconds) != Status::READY)
+            return degrade(ControllerStatus::POLICY_FAILURE, false).status;
+        return ControllerStatus::OK;
     }
 
     ControllerResult service(uint32_t nowMilliseconds, bool synchronousWork) {

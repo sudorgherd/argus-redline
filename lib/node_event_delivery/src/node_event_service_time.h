@@ -18,4 +18,11 @@ ServiceTick serviceNow(Controller& controller, bool synchronousWork, Clock clock
     return {now, controller.service(now, synchronousWork)};
 }
 
+// Producer enqueue/tracking may advance time before a pending TX IRQ is
+// handled in this loop. Completion also services every queued slot's lifetime.
+template <typename Clock>
+ControllerResult txCompletedNow(Controller& controller, Clock clock) {
+    return controller.txCompleted(static_cast<uint32_t>(clock()));
+}
+
 } // namespace NodeEventDelivery

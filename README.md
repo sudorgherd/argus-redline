@@ -75,15 +75,18 @@ The goal is simple:
 
 ARGUS REDLINE is an experimental embedded communications and device-control platform developed by **RaveGoat Labs** for the wider **RG Herd** coordination ecosystem.
 
-> **Firmware release:** `v0.6.0` — Structured Operations, Responses, and Host Protocol.
+> **Firmware release:** `v0.7.0` — Node-Originated Events and Reliable Delivery.
 
-**Current release:** v0.6.0. The milestone adds developmental Host Protocol 0.1, structured REDLINE operations, Wire Protocol 1 RESPONSE completion semantics, bounded Host request lifecycle and retained-result replay, and complete computer-to-Hub-to-Node-to-computer structured operation flow.
+**Current release:** v0.7.0. The milestone adds durable Node-originated Events,
+bounded retry and custody behavior, persistent Hub admission, Host Protocol 0.2
+Event polling/consumption, and qualification diagnostics while preserving the
+v0.6 structured operation path and Host Protocol 0.1 compatibility.
 
 Current lifecycle authorities are:
 
 ```text
-Firmware release        v0.6.0
-Host Protocol           0.1
+Firmware release        v0.7.0
+Host Protocol           0.2 (0.1 compatible)
 Wire Protocol           1
 Configuration Schema    1
 Hardware profile        HELTEC_V4
@@ -93,10 +96,10 @@ The production framework is Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4 through pioardui
 
 Wire Protocol 1 remains unauthenticated and unencrypted. Production unauthenticated RF authority is deliberately restricted; structured SET or procedure operations do not grant general remote side-effect authority.
 
-The next planned milestone is `v0.7.0 — Node-Originated Events and Reliable Delivery`.
-Development is complete through v0.7.0 implementation Stage 12; Stage 13 —
-Python Host Reference Update is next. v0.7.0 remains unreleased and has not
-entered bench or physical qualification.
+The next planned milestone is `v0.8.0 — Persistent Identity and Controlled
+Provisioning`. v0.7.0 completed native/software gates, bench integration, and
+the two-board physical qualification matrix with explicit fixture limitations
+at selectively uninducible ACK/response-loss boundaries.
 
 ### Project Documentation
 
@@ -110,6 +113,13 @@ entered bench or physical qualification.
 * **[v0.6.0 Physical Qualification Results](docs/V0.6.0_PHYSICAL_QUALIFICATION_RESULTS.md)** — complete physical qualification and framework-migration evidence
 * **[v0.6.0 Release Notes](docs/V0.6.0_RELEASE_NOTES.md)** — release scope, compatibility, validation, and limitations
 * **[v0.6.0 Dependency and Source Audit](docs/V0.6.0_DEPENDENCY_AND_SOURCE_AUDIT.md)** — production framework, dependency, and source authority
+* **[v0.7.0 Architecture Baseline](docs/V0.7.0_ARCHITECTURE_BASELINE.md)** — frozen v0.6 entry state and v0.7 extension boundaries
+* **[v0.7.0 Event Reliability Design](docs/V0.7.0_EVENT_RELIABILITY_DESIGN.md)** — Event identity, custody, delivery, admission, and persistence semantics
+* **[Host Protocol 0.2](docs/HOST_PROTOCOL_0.2.md)** — additive Event polling, consumption, and diagnostic operations
+* **[v0.7.0 Implementation Brief](docs/V0.7.0_IMPLEMENTATION_BRIEF.md)** — completed implementation and qualification gates
+* **[v0.7.0 Physical Qualification Results](docs/V0.7.0_PHYSICAL_QUALIFICATION_RESULTS.md)** — chronological bench and physical evidence, repairs, and limitations
+* **[v0.7.0 Release Notes](docs/V0.7.0_RELEASE_NOTES.md)** — release scope, compatibility, validation, and limitations
+* **[v0.7.0 Dependency and Source Audit](docs/V0.7.0_DEPENDENCY_AND_SOURCE_AUDIT.md)** — production dependencies, source boundary, and release evidence
 * **[August 14 Security Review](docs/ARGUS_REDLINE_SECURITY_REVIEW_2026-08-14.md)** — security findings and current dispositions
 * **[v0.5.1 Implementation and Qualification Brief](docs/V0.5.1_IMPLEMENTATION_AND_QUALIFICATION_BRIEF.md)** — F-01 correction and acceptance gates
 * **[v0.5.1 Qualification Results](docs/V0.5.1_QUALIFICATION_RESULTS.md)** — physical qualification evidence
@@ -119,7 +129,7 @@ entered bench or physical qualification.
 
 ## Implemented now
 
-ARGUS REDLINE v0.6.0 provides:
+ARGUS REDLINE v0.7.0 provides:
 
 * Two independently buildable Heltec V4 Hub and Node firmware roles
 * Bidirectional SX1262 LoRa communication at 915 MHz
@@ -130,7 +140,7 @@ ARGUS REDLINE v0.6.0 provides:
 * Configuration Schema 1 persistent settings with bounded dual-slot recovery and factory reset
 * A bounded immutable logical capability registry with typed values/results, authorization, interlocks, diagnostics, and role-safe dispatch
 * HELTEC_V4 indicator `0x0101`, digital input `0x0201`, and fail-closed analog capability `0x0301`
-* Developmental Host Protocol 0.1 over bounded COBS-framed USB CDC with CRC validation and malformed-frame recovery
+* Developmental Host Protocol 0.2 over bounded COBS-framed USB CDC with CRC validation, malformed-frame recovery, and byte/behavior-compatible minor-1 handling
 * HELLO negotiation reporting firmware, Host Protocol, Wire Protocol, Configuration Schema, hardware profile, role, device ID, categories, features, and bounded operation capacity independently
 * Structured operations: `PING`, `GET_DEVICE_INFO`, `GET_STATUS`, `GET_CAPABILITIES`, `DESCRIBE_CAPABILITY`, `READ_CAPABILITY`, `SET_INDICATOR`, `RUN_PROCEDURE`, and `GET_DIAGNOSTICS`
 * One active Host operation plus one fixed retained completion with exact replay, `BUSY`, `MISMATCH`, replacement, and reconnect semantics
@@ -139,6 +149,15 @@ ARGUS REDLINE v0.6.0 provides:
 * Bounded Host Protocol diagnostics independent of radio and capability diagnostics
 * A deterministic Python Host reference/test utility
 * Complete two-board physical validation of Host Protocol, structured radio operations, retained-result lifecycle, authorization denial, physical input/output behavior, OLED/radio coexistence, settings persistence, reconnect behavior, and Host-absent legacy radio operation
+* Durable eight-slot Node Event custody with persistent identity, FIFO delivery,
+  powered-runtime lifetime accounting, bounded retries, reboot recovery, and
+  fail-closed persistence behavior
+* Persistent eight-slot Hub Event admission with exact deduplication, durable
+  ACTIVE/CONSUMED states, non-destructive Host polling, and idempotent consume
+* Host Protocol 0.2 Event service and bounded read-only Event diagnostics while
+  retaining byte/behavior-compatible minor-1 operation
+* BUTTON, SENSOR_THRESHOLD, and MANUAL_CHECK_IN Event families, with physical
+  BUTTON production and UI/input/storage coexistence qualification
 
 Production remote authority remains intentionally restricted because Wire Protocol 1 does not authenticate RF peers. Current traffic is structured and validated but is **not cryptographically authenticated or encrypted**.
 
@@ -178,7 +197,7 @@ The current Heltec development hardware is the reference platform, not the inten
 
 Packets use a six-byte header followed by an optional payload.
 
-Protocol v0.1 identifies the original wire-format lineage. Firmware v0.6.0 remains on Wire Protocol version 1; v0.6.0 extends Wire Protocol 1 additively without changing the existing six-byte header or 32-byte maximum packet geometry. The v0.1.03 tag is preserved as historical release metadata.
+Protocol v0.1 identifies the original wire-format lineage. Firmware v0.7.0 remains on Wire Protocol version 1; v0.7.0 extends Wire Protocol 1 additively without changing the existing six-byte header or 32-byte maximum packet geometry. The v0.1.03 tag is preserved as historical release metadata.
 
 | Byte | Field                            |
 | ---: | -------------------------------- |
@@ -198,8 +217,12 @@ The codec recognizes these packet types:
 * `ACK`
 * `ERROR`
 * `RESPONSE`
+* `EVENT`
 
-v0.6.0 actively uses `COMMAND`, `ACK`, and `RESPONSE`. ACK represents transaction admission or rejection; RESPONSE carries completion of an accepted structured operation. `ERROR` remains recognized by the codec but is not the active structured-operation completion mechanism.
+v0.7.0 actively uses `COMMAND`, `ACK`, `RESPONSE`, and `EVENT`. ACK represents
+transaction or Event admission/rejection; RESPONSE carries completion of an
+accepted structured operation. `ERROR` remains recognized by the codec but is
+not the active structured-operation completion mechanism.
 
 Protocol definitions and encoding logic are located in [`include/protocol.h`](include/protocol.h).
 
@@ -267,9 +290,9 @@ The first published radio protocol release remains:
 
 * [ARGUS REDLINE v0.1.0](https://github.com/sudorgherd/argus-redline/releases/tag/v0.1.0)
 
-The firmware identifier in the source is v0.6.0. The historical v0.1.03 tag is preserved, and current firmware retains Wire Protocol 1 compatibility.
+The firmware identifier in the source is v0.7.0. The historical v0.1.03 tag is preserved, and current firmware retains Wire Protocol 1 compatibility.
 
-The history includes the original string-based exchange, binary protocol implementation, reliability testing, device runtime and UI work, persistent settings, the bounded capability abstraction introduced through v0.5.0, the focused v0.5.1 duplicate-cache correction, and the v0.6.0 structured-operation, RESPONSE, Host Protocol, and framework-migration milestone.
+The history includes the original string-based exchange, binary protocol implementation, reliability testing, device runtime and UI work, persistent settings, the bounded capability abstraction introduced through v0.5.0, the focused v0.5.1 duplicate-cache correction, the v0.6.0 structured-operation/Host milestone, and the v0.7.0 durable Node-originated Event milestone.
 
 ## Development direction
 
@@ -297,15 +320,21 @@ Application meaning remains above this boundary.
 
 The embedded layer is responsible for bounded communication and physical capability access. Host-side software remains responsible for business logic, user interfaces, databases, analytics, automation, integrations, and interpretation of the information being transported.
 
-Current v0.6.0 firmware implements the developmental computer-facing Host Protocol 0.1 boundary and structured `COMMAND` / `ACK` / `RESPONSE` radio operations while preserving this separation of responsibilities. The stable multi-client host-service/API lifecycle remains a later milestone.
+Current v0.7.0 firmware implements the developmental computer-facing Host
+Protocol 0.2 boundary (with minor-1 compatibility), structured
+`COMMAND`/`ACK`/`RESPONSE` operations, and durable `EVENT` transport while
+preserving this separation of responsibilities. The stable multi-client
+host-service/API lifecycle remains a later milestone.
 
 General opaque application payload transport is planned for v1.1 and is not implemented today.
 
-See **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** for the stable responsibility boundaries and **[Host Protocol 0.1](docs/HOST_PROTOCOL_0.1.md)** for the developmental v0.6 framing specification.
+See **[Host Transport Architecture](docs/ARGUS_REDLINE_HOST_TRANSPORT_ARCHITECTURE.md)** for the stable responsibility boundaries and **[Host Protocol 0.2](docs/HOST_PROTOCOL_0.2.md)** for the current developmental framing and Event service.
 
-The next planned milestone is **`v0.7.0 — Node-Originated Events and Reliable Delivery`**.
+The next planned milestone is **`v0.8.0 — Persistent Identity and Controlled Provisioning`**.
 
-v0.7.0 builds on the completed v0.6.0 structured-operation and Host Protocol foundation by allowing Nodes to originate structured traffic and preserve important events through temporary Hub unavailability. Persistent identity, authenticated transport, multi-Node networking, repeaters, routing, and mesh remain later milestones.
+v0.8.0 builds on the completed reliable-Event foundation with persistent device
+identity and controlled provisioning. Authenticated transport, multi-Node
+networking, repeaters, routing, and mesh remain later milestones.
 
 ### V1 target
 
@@ -318,9 +347,15 @@ v0.7.0 builds on the completed v0.6.0 structured-operation and Host Protocol fou
 
 These bullets describe complete v1 targets. Some radio-transport foundations are implemented now, but the listed v1 capabilities are not complete.
 
-Persistent ordinary device settings, the bounded capability foundation, structured operations/responses, and developmental Host Protocol 0.1 are implemented through v0.6.0.
+Persistent ordinary device settings, the bounded capability foundation,
+structured operations/responses, durable Node-originated Events, and
+developmental Host Protocol 0.2 are implemented through v0.7.0.
 
-Persistent identity, multi-Node coordination, repeaters, routing, store-and-forward, encryption and authentication, replay protection, provisioning, stable host/dispatcher integration, production alerts/check-ins, location sharing, panic/duress workflows, and sensor applications are not implemented.
+Persistent identity, multi-Node coordination, repeaters, routing,
+store-and-forward, encryption and authentication, replay protection,
+provisioning, stable host/dispatcher integration, production panic/duress
+workflows, location sharing, and general sensor applications are not
+implemented.
 
 ### Exploratory and later concepts
 

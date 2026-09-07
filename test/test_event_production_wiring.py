@@ -41,6 +41,40 @@ class EventProductionWiringTests(unittest.TestCase):
         self.assertIn("const uint32_t nowMs = tick.now;", service)
         self.assertNotIn("eventDelivery.service(nowMs", service)
 
+    def test_node_producers_share_tracked_creation_and_fail_closed(self):
+        self.assertIn("NodeEventDelivery::TrackedCreationSink<decltype(&millis)> eventCreationSink(\n"
+                      "    nodeEventStore, eventDelivery, &millis);", self.node)
+        self.assertNotIn("EventProducers::StoreCreationSink eventCreationSink", self.node)
+        self.assertNotIn("nodeEventStore.enqueue(", self.node)
+        for name in ("serviceButton", "serviceSensorThresholdProducer"):
+            producer = body(self.node, name)
+            self.assertIn("eventCreationSink", producer)
+            self.assertIn("CreationResult::STORAGE_FAILURE", producer)
+            self.assertIn("eventSubsystemReady = false;", producer)
+
+    def test_node_completion_samples_after_producers_without_loop_time_argument(self):
+        loop = body(self.node, "loop")
+        completion = "NodeEventDelivery::txCompletedNow(eventDelivery, [] { return millis(); })"
+        self.assertLess(loop.index("serviceButton(nowMs);"), loop.index(completion))
+        self.assertLess(loop.index("serviceSensorThresholdProducer();"), loop.index(completion))
+        self.assertNotIn("eventDelivery.txCompleted(nowMs)", self.node)
+        self.assertEqual(1, self.node.count("NodeEventDelivery::txCompletedNow("))
+
+    def test_structured_commands_use_existing_hub_arbiter_ownership(self):
+        start = body(self.hub, "startHostStructuredTransmission")
+        self.assertLess(start.index("HubOwner::COMMAND_TX"),
+                        start.index("radio.startTransmit("))
+        self.assertIn("hubRadioArbiter.setOwner(priorOwner, priorDeadline);", start)
+        service = body(self.hub, "serviceProductionHost")
+        self.assertLess(service.index("hubRadioArbiter.commandMayAcquire(operationDone)"),
+                        service.index("radio.standby()"))
+        release = body(self.hub, "finishHostStructuredOwnership")
+        self.assertIn("HubOwner::IDLE_RECEIVE", release)
+        acknowledgment = body(self.hub, "processAcknowledgment")
+        self.assertIn("HubOwner::COMMAND_WAIT_RESPONSE", acknowledgment)
+        transport = body(self.hub, "serviceHubTransport")
+        self.assertIn("HubOwner::COMMAND_WAIT_ACK", transport)
+
     def test_legacy_completion_and_abort_share_one_shot_idle_restoration(self):
         completion = body(self.hub, "completeAndScheduleNextTransaction")
         self.assertLess(completion.index("transactionState.completeTransaction();"),

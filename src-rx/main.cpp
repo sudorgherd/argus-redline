@@ -16,6 +16,7 @@
 #include "capability_role_integration.h"
 #include "esp32_event_storage.h"
 #include "node_event_delivery.h"
+#include "node_event_creation.h"
 #include "node_event_reclamation.h"
 #include "node_event_service_time.h"
 #include "node_event_radio.h"
@@ -112,7 +113,9 @@ public:
 Esp32EventStorage::PreferencesStore eventStorage;
 EspEventEntropy eventEntropy;
 NodeEventStore::Store nodeEventStore;
-EventProducers::StoreCreationSink eventCreationSink(nodeEventStore);
+NodeEventDelivery::Controller eventDelivery;
+NodeEventDelivery::TrackedCreationSink<decltype(&millis)> eventCreationSink(
+    nodeEventStore, eventDelivery, &millis);
 EventProducers::ButtonProducer buttonEventProducer;
 const EventProducers::ThresholdPolicy analogThresholdPolicy = {
     HeltecV4Capabilities::ANALOG_INPUT_0_ID,
@@ -126,7 +129,6 @@ EventProducers::SensorThresholdProducer analogThresholdProducer(
 );
 EventSequence eventSequence;
 EventJitter eventJitter;
-NodeEventDelivery::Controller eventDelivery;
 EventRadioIntegration::NodeArbiter eventRadio;
 EventRadioIntegration::CommandPreAckTimer commandPreAck;
 bool eventSubsystemReady = false;
@@ -1568,7 +1570,7 @@ void loop() {
         operationDone = false;
 
         if (eventRadio.eventOwnsRadio()) {
-            (void)eventDelivery.txCompleted(nowMs);
+            (void)NodeEventDelivery::txCompletedNow(eventDelivery, [] { return millis(); });
             eventTxObservationWindow = eventDelivery.state() == NodeEventDelivery::RuntimeState::TX;
             startListening();
         } else if (

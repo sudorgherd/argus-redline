@@ -1027,7 +1027,11 @@ bool startHostStructuredTransmission(const Protocol::Packet& command) {
     if (acquiringOwner)
         TRACE_HUB(StructuredTrace::Event::STRUCTURED_OWNER_ACQUIRED,
             hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
+    const EventRadioIntegration::HubOwner priorOwner = hubRadioArbiter.owner();
+    const uint32_t priorDeadline = hubRadioArbiter.deadline();
+    hubRadioArbiter.setOwner(EventRadioIntegration::HubOwner::COMMAND_TX);
     if (radio.startTransmit(transmitBuffer, transmitLength) != RADIOLIB_ERR_NONE) {
+        hubRadioArbiter.setOwner(priorOwner, priorDeadline);
         TRACE_HUB(StructuredTrace::Event::RADIO_START_TX_FAILURE,
             hostStack.lifecycle().entry().requestId, command.sequence, command.opcode, 0, 2);
         radioLedActive = false;
@@ -1043,6 +1047,7 @@ bool startHostStructuredTransmission(const Protocol::Packet& command) {
 
 void finishHostStructuredOwnership() {
     hostStructuredOwner = false;
+    hubRadioArbiter.setOwner(EventRadioIntegration::HubOwner::IDLE_RECEIVE);
     TRACE_HUB(StructuredTrace::Event::STRUCTURED_OWNER_RELEASED,
         hostStack.lifecycle().entry().requestId, hostStructuredCommand.sequence,
         hostStructuredCommand.opcode, 0, 2);
@@ -1094,7 +1099,7 @@ void serviceProductionHost(uint32_t nowMs) {
     if (runtimeState.phase() != RuntimeState::RuntimePhase::IDLE &&
         !hostStructuredOwner) return;
     if (Serial.available() <= 0) return;
-    if (operationDone) return;
+    if (!hubRadioArbiter.commandMayAcquire(operationDone)) return;
     if (radio.standby() != RADIOLIB_ERR_NONE) return;
     if (operationDone) return;
     const HostOperationService::DeviceSnapshot snapshot =
@@ -1308,8 +1313,11 @@ void processAcknowledgment() {
         startAckReceive(false);
 #endif
         if (matchingSuccessAck ||
-            previousPhase == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE)
+            previousPhase == RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE) {
             setRuntimePhase(RuntimeState::RuntimePhase::WAITING_FOR_RESPONSE);
+            hubRadioArbiter.setOwner(
+                EventRadioIntegration::HubOwner::COMMAND_WAIT_RESPONSE);
+        }
         if (matchingSuccessAck) {
             TRACE_HUB(StructuredTrace::Event::STRUCTURED_ACK_MATCHED,
                 hostStack.lifecycle().entry().requestId, acknowledgment.sequence,
@@ -1597,6 +1605,9 @@ void serviceHubTransport(uint32_t nowMs) {
         );
 
 #if defined(ARGUS_HOST_MACHINE_STREAM)
+        if (hostStructuredOwner)
+            hubRadioArbiter.setOwner(
+                EventRadioIntegration::HubOwner::COMMAND_WAIT_ACK);
         startAckReceive(!hostStructuredOwner);
 #else
         startAckReceive(true);

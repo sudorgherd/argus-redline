@@ -1,6 +1,6 @@
 # ARGUS REDLINE — What It Is
 
-ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. The current v0.6.0 release provides a validated direct radio/device foundation, bounded capability abstraction, structured device operations and responses, and developmental Host Protocol 0.1. Cryptographic transport security is planned for later pre-v1 milestones and is not implemented.
+ARGUS REDLINE is an open-source, off-grid IoT, system-security, and structured-communications platform under active development. The current v0.7.0 release provides a validated direct radio/device foundation, bounded capability abstraction, structured device operations and responses, durable Node-originated Event delivery, and developmental Host Protocol 0.2 with minor-1 compatibility. Cryptographic transport security is planned for later pre-v1 milestones and is not implemented.
 
 It is intended to securely connect operators, sensors, mobile devices, and controlled trigger mechanisms over resilient low-bandwidth radio when cellular service, internet access, or ordinary communications infrastructure is unavailable, unreliable, overloaded, or inappropriate for the task.
 
@@ -8,7 +8,7 @@ At its core, REDLINE provides a controlled communications path between a compute
 
 It is being developed by **RaveGoat Labs** as part of the wider **RG Herd** privacy-first communications and coordination ecosystem.
 
-> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.6.0 Wire Protocol 1 traffic is structured and bounded but is not cryptographically authenticated or encrypted.
+> **Plain-language definition:** REDLINE is being developed toward a secure, configurable, off-grid device network for sending structured commands, status updates, check-ins, alerts, sensor data, and device events between an operator-facing Hub and field Nodes. Current v0.7.0 Wire Protocol 1 traffic is structured and bounded but is not cryptographically authenticated or encrypted.
 
 REDLINE is not a general-purpose chat application, arbitrary remote-control framework, finished mesh network, or replacement for emergency services. It is experimental embedded firmware and supporting infrastructure being developed toward a stable distributed-device platform.
 
@@ -16,13 +16,16 @@ The long-term host and transport boundary is defined in [ARGUS REDLINE — Host 
 
 ## Current development state
 
-ARGUS REDLINE v0.6.0 completes the Structured Operations, Responses, and Host Protocol milestone. The release preserves the direct Hub-to-Node architecture while adding the first bounded machine-readable computer interface and complete structured computer-to-Hub-to-Node-to-computer operation path.
+ARGUS REDLINE v0.7.0 completes the Node-Originated Events and Reliable Delivery
+milestone. The release preserves the direct single-Hub/single-Node architecture
+while adding persistent Node custody, bounded delivery retries, durable Hub
+admission, and Host-driven non-destructive polling and idempotent consumption.
 
 Current lifecycle authorities are:
 
 ```text
-Firmware release        v0.6.0
-Host Protocol           0.1
+Firmware release        v0.7.0
+Host Protocol           0.2 (0.1 compatible)
 Wire Protocol           1
 Configuration Schema    1
 Hardware profile        HELTEC_V4
@@ -104,7 +107,7 @@ REDLINE's structured operations and future general application transport serve d
 
 **REDLINE-defined structured operations** cover device management, transport and system control, capability discovery, and safe execution of approved local hardware behavior. Their semantics are defined by REDLINE because firmware must validate and execute them predictably.
 
-**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in `v0.6.0`. Host Protocol 0.1 carries bounded REDLINE-defined device operations; general application-neutral opaque transport remains assigned to the post-v1 `v1.1.0` expansion.
+**Opaque application payloads** are a future `v1.1` direction for general data belonging to ARGUS, BLACKSHEEP, NIGHTWATCH, third-party software, and other host applications. REDLINE transports those payloads without embedding their application schemas or business meaning in firmware. Opaque general-purpose application transport is not implemented in `v0.7.0`. Host Protocol 0.2 carries bounded REDLINE-defined device operations and Event service; general application-neutral opaque transport remains assigned to the post-v1 `v1.1.0` expansion.
 
 Transport delivery also remains distinct from application outcome:
 
@@ -398,7 +401,7 @@ Target capabilities:
 
 ## Implemented Now
 
-The current v0.6.0 firmware provides:
+The current v0.7.0 firmware provides:
 
 - Two independently buildable Heltec V4 firmware roles.
 - Bidirectional SX1262 LoRa communication at 915 MHz.
@@ -410,7 +413,7 @@ The current v0.6.0 firmware provides:
 - Configuration Schema 1 persistent settings using bounded dual-slot storage, validation, recovery, and factory reset.
 - A fixed, pointer-free capability descriptor model, bounded immutable registry, opaque logical IDs, typed values/results, authorization/interlock gates, and role-safe dispatch.
 - HELTEC_V4 logical indicator `0x0101`, digital input `0x0201`, and analog input `0x0301`; ordinary production analog access remains fail-closed as `HARDWARE_UNAVAILABLE`.
-- Developmental Host Protocol 0.1 over bounded COBS-framed USB CDC with CRC validation and deterministic malformed-frame recovery.
+- Developmental Host Protocol 0.2 over bounded COBS-framed USB CDC with CRC validation, deterministic malformed-frame recovery, and minor-1 compatibility.
 - HELLO negotiation that reports Host Protocol, firmware, Wire Protocol, Configuration Schema, hardware profile, role, device ID, categories, features, and bounded operation capacity independently.
 - Structured Host operations: `PING`, `GET_DEVICE_INFO`, `GET_STATUS`, `GET_CAPABILITIES`, `DESCRIBE_CAPABILITY`, `READ_CAPABILITY`, `SET_INDICATOR`, `RUN_PROCEDURE`, and `GET_DIAGNOSTICS`.
 - One active Host operation and one fixed retained completed result with exact replay, `BUSY`, `MISMATCH`, replacement, and disconnect/reconnect lifecycle semantics.
@@ -419,12 +422,24 @@ The current v0.6.0 firmware provides:
 - Bounded Host Protocol diagnostics separate from radio and capability diagnostics.
 - A deterministic Python Host reference/test utility.
 - Complete two-board physical qualification of Host Protocol, structured radio operations, retained-result lifecycle, authorization denial, input/output behavior, OLED coexistence, settings persistence, reconnect behavior, and Host-absent legacy radio operation.
+- Durable eight-slot Node Event custody, persistent Event identity, FIFO
+  scheduling, powered-runtime lifetime accounting, bounded retries, and reboot
+  recovery.
+- Persistent eight-slot Hub Event admission with exact duplicate recognition,
+  ACTIVE/CONSUMED custody, admission ordinals, and commit-before-ADMITTED.
+- Host Protocol 0.2 `POLL_EVENTS`, `CONSUME_EVENT`, and read-only Event
+  diagnostics without changing minor-1 behavior.
+- BUTTON, SENSOR_THRESHOLD, and MANUAL_CHECK_IN Event families, plus a dedicated
+  non-mutating Event Diagnostics screen.
 
 Production unauthenticated RF authority remains intentionally restricted. General remote `SET_INDICATOR` and `RUN_PROCEDURE` authority is not enabled simply because the structured operation exists.
 
-Wire Protocol 1 currently recognizes `COMMAND`, `ACK`, `ERROR`, and `RESPONSE`. v0.6.0 actively uses `COMMAND`, `ACK`, and `RESPONSE`; `ERROR` remains recognized but is not the active structured-operation completion mechanism.
+Wire Protocol 1 currently recognizes `COMMAND`, `ACK`, `ERROR`, `RESPONSE`, and
+`EVENT`. v0.7.0 actively uses `COMMAND`, `ACK`, `RESPONSE`, and `EVENT`;
+`ERROR` remains recognized but is not the active structured-operation
+completion mechanism.
 
-Current traffic is structured and validated but is **not cryptographically authenticated or encrypted**. Persistent identity/provisioning, authenticated transport, Node-originated event delivery, multiple direct Nodes, power/sleep lifecycle, stable host-service/API behavior, repeaters, routing, mesh, and general opaque application transport remain later milestones.
+Current traffic is structured and validated but is **not cryptographically authenticated or encrypted**. Persistent identity/provisioning, authenticated transport, multiple direct Nodes, power/sleep lifecycle, stable host-service/API behavior, repeaters, routing, mesh, and general opaque application transport remain later milestones.
 
 ---
 

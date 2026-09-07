@@ -63,9 +63,9 @@ void roundTripResponse(uint16_t requestId, const OperationResponse& response) {
 }
 
 void testVersionSchemaProfileAndRoleAuthorities() {
-    TEST_ASSERT_EQUAL_STRING("v0.6.0", RedlineVersion::FIRMWARE);
+    TEST_ASSERT_EQUAL_STRING("v0.7.0", RedlineVersion::FIRMWARE);
     TEST_ASSERT_EQUAL_UINT8(0, RedlineVersion::FIRMWARE_MAJOR);
-    TEST_ASSERT_EQUAL_UINT8(6, RedlineVersion::FIRMWARE_MINOR);
+    TEST_ASSERT_EQUAL_UINT8(7, RedlineVersion::FIRMWARE_MINOR);
     TEST_ASSERT_EQUAL_UINT8(0, RedlineVersion::FIRMWARE_PATCH);
     TEST_ASSERT_EQUAL_UINT8(Protocol::VERSION, RedlineVersion::WIRE_PROTOCOL);
     TEST_ASSERT_EQUAL_UINT16(1, DeviceSettings::SCHEMA_VERSION);
@@ -130,7 +130,7 @@ void testDeviceInfoExactForHubAndNode() {
         makeDeviceSnapshot(hub, 5));
     assertOk(result);
     TEST_ASSERT_EQUAL_UINT8(DEVICE_INFO_SIZE, result.response.value.length);
-    const uint8_t expected[] = {0, 6, 0, 1, 1, 1, 1, 1};
+    const uint8_t expected[] = {0, 7, 0, 1, 1, 1, 1, 1};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, result.response.value.bytes, 8);
     DeviceInfoRecord info = {};
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PayloadResult::OK),
@@ -307,7 +307,7 @@ void testHelloResponseAndErrors() {
         static_cast<uint8_t>(encodeHelloResponse(result.response, payload,
             sizeof(payload), length)));
     const uint8_t expected[] = {
-        1, 0, 6, 0, 1, 1, 1, 1, 1, 128, 0x0B, 0, 1, 0, 1, 0
+        1, 0, 7, 0, 1, 1, 1, 1, 1, 128, 0x0B, 0, 1, 0, 1, 0
     };
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, payload, sizeof(expected));
     Frame frame = {};
