@@ -71,6 +71,18 @@ public:
     HubResult submit(
         uint16_t requestId,
         const HostProtocol::OperationRequest& request,
+        const ProvisioningRuntime::ProvisioningSnapshot& identity,
+        uint32_t now, uint32_t overallTimeout,
+        uint8_t maxRetries = 2, bool explicitlyConfigured = false
+    ) {
+        return submit(requestId, request, RuntimeState::runtimeRole(identity),
+            identity.localDeviceId(), identity.peerDeviceId(), now,
+            overallTimeout, maxRetries, explicitlyConfigured);
+    }
+
+    HubResult submit(
+        uint16_t requestId,
+        const HostProtocol::OperationRequest& request,
         RuntimeState::DeviceRole localRole,
         uint8_t localId,
         uint8_t peerId,
@@ -226,6 +238,14 @@ struct NodeResult {
 
 class NodeStructuredOperationProcessor {
 public:
+    NodeResult admit(
+        const Protocol::Packet& command,
+        const ProvisioningRuntime::ProvisioningSnapshot& identity
+    ) {
+        if (identity.role() != DeviceIdentity::Role::NODE) return NodeResult{};
+        return admit(command, identity.localDeviceId(), identity.peerDeviceId());
+    }
+
     NodeResult admit(
         const Protocol::Packet& command,
         uint8_t localId,

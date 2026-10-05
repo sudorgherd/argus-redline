@@ -5,6 +5,7 @@
 
 #include "host_protocol_messages.h"
 #include "protocol.h"
+#include "provisioning_snapshot.h"
 
 namespace WireOperations {
 
@@ -247,6 +248,15 @@ inline Protocol::Packet makeCommand(
             sizeof(packet.payload), length) == CodecResult::OK)
         packet.payloadLength = static_cast<uint8_t>(length);
     return packet;
+}
+
+inline Protocol::Packet makeCommand(
+    const ProvisioningRuntime::ProvisioningSnapshot& identity,
+    uint8_t sequence, uint8_t opcode, const Request& request
+) {
+    if (identity.role() != DeviceIdentity::Role::HUB) return Protocol::Packet{};
+    return makeCommand(identity.localDeviceId(), identity.peerDeviceId(),
+                       sequence, opcode, request);
 }
 
 inline Protocol::Packet makeResponsePacket(

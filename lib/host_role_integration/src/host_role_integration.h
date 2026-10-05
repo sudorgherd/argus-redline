@@ -69,6 +69,32 @@ public:
 
     Result serviceRx(
         const HostOperationService::DeviceSnapshot& snapshot,
+        const ProvisioningRuntime::ProvisioningSnapshot& identity,
+        bool registryValid,
+        const DeviceCapabilities::CapabilityRegistryView& registry,
+        DeviceCapabilities::LocalCapabilityHandler& handler,
+        DeviceCapabilities::InterlockState interlock,
+        DeviceCapabilities::CapabilityDiagnostics& capabilityDiagnostics,
+        RuntimeState::State& runtimeState,
+        const HostOperationService::AvailabilityProvider& availability,
+        uint32_t now, uint32_t overallTimeout,
+        size_t budget = RX_SERVICE_BUDGET
+    ) {
+        if (snapshot.role != RuntimeState::runtimeRole(identity) ||
+            snapshot.deviceId != identity.localDeviceId() ||
+            runtimeState.role() != snapshot.role ||
+            runtimeState.localId() != identity.localDeviceId() ||
+            runtimeState.peerId() != identity.peerDeviceId()) {
+            return Result{};
+        }
+        return serviceRx(snapshot, identity.peerDeviceId(), registryValid,
+            registry, handler, interlock, capabilityDiagnostics, runtimeState,
+            availability, now, overallTimeout,
+            identity.hostRadioBridgeEnabled(), budget);
+    }
+
+    Result serviceRx(
+        const HostOperationService::DeviceSnapshot& snapshot,
         uint8_t peerId,
         bool registryValid,
         const DeviceCapabilities::CapabilityRegistryView& registry,

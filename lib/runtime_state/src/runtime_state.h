@@ -4,6 +4,7 @@
 
 #include "device_capabilities.h"
 #include "event_tx_diagnostics.h"
+#include "provisioning_snapshot.h"
 
 namespace RuntimeState {
 
@@ -11,6 +12,13 @@ enum class DeviceRole : uint8_t {
     HUB,
     NODE
 };
+
+inline DeviceRole runtimeRole(const ProvisioningRuntime::ProvisioningSnapshot& identity) {
+    // Explicit boundary conversion: persistent Role numeric values are not
+    // RuntimeState::DeviceRole values.
+    return identity.role() == DeviceIdentity::Role::HUB
+        ? DeviceRole::HUB : DeviceRole::NODE;
+}
 
 enum class RuntimePhase : uint8_t {
     IDLE,
@@ -178,7 +186,12 @@ enum class EventDiagnostic : uint8_t {
 
 class State {
 public:
-    // localId and peerId are immutable snapshots supplied by DeviceConfig.
+    explicit State(const ProvisioningRuntime::ProvisioningSnapshot& identity) :
+        State(runtimeRole(identity), identity.localDeviceId(),
+              identity.peerDeviceId()) {}
+
+    // Stage 8 compatibility: separate production mains still supply their
+    // build-specific identity here. New runtime composition uses the snapshot.
     State(DeviceRole role, uint8_t localId, uint8_t peerId) :
         role_(role),
         localId_(localId),

@@ -79,6 +79,13 @@ public:
 class Ledger {
 public:
     void setDiagnostics(RuntimeState::State* state) { diagnostics_ = state; }
+    Status recover(Storage& storage,
+                   const ProvisioningRuntime::ProvisioningSnapshot& identity) {
+        return recover(storage,
+            identity.role() == DeviceIdentity::Role::HUB
+                ? identity.localDeviceId() : 0,
+            identity.peerDeviceId());
+    }
     Status recover(Storage& storage, uint8_t hubDeviceId, uint8_t nodeDeviceId) {
         reset();
         storage_ = &storage;

@@ -33,6 +33,14 @@ struct HubResult {
 class HubAdapter {
 public:
     HubResult process(const uint8_t* bytes, size_t length,
+                      const ProvisioningRuntime::ProvisioningSnapshot& identity,
+                      HubEventLedger::Ledger& ledger,
+                      RuntimeState::State* diagnostics = nullptr) const {
+        if (identity.role() != DeviceIdentity::Role::HUB) return HubResult{};
+        return process(bytes, length, identity.localDeviceId(),
+                       identity.peerDeviceId(), ledger, diagnostics);
+    }
+    HubResult process(const uint8_t* bytes, size_t length,
                       uint8_t hubDeviceId, uint8_t nodeDeviceId,
                       HubEventLedger::Ledger& ledger,
                       RuntimeState::State* diagnostics = nullptr) const {

@@ -256,6 +256,18 @@ public:
 
 class Controller {
 public:
+    ControllerResult recover(NodeEventStore::Store& store,
+                             const ProvisioningRuntime::ProvisioningSnapshot& identity,
+                             SequenceSource& sequences, JitterSource& jitter,
+                             uint32_t nowMilliseconds,
+                             ::RuntimeState::State* diagnostics = nullptr,
+                             EventTxDiagnostics::Observer* observer = nullptr) {
+        return recover(store,
+                       identity.role() == DeviceIdentity::Role::NODE
+                           ? identity.localDeviceId() : 0,
+                       identity.peerDeviceId(),
+                       sequences, jitter, nowMilliseconds, diagnostics, observer);
+    }
     ControllerResult recover(NodeEventStore::Store& store, uint8_t sourceDeviceId,
                              uint8_t hubDeviceId, SequenceSource& sequences,
                              JitterSource& jitter, uint32_t nowMilliseconds,

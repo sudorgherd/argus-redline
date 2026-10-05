@@ -124,6 +124,18 @@ inline AdmissionResult admitNodeCommand(
     return {AdmissionOutcome::ADMITTED, Protocol::AckStatus::SUCCESS};
 }
 
+inline AdmissionResult admitNodeCommand(
+    const Protocol::Packet& command,
+    const ProvisioningRuntime::ProvisioningSnapshot& identity,
+    NodeRetainedOperation& retained
+) {
+    if (identity.role() != DeviceIdentity::Role::NODE) {
+        return {AdmissionOutcome::IGNORE, Protocol::AckStatus::SUCCESS};
+    }
+    return admitNodeCommand(command, identity.localDeviceId(),
+                            identity.peerDeviceId(), retained);
+}
+
 enum class PeerSupport : uint8_t { UNKNOWN, SUPPORTED, UNSUPPORTED };
 
 inline bool mayStartStructuredOperation(

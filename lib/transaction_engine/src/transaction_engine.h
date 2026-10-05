@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol.h"
+#include "provisioning_snapshot.h"
 
 namespace TransactionEngine {
 
@@ -135,6 +136,19 @@ inline NodeCommandEvaluation evaluateNodeCommand(
         NodeCommandOutcome::ACK_SUCCESS,
         Protocol::AckStatus::SUCCESS
     };
+}
+
+inline NodeCommandEvaluation evaluateNodeCommand(
+    const Protocol::Packet& command,
+    const ProvisioningRuntime::ProvisioningSnapshot& identity,
+    NodeDuplicateTracker& duplicateTracker
+) {
+    if (identity.role() != DeviceIdentity::Role::NODE) {
+        return {NodeCommandOutcome::IGNORE_WRONG_SENDER,
+                Protocol::AckStatus::SUCCESS};
+    }
+    return evaluateNodeCommand(command, identity.localDeviceId(),
+                               identity.peerDeviceId(), duplicateTracker);
 }
 
 enum class HubAckOutcome : uint8_t {
@@ -294,6 +308,18 @@ inline HubAckEvaluation evaluateHubAcknowledgment(
     }
 
     return {HubAckOutcome::MATCHING_ACK, acknowledgment.payload[0]};
+}
+
+inline HubAckEvaluation evaluateHubAcknowledgment(
+    const Protocol::Packet& acknowledgment,
+    const Protocol::Packet& outstandingCommand,
+    const ProvisioningRuntime::ProvisioningSnapshot& identity
+) {
+    if (identity.role() != DeviceIdentity::Role::HUB) {
+        return {HubAckOutcome::IGNORE_WRONG_SENDER, 0};
+    }
+    return evaluateHubAcknowledgment(acknowledgment, outstandingCommand,
+        identity.localDeviceId(), identity.peerDeviceId());
 }
 
 // Precondition: command was validated as addressed to the local Node.

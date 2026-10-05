@@ -90,6 +90,14 @@ class Store {
 public:
     void setDiagnostics(RuntimeState::State* state) { diagnostics_ = state; }
     Status recover(
+        Storage& storage, EventIdentity::EntropySource& entropy,
+        const ProvisioningRuntime::ProvisioningSnapshot& identity
+    ) {
+        return recover(storage, entropy,
+            identity.role() == DeviceIdentity::Role::NODE
+                ? identity.localDeviceId() : 0);
+    }
+    Status recover(
         Storage& storage,
         EventIdentity::EntropySource& entropy,
         uint8_t configuredSourceDeviceId
