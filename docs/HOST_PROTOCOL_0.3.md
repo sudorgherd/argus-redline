@@ -492,10 +492,13 @@ frame COBS/length/CRC/version/type/flags/request ID
 -> durable transaction
 ```
 
-Syntactic/geometry/schema/reserved/tail violations are
-`REQUEST_REJECTED/MALFORMED_REQUEST`. Semantic field, policy, generation,
-hardware, storage, and lifecycle outcomes use Section 19. No rejected request
-changes identity/Event/settings storage.
+Syntactic/geometry/known-flag/reserved/tail violations are
+`REQUEST_REJECTED/MALFORMED_REQUEST`. An exact-length, otherwise structurally
+valid provisioning request whose schema value is unsupported returns
+`PROVISIONING_RESULT/UNSUPPORTED_IDENTITY_SCHEMA` (`0x1D`) as assigned in
+Section 19. Semantic field, policy, generation, hardware, storage, and
+lifecycle outcomes use Section 19. No rejected request changes
+identity/Event/settings storage.
 
 ## 15. GET_PROVISIONING_STATUS
 
