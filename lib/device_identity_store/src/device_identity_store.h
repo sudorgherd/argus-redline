@@ -116,6 +116,14 @@ public:
 
     const Snapshot& snapshot() const { return current_; }
 
+    // The controller can reserve enough successors for PENDING and its final
+    // record without copying generation arithmetic into another layer.
+    bool canAdvanceRecordGeneration(uint32_t writes) const {
+        if (!recovered_ || !writableOutcome() || writes == 0) return false;
+        return !current_.hasAuthority ||
+            current_.record.recordGeneration <= UINT32_MAX - writes;
+    }
+
     // Recovery is read-only. An unknown schema in either copy prevents an
     // older Schema 1 copy from downgrading it or repairing over it.
     const Snapshot& recover(Storage& storage) {
@@ -186,8 +194,7 @@ public:
     WriteResult writeNext(Storage& storage, const DeviceIdentity::Record& proposal) {
         if (!recovered_ || !writableOutcome()) return WriteResult::NO_AUTHORITY;
         if (writeBlocked_) return WriteResult::RECOVERY_REQUIRED;
-        if (current_.hasAuthority &&
-            current_.record.recordGeneration == UINT32_MAX) {
+        if (!canAdvanceRecordGeneration(1)) {
             return WriteResult::GENERATION_EXHAUSTED;
         }
         DeviceIdentity::Record next = proposal;
@@ -228,6 +235,60 @@ public:
         target = {CopyCondition::VALID, DeviceIdentity::CodecResult::OK};
         current_ = published;
         repairAttempted_ = false;
+        return WriteResult::OK;
+    }
+
+    // Deliberate full-reset entry when there is no safe record-generation
+    // successor (or no unambiguous authority). Both copies must be verified
+    // as PENDING/FULL_RESET before any cross-domain reset may begin. This is
+    // the explicit reset/rebase path; ordinary recovery never overwrites an
+    // unknown schema. A torn first/second write leaves no destructive work
+    // started and must be recovered or deliberately retried.
+    WriteResult writeResetPendingFromInvalidOrExhausted(Storage& storage) {
+        if (!recovered_ || writeBlocked_) return WriteResult::RECOVERY_REQUIRED;
+        if (current_.outcome == Outcome::STORAGE_UNAVAILABLE) {
+            return WriteResult::NO_AUTHORITY;
+        }
+        if (current_.outcome != Outcome::INVALID_PROVISIONING &&
+            (!current_.hasAuthority || current_.outcome == Outcome::PENDING ||
+             canAdvanceRecordGeneration(2))) {
+            return WriteResult::NO_AUTHORITY;
+        }
+
+        const CopySlot first = current_.hasAuthority
+            ? otherSlot(current_.authoritativeSlot) : CopySlot::A;
+        const CopySlot second = otherSlot(first);
+        DeviceIdentity::Record pending = {};
+        pending.state = DeviceIdentity::DurableState::PENDING;
+        pending.transaction = DeviceIdentity::TransactionKind::FULL_RESET;
+        uint8_t firstBytes[DeviceIdentity::RECORD_SIZE] = {};
+        uint8_t secondBytes[DeviceIdentity::RECORD_SIZE] = {};
+        pending.recordGeneration = 1;
+        if (DeviceIdentity::encodeRecord(pending, firstBytes,
+                sizeof(firstBytes)) != DeviceIdentity::CodecResult::OK) {
+            return WriteResult::INVALID_RECORD;
+        }
+        pending.recordGeneration = 2;
+        if (DeviceIdentity::encodeRecord(pending, secondBytes,
+                sizeof(secondBytes)) != DeviceIdentity::CodecResult::OK) {
+            return WriteResult::INVALID_RECORD;
+        }
+        WriteResult result = writeAndVerify(storage, first, firstBytes);
+        if (result == WriteResult::OK) {
+            result = writeAndVerify(storage, second, secondBytes);
+        }
+        if (result != WriteResult::OK) {
+            writeBlocked_ = true;
+            return result;
+        }
+        const Snapshot& selected = recover(storage);
+        if (selected.outcome != Outcome::PENDING ||
+            selected.authoritativeSlot != second ||
+            !EventStorage::bytesEqual(
+                selected.bytes, secondBytes, DeviceIdentity::RECORD_SIZE)) {
+            writeBlocked_ = true;
+            return WriteResult::READBACK_INVALID;
+        }
         return WriteResult::OK;
     }
 
