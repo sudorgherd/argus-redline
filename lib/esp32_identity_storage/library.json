@@ -1,0 +1,9 @@
+{
+  "name": "esp32_identity_storage",
+  "version": "0.1.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "device_identity_store": "*"
+  }
+}
